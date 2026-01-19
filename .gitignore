@@ -26,5 +26,4 @@ __pycache__/
 *.dll
 *.exe
 
-# test.cc 生成的可执行文件
-test
+
