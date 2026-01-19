@@ -19,13 +19,12 @@ set(OpenCV_LIBS opencv_videoio opencv_imgcodecs opencv_imgproc opencv_core openc
 include_directories(
     /usr/local/include/opencv4
     ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/include/onnxruntime
+    /usr/local/include/onnxruntime
     ${PROJECT_SOURCE_DIR}/third_lib/kalman/include
     ${EIGEN3_INCLUDE_DIR}
 )
  
 link_directories(
-    ${PROJECT_SOURCE_DIR}/lib/onnxruntime   # 第三方动态库文件
     /usr/local/lib/
 )
  

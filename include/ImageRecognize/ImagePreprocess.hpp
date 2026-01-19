@@ -28,11 +28,11 @@
 #include <cstdint>
 #include <vector>
 
-namespace ImageRecognize {
+namespace ImagePreprocess {
 
 struct PreprocessResult {
   std::vector<float> data;
-  std::array<int64_t, 4> shape{1, 3, 1280, 720};  ///< 图像的形状：{batch, channel, height, width}
+  std::array<int64_t, 4> shape{1, 3, 640, 640};  ///< 图像的形状：{batch, channel, height, width}
 };
 
 class ImagePreprocess {
@@ -52,11 +52,8 @@ class ImagePreprocess {
     cv::Mat resized;
     cv::resize(input, resized, inputSize_);  // 调整图像大小
 
-    cv::Mat rgb;
-    cv::cvtColor(resized, rgb, cv::COLOR_BGR2RGB);  // BGR 转 RGB
-
     cv::Mat floatImage;
-    rgb.convertTo(floatImage, CV_32F, 1.0 / 255.0);  // 归一化处理
+    resized.convertTo(floatImage, CV_32F, 1.0 / 255.0);  // 归一化处理
 
     const int channels = floatImage.channels();
     const int height = floatImage.rows;
@@ -78,7 +75,7 @@ class ImagePreprocess {
   }
 
  private:
-  cv::Size inputSize_{1280, 720};
+  cv::Size inputSize_{640, 640};
 };
 
-}  // namespace ImageRecognize
+}  // namespace ImagePreprocess
