@@ -5,6 +5,25 @@
 #include <onnxruntime_cxx_api.h>
 #include <algorithm>
 #include <chrono>
+#include <vector>
+
+void print_output_info(Ort::Session& session) {
+  Ort::AllocatorWithDefaultOptions allocator;
+  size_t out_count = session.GetOutputCount();
+  for (size_t i = 0; i < out_count; ++i) {
+    char* name = session.GetOutputNameAllocated(i, allocator).get();
+    auto type_info = session.GetOutputTypeInfo(i);
+    auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+    auto elem_type = tensor_info.GetElementType();
+    auto dims = tensor_info.GetShape();
+    std::cout << "Output " << i << " name: " << name << "\n";
+    std::cout << "  dtype: " << elem_type << "\n";
+    std::cout << "  shape: [";
+    for (size_t j = 0; j < dims.size(); ++j) {
+      std::cout << dims[j] << (j + 1 < dims.size() ? ", " : "");
+    }
+  }
+}
 
 int main() {
   try {
@@ -81,24 +100,15 @@ int main() {
     Ort::Value input_tensor = Ort::Value::CreateTensor<float>(memory_info, input.data(), input.size(),
                                                               input_shape.data(), input_shape.size());
 
-    // 记录推理开始时间
-    auto start_time = std::chrono::high_resolution_clock::now();
-
     // Run the model (使用实际的节点名称，让模型自动分配输出)
     auto output_tensors =
         session.Run(Ort::RunOptions{nullptr}, input_node_names.data(), &input_tensor, 1, output_node_names.data(), 1);
 
-    // 记录推理结束时间
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::string window_name = std::to_string(duration.count()) + "ms";
-
-    // 获取输出张量信息
+    print_output_info(session);
+    std::cout << std::endl;
     auto& output_tensor = output_tensors[0];
     auto output_shape_info = output_tensor.GetTensorTypeAndShapeInfo();
     auto output_shape = output_shape_info.GetShape();
-
-    std::cout << "输出形状: [";
     for (size_t i = 0; i < output_shape.size(); ++i) {
       std::cout << output_shape[i];
       if (i < output_shape.size() - 1) std::cout << ", ";
@@ -107,84 +117,23 @@ int main() {
 
     // 获取输出数据
     float* output_data = output_tensor.GetTensorMutableData<float>();
-
-    // 解析检测结果并画框
-    cv::Mat display_image = image.clone();
-
-    // YOLOv8/YOLOv5 输出格式通常是 [batch, num_detections, 5+num_classes]
-    // 或者 [batch, 84/85, 8400] (转置格式)
-    if (output_shape.size() >= 2) {
-      int num_detections = 0;
-      int detection_size = 0;
-
-      // 判断输出格式
-      if (output_shape.size() == 3 && output_shape[2] > output_shape[1]) {
-        // 格式: [1, num_detections, detection_size]
-        num_detections = output_shape[1];
-        detection_size = output_shape[2];
-      } else if (output_shape.size() == 3 && output_shape[1] > output_shape[2]) {
-        // 格式: [1, detection_size, num_detections] - 需要转置
-        detection_size = output_shape[1];
-        num_detections = output_shape[2];
-      }
-
-      std::cout << "检测数量: " << num_detections << ", 检测维度: " << detection_size << std::endl;
-
-      float conf_threshold = 0.25;  // 置信度阈值
-      int detection_count = 0;
-
-      // 计算缩放比例（从 640x640 回到原始图像尺寸）
-      float scale_x = static_cast<float>(image.cols) / 640.0f;
-      float scale_y = static_cast<float>(image.rows) / 640.0f;
-
-      // 遍历检测结果
-      for (int i = 0; i < num_detections; ++i) {
-        float* detection;
-        if (output_shape.size() == 3 && output_shape[2] > output_shape[1]) {
-          detection = output_data + i * detection_size;
-        } else {
-          detection = output_data + i;
-        }
-
-        // YOLO 格式: [x_center, y_center, width, height, confidence, class_scores...]
-        float x_center = detection[0] * scale_x;
-        float y_center = detection[1] * scale_y;
-        float width = detection[2] * scale_x;
-        float height = detection[3] * scale_y;
-        float confidence = detection[4];
-
-        if (confidence > conf_threshold) {
-          // 转换为边界框坐标
-          int x1 = static_cast<int>(x_center - width / 2);
-          int y1 = static_cast<int>(y_center - height / 2);
-          int x2 = static_cast<int>(x_center + width / 2);
-          int y2 = static_cast<int>(y_center + height / 2);
-
-          // 画框
-          cv::rectangle(display_image, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 0), 2);
-
-          // 显示置信度
-          std::string label = cv::format("%.2f", confidence);
-          cv::putText(display_image, label, cv::Point(x1, y1 - 5), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0),
-                      1);
-
-          detection_count++;
-        }
-      }
-
-      std::cout << "检测到 " << detection_count << " 个目标" << std::endl;
+    int num_detections = 0;
+    int detection_size = 0;
+    if (output_shape.size() == 3 && output_shape[2] > output_shape[1]) {
+      // 格式: [1, num_detections, detection_size]
+      num_detections = output_shape[1];
+      detection_size = output_shape[2];
+    } else if (output_shape.size() == 3 && output_shape[1] > output_shape[2]) {
+      // 格式: [1, detection_size, num_detections] - 需要转置
+      detection_size = output_shape[1];
+      num_detections = output_shape[2];
     }
 
-    // 添加推理时间标注
-    cv::putText(display_image, window_name, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
-
-    cv::imshow(window_name, display_image);
-    std::cout << "推理时间: " << window_name << std::endl;
-    cv::waitKey(0);
-
     return 0;
-  } catch (const std::exception& e) {
-    std::cerr << "异常: " << e.what() << std::endl;
+  }
+
+  catch (const Ort::Exception& e) {
+    std::cerr << "ONNX Runtime 错误: " << e.what() << " 状态码: " << e.GetOrtErrorCode() << std::endl;
     return -1;
   }
 }

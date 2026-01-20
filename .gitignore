@@ -1,5 +1,6 @@
 # Ignore build artifacts
 build/
+**/build/
 
 # Editor and OS temp files
 *~
@@ -19,11 +20,32 @@ Thumbs.db
 __pycache__/
 *.py[cod]
 
-# Compiled binaries and objects
+# CMake 生成物
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/CTestTestfile.cmake
+**/install_manifest.txt
+**/Testing/
+
+# 对象/静态库/动态库
 *.o
-*.so
+*.obj
+*.lo
+*.la
 *.a
+*.lib
+*.so
+*.dylib
 *.dll
+
+# 可执行/输出
 *.exe
+*.out
 
+# 调试符号
+*.pdb
 
+# 通用临时文件（可选）
+*.log
+*.tmp

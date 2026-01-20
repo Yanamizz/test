@@ -52,8 +52,11 @@ class ImagePreprocess {
     cv::Mat resized;
     cv::resize(input, resized, inputSize_);  // 调整图像大小
 
+    cv::Mat rgbImage;
+    cv::cvtColor(resized, rgbImage, cv::COLOR_BGR2RGB);  // 转换颜色空间 BGR -> RGB
+
     cv::Mat floatImage;
-    resized.convertTo(floatImage, CV_32F, 1.0 / 255.0);  // 归一化处理
+    rgbImage.convertTo(floatImage, CV_32F, 1.0 / 255.0);  // 归一化处理
 
     const int channels = floatImage.channels();
     const int height = floatImage.rows;
