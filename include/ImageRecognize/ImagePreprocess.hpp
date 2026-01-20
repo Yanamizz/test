@@ -1,22 +1,6 @@
 /**
- * @file    include\ImageRecognize\ImagePreprocess.hpp
- * @brief   本文件功能图像预处理。
- *
- * @date    2026-01-18
- *
- * @brief   主要实现功能：
- * @brief   传入图像（cv::Mat），进行预处理，输出处理后的数组{batch, channel, height, width}作为onnx模型的输入。
- *
- *
- *
- * @brief   预处理包括：
- * @brief   1. 调整图像大小（1280*720）。
- * @brief   2. 归一化处理（像素值缩放到0-1之间）。
- * @brief   3. 转换颜色空间（BGR转RGB）。
- * @brief   4. 转换数据格式（HWC转CHW）。
- * @brief   5. 增加batch维度。
- *
-
+ * @file    include/ImageRecognize/ImagePreprocess.hpp
+ * @brief   提供图像预处理工具，将输入的cv::Mat标准化为ONNX模型可用的张量数据。
  */
 
 #pragma once
@@ -30,18 +14,29 @@
 
 namespace ImagePreprocess {
 
+/**
+ * @brief 预处理结果的容器，包含平铺的数据和对应的形状信息。
+ */
 struct PreprocessResult {
-  std::vector<float> data;
+  std::vector<float> data;                       ///< 预处理后的平铺数据，按CHW顺序存储
   std::array<int64_t, 4> shape{1, 3, 640, 640};  ///< 图像的形状：{batch, channel, height, width}
 };
 
+/**
+ * @brief 图像预处理类：负责尺寸变换、颜色空间转换、归一化以及HWC->CHW的重排。
+ */
 class ImagePreprocess {
  public:
   ImagePreprocess() = default;
 
   explicit ImagePreprocess(cv::Size inputSize) : inputSize_(inputSize) {}
 
-  PreprocessResult run(const cv::Mat& input) const {
+  /**
+   * @brief 对输入图像执行预处理并返回张量化结果。
+   * @param[in] input 输入的BGR格式图像，使用cv::Mat存储。
+   * @returns 包含CHW顺序数据和形状信息的预处理结果；若输入为空则返回空数据和默认形状。
+   */
+  PreprocessResult run(const cv::Mat &input) const {
     PreprocessResult result{};
     result.shape = {1, 3, inputSize_.height, inputSize_.width};
 
@@ -49,36 +44,35 @@ class ImagePreprocess {
       return result;
     }
 
-    cv::Mat resized;
-    cv::resize(input, resized, inputSize_);  // 调整图像大小
+    cv::Mat resized_;
+    cv::resize(input, resized_, inputSize_);  // 调整图像大小
 
-    cv::Mat rgbImage;
-    cv::cvtColor(resized, rgbImage, cv::COLOR_BGR2RGB);  // 转换颜色空间 BGR -> RGB
+    cv::Mat rgbImage_;
+    cv::cvtColor(resized_, rgbImage_, cv::COLOR_BGR2RGB);  // 转换颜色空间 BGR -> RGB
+    cv::Mat floatImage_;
+    rgbImage_.convertTo(floatImage_, CV_32F, 1.0 / 255.0);  // 归一化处理
 
-    cv::Mat floatImage;
-    rgbImage.convertTo(floatImage, CV_32F, 1.0 / 255.0);  // 归一化处理
+    const int channels_ = floatImage_.channels();
+    const int height_ = floatImage_.rows;
+    const int width_ = floatImage_.cols;
 
-    const int channels = floatImage.channels();
-    const int height = floatImage.rows;
-    const int width = floatImage.cols;
+    result.data.resize(static_cast<size_t>(channels_ * height_ * width_));
 
-    result.data.resize(static_cast<size_t>(channels * height * width));
-
-    std::vector<cv::Mat> splitChannels;
-    cv::split(floatImage, splitChannels);
-    size_t offset = 0;
-    for (int c = 0; c < channels; ++c) {
-      const float* channelPtr = splitChannels[c].ptr<float>(0);
-      const size_t channelSize = static_cast<size_t>(height * width);
-      std::copy(channelPtr, channelPtr + channelSize, result.data.begin() + offset);  // HWC 转 CHW
-      offset += channelSize;
+    std::vector<cv::Mat> splitChannels_;
+    cv::split(floatImage_, splitChannels_);
+    size_t offset_ = 0;
+    for (int c = 0; c < channels_; ++c) {
+      const float *channelPtr_ = splitChannels_[c].ptr<float>(0);
+      const size_t channelSize_ = static_cast<size_t>(height_ * width_);
+      std::copy(channelPtr_, channelPtr_ + channelSize_, result.data.begin() + offset_);  // HWC 转 CHW
+      offset_ += channelSize_;
     }
 
     return result;
   }
 
  private:
-  cv::Size inputSize_{640, 640};
+  cv::Size inputSize_{640, 640};  ///< 模型期望的输入尺寸
 };
 
 }  // namespace ImagePreprocess

@@ -34,17 +34,42 @@ class ImagePredict {
  public:
   ImagePredict() = default;
 
-  PredictResult run(const cv::Mat& origin_image) const {
-    PredictResult result{};
-    auto pre_image = preprocessor_.run(origin_image);
+  PredictResult run(const cv::Mat &origin_image, std::string model_path_) const {
+    PredictResult result_{};
 
-    return result;
+    ImagePreprocess::ImagePreprocess preprocessor_{cv::Size(640, 640)};
+    auto pre_image_ = preprocessor_.run(origin_image);
+
+    Ort::Session session_{env_, model_path_.c_str(), Ort::SessionOptions{nullptr}};
+
+    size_t num_input_nodes_ = session_.GetInputCount();
+    size_t num_output_nodes_ = session_.GetOutputCount();
+    const char *input_names_[] = {"xxx"};
+    const char *output_names_[] = {"xxx"};
+
+    std::array<int64_t, 4> input_shape_{1, 3, height_, width_};  // NCHW, 1x3xHxW
+    auto memory_info_ = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::Value input_tensor_ = Ort::Value::CreateTensor<float>(
+        memory_info_, pre_image_.data.data(), pre_image_.data.size(), input_shape_.data(), input_shape_.size());
+
+    auto memory_info_ = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+
+    const char *input_names_[] = {"input"};
+    const char *output_names_[] = {"output"};
+
+    auto output_tensors_ =
+        session_.Run(Ort::RunOptions{nullptr}, input_names_, &input_tensor_, 1, output_names_, &output_tensor_, 1);
+
+    result_ = OutputDataProcess::OutputDataProcess().run(output_tensors_[0], origin_image.size());
+
+    return result_;
   }
 
  private:
-  ImagePreprocess::ImagePreprocess preprocessor_{cv::Size(640, 640)};
   Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "predict"};
   Ort::SessionOptions session_options_;
+  static constexpr const int width_ = 640;
+  static constexpr const int height_ = 640;
   // Ort::Session session_{env_, model_path.c_str(), session_options_}; // 需要 model 路径时再初始化
 };
 
