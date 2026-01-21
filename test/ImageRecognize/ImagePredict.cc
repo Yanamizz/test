@@ -7,38 +7,65 @@
 #include <chrono>
 #include <vector>
 
-struct boxs {
-  std::vector<std::array<float, 5>> boxes;  // 每个检测框包含 [x1, y1, x2, y2, score]
-};
-
 int main() {
   try {
-    // 加载测试图像
-    std::string image_path = "/home/hanni/code/rm/test/ImageRecognize/data/test.jpg";
+    // 模型路径
     std::string model_path = "/home/hanni/code/rm/test/ImageRecognize/model/best.onnx";
-    cv::Mat image = cv::imread(image_path);
+    ImagePredict::ImagePredict predictor(model_path);  // 复用会话
 
-    if (image.empty()) {
-      std::cerr << "无法加载图像: " << image_path << std::endl;
+    // 打开默认摄像头（可改为 1、2... 指定设备）
+    cv::VideoCapture cap(0);
+    if (!cap.isOpened()) {
+      std::cerr << "无法打开摄像头" << std::endl;
       return -1;
     }
+    // 可选：设置分辨率
+    // cap.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
+    // cap.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
 
-    auto start_time = std::chrono::high_resolution_clock::now();
-    boxs boxes = ImagePredict::ImagePredict predictor.predict(image, model_path);
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::string window_name = std::to_string(duration.count()) + "ms";
-    std::cout << "推理时间: " << duration.count() << " 毫秒" << std::endl;
+    cv::Mat frame;
+    int frame_count = 0;
+    double fps = 0.0;
+    auto last_fps_time = std::chrono::steady_clock::now();
+    while (true) {
+      if (!cap.read(frame) || frame.empty()) {
+        std::cerr << "读取摄像头帧失败" << std::endl;
+        break;
+      }
 
-    for (const auto &box : boxes.boxes) {
-      cv::rectangle(image, cv::Point(static_cast<int>(box[0]), static_cast<int>(box[1])),
-                    cv::Point(static_cast<int>(box[2]), static_cast<int>(box[3])), cv::Scalar(0, 255, 0), 2);
-      std::string score_text = std::to_string(box[4]);
-      cv::putText(image, score_text, cv::Point(static_cast<int>(box[0]), static_cast<int>(box[1]) - 10),
-                  cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
+      auto t0 = std::chrono::high_resolution_clock::now();
+      auto result = predictor.run(frame);
+      auto t1 = std::chrono::high_resolution_clock::now();
+      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+      // 更新 FPS（滑动窗口约 0.5s）
+      frame_count++;
+      auto now = std::chrono::steady_clock::now();
+      auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_fps_time).count();
+      if (elapsed_ms >= 500) {
+        fps = static_cast<double>(frame_count) * 1000.0 / static_cast<double>(elapsed_ms);
+        frame_count = 0;
+        last_fps_time = now;
+      }
+
+      // 绘制结果
+      for (const auto &box : result.boxes) {
+        cv::rectangle(frame, {static_cast<int>(box[0]), static_cast<int>(box[1])},
+                      {static_cast<int>(box[2]), static_cast<int>(box[3])}, {0, 255, 0}, 2);
+        cv::putText(frame, std::to_string(box[4]),
+                    {static_cast<int>(box[0]), std::max(0, static_cast<int>(box[1]) - 6)}, cv::FONT_HERSHEY_SIMPLEX,
+                    0.5, {0, 255, 0}, 1);
+      }
+
+      // FPS/耗时显示
+      cv::putText(frame, std::to_string(ms) + " ms", {10, 30}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 255}, 2);
+      cv::putText(frame, "FPS: " + std::to_string(static_cast<int>(fps + 0.5)), {10, 65}, cv::FONT_HERSHEY_SIMPLEX, 1.0,
+                  {0, 200, 255}, 2);
+      cv::imshow("ImagePredict - Camera", frame);
+      // 按 q 退出
+      char key = static_cast<char>(cv::waitKey(1));
+      if (key == 'q' || key == 27) break;
     }
-    cv::imshow(window_name, image);
-    cv::waitKey(0);
   }
 
   catch (const Ort::Exception &e) {
