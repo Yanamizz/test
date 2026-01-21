@@ -5,6 +5,8 @@
             "label": "C/C++: g++-13 生成活动文件",
             "command": "/usr/bin/g++-13",
             "args": [
+                "-O2",
+                "-DNDEBUG",
                 "-fdiagnostics-color=always",
                 "-g",
                 "${file}",

@@ -13,19 +13,25 @@ int main() {
     std::string model_path = "/home/hanni/code/rm/test/ImageRecognize/model/best.onnx";
     ImagePredict::ImagePredict predictor(model_path);  // 复用会话
 
-    // 打开默认摄像头（可改为 1、2... 指定设备）
     cv::VideoCapture cap(0);
-    if (!cap.isOpened()) {
-      std::cerr << "无法打开摄像头" << std::endl;
-      return -1;
+    // 打开摄像头，优先用 V4L2 后端，失败则回退
+    cap.release();  // Release the previous capture before re-opening
+    if (!cap.open("/dev/video0", cv::CAP_V4L2)) {
+      std::cerr << "V4L2 打开 /dev/video0 失败，尝试 CAP_ANY/index 0" << std::endl;
+      if (!cap.open(0, cv::CAP_ANY)) {
+        std::cerr << "无法打开摄像头" << std::endl;
+        return -1;
+      }
     }
-    // 可选：设置分辨率
-    // cap.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
-    // cap.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+    // 设置常见支持格式与分辨率/FPS（根据设备能力，可能被驱动调整）
+    cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));  // 优先 MJPG，降低解码成本
+    cap.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
+    cap.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
 
     cv::Mat frame;
     int frame_count = 0;
     double fps = 0.0;
+
     auto last_fps_time = std::chrono::steady_clock::now();
     while (true) {
       if (!cap.read(frame) || frame.empty()) {
@@ -55,6 +61,11 @@ int main() {
         cv::putText(frame, std::to_string(box[4]),
                     {static_cast<int>(box[0]), std::max(0, static_cast<int>(box[1]) - 6)}, cv::FONT_HERSHEY_SIMPLEX,
                     0.5, {0, 255, 0}, 1);
+
+        // 计算并绘制中心点：((x1+x2)/2, (y1+y2)/2)
+        int cx = static_cast<int>((box[0] + box[2]) * 0.5f);
+        int cy = static_cast<int>((box[1] + box[3]) * 0.5f);
+        cv::circle(frame, {cx, cy}, 4, {0, 0, 255}, -1);
       }
 
       // FPS/耗时显示

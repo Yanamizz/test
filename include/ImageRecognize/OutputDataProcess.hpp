@@ -113,13 +113,21 @@ class OutputDataProcess {
       for (size_t oj = oi + 1; oj < order.size(); ++oj) {
         int j = order[oj];
         if (removed[j]) continue;
-        if (iou_(boxes[i], boxes[j]) > iou_thresh) removed[j] = 1;
+        if (iou_(boxes[i], boxes[j]) > iou_thresh) {
+          if (boxes[i][4] >= boxes[j][4]) {
+            removed[j] = 1;
+          } else {
+            removed[i] = 1;
+            keep.pop_back();
+            break;
+          }
+        }
       }
     }
     return keep;
   }
   cv::Size cut_size_{640, 640};  ///< 预处理/模型输入的基准尺寸（用于反缩放）
-  float set_score_{0.9f};        ///< 分数阈值，低于该值的候选将被丢弃
+  float set_score_{0.8f};        ///< 分数阈值，低于该值的候选将被丢弃
   float nms_iou_thresh_{0.5f};   ///< NMS 的 IoU 阈值
 };
 }  // namespace OutputDataProcess

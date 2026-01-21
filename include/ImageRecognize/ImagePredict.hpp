@@ -51,7 +51,11 @@ class ImagePredict {
     ImagePreprocess::ImagePreprocess preprocessor_{cv::Size(width_, height_)};
     auto pre_image_ = preprocessor_.run(origin_image_);
 
-    Ort::Session session_{env_, model_path_.c_str(), Ort::SessionOptions{nullptr}};
+    Ort::SessionOptions opts{};
+    opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    opts.SetIntraOpNumThreads(4);  // 根据 CPU 核心数调整
+
+    Ort::Session session_{env_, model_path_.c_str(), opts};
 
     Ort::AllocatorWithDefaultOptions allocator_{};
     if (session_.GetInputCount() != 1 || session_.GetOutputCount() != 1) {
