@@ -1,114 +1,170 @@
+/**
+ * @file examples/DroneTrackingUKF/main.cpp
+ * @brief 使用UKF进行二维目标（无人机）运动状态估计的完整示例（位置+速度）
+ *
+ * @brief 本文件演示如何基于 mherb/kalman 使用 Unscented Kalman Filter (UKF)
+ *        对视觉测量的目标位置进行预测与滤波。
+ * @brief 状态向量为 [px, py, vx, vy]，观测向量为 [px, py]
+ * @brief 你可以根据实际需求将状态扩展为 3D 或加入加速度/角速度等变量
+ */
+
 #pragma once
 
-#include <Eigen/Dense>
-#include <cmath>
-
-#include <kalman/SystemModel.hpp>
-#include <kalman/LinearizedMeasurementModel.hpp>
-#include <kalman/ExtendedKalmanFilter.hpp>
 #include <kalman/UnscentedKalmanFilter.hpp>
-#include <kalman/Matrix.hpp>
 
+#include <Eigen/Dense>
 #include <iostream>
-#include <random>
-#include <chrono>
-#include <opencv2/core.hpp>
 
-/** 状态向量 [x, y, vx, vy] */
-struct State : public Kalman::Vector<double, 4> {
-  KALMAN_VECTOR(State, double, 4)
-  enum { X, Y, VX, VY };
-};
-
-/** 观测向量 [x, y] */
-struct Measurement : public Kalman::Vector<double, 2> {
-  KALMAN_VECTOR(Measurement, double, 2)
-  enum { MX, MY };
-};
-
-/** 二维匀速系统模型：x_k = x_{k-1} + vx*dt, y_k = y_{k-1} + vy*dt */
-class SystemModel : public Kalman::LinearizedSystemModel<State> {
+/**
+ * @brief 定义UKF用到的状态向量
+ *
+ * @note 状态 x = [px, py, vx, vy]
+ * @note px, py 为目标在像素坐标中的位置；vx, vy 为像素速度
+ */
+template <typename T>
+class DroneState : public Kalman::Vector<T, 4> {
  public:
-  explicit SystemModel(double dt = 0.016) : dt_(dt) {}
+  KALMAN_VECTOR(DroneState, T, 4)
 
-  void setDt(double dt_seconds) { dt_ = dt_seconds; }
+  /**
+   * @brief x 方向位置
+   */
+  T px() const { return (*this)[0]; }
+  T& px() { return (*this)[0]; }
 
-  State f(const State &prev_state) const override {
-    State x_pred;
-    x_pred(State::X) = prev_state(State::X) + prev_state(State::VX) * dt_;
-    x_pred(State::Y) = prev_state(State::Y) + prev_state(State::VY) * dt_;
-    x_pred(State::VX) = prev_state(State::VX);
-    x_pred(State::VY) = prev_state(State::VY);
-    return x_pred;
-  }
+  /**
+   * @brief y 方向位置
+   */
+  T py() const { return (*this)[1]; }
+  T& py() { return (*this)[1]; }
 
-  Kalman::Jacobian<State> getJacobianF(const State &) const override {
-    Kalman::Jacobian<State> F = Kalman::Jacobian<State>::Identity();
-    F(State::X, State::VX) = dt_;
-    F(State::Y, State::VY) = dt_;
-    return F;
+  /**
+   * @brief x 方向速度
+   */
+  T vx() const { return (*this)[2]; }
+  T& vx() { return (*this)[2]; }
+
+  /**
+   * @brief y 方向速度
+   */
+  T vy() const { return (*this)[3]; }
+  T& vy() { return (*this)[3]; }
+};
+
+/**
+ * @brief 控制输入（若无控制可忽略）
+ *
+ * @note 这里保留空控制输入结构，接口一致
+ */
+template <typename T>
+class DroneControl : public Kalman::Vector<T, 0> {
+ public:
+  KALMAN_VECTOR(DroneControl, T, 0)
+};
+
+/**
+ * @brief 系统模型（状态转移模型）
+ *
+ * @note 实现恒速度模型：
+ *       px' = px + vx * dt
+ *       py' = py + vy * dt
+ *       vx' = vx
+ *       vy' = vy
+ */
+template <typename T>
+class DroneSystemModel : public Kalman::SystemModel<DroneState<T>, DroneControl<T>> {
+ public:
+  /**
+   * @brief 构造函数，设置时间步长 dt
+   * @param dt 时间间隔（秒）
+   */
+  explicit DroneSystemModel(T dt) : dt_(dt) {}
+
+  /**
+   * @brief 状态转移函数 f(x, u)
+   * @param x 当前状态
+   * @param u 控制输入（本例未使用）
+   * @return 下一时刻状态
+   */
+  DroneState<T> f(const DroneState<T>& x, const DroneControl<T>& u) const override {
+    (void)u;  // 控制输入未使用
+    DroneState<T> x_next;
+    x_next.px() = x.px() + x.vx() * dt_;
+    x_next.py() = x.py() + x.vy() * dt_;
+    x_next.vx() = x.vx();
+    x_next.vy() = x.vy();
+    return x_next;
   }
 
  private:
-  double dt_;  ///< 时间步长（秒）
+  T dt_;  ///< 时间步长
 };
 
-/** 观测模型：直接观测位置 [x, y] */
-class MeasurementModel : public Kalman::LinearizedMeasurementModel<State, Measurement> {
+/**
+ * @brief 位置观测向量 z = [px, py]
+ */
+template <typename T>
+class DroneMeasurement : public Kalman::Vector<T, 2> {
  public:
-  Measurement h(const State &state) const override {
-    Measurement z;
-    z(Measurement::MX) = state(State::X);
-    z(Measurement::MY) = state(State::Y);
+  KALMAN_VECTOR(DroneMeasurement, T, 2)
+
+  /**
+   * @brief 测量的 x 方向位置
+   */
+  T px() const { return (*this)[0]; }
+  T& px() { return (*this)[0]; }
+
+  /**
+   * @brief 测量的 y 方向位置
+   */
+  T py() const { return (*this)[1]; }
+  T& py() { return (*this)[1]; }
+};
+
+/**
+ * @brief 观测模型 h(x)
+ *
+ * @note 本模型仅测量位置，不测量速度
+ */
+template <typename T>
+class DroneMeasurementModel : public Kalman::MeasurementModel<DroneState<T>, DroneMeasurement<T>> {
+ public:
+  /**
+   * @brief 观测模型函数 h(x)
+   * @param x 当前状态
+   * @return 观测值 z
+   */
+  DroneMeasurement<T> h(const DroneState<T>& x) const override {
+    DroneMeasurement<T> z;
+    z.px() = x.px();
+    z.py() = x.py();
     return z;
   }
 
-  Kalman::Jacobian<Measurement, State> getJacobianH(const State &) const override {
-    Kalman::Jacobian<Measurement, State> H = Kalman::Jacobian<Measurement, State>::Zero();
-    H(Measurement::MX, State::X) = 1.0;
-    H(Measurement::MY, State::Y) = 1.0;
-    return H;
-  }
-};
-
-/** 2D 目标跟踪器：输入检测框，输出平滑中心点和速度 */
-class Tracker2D {
- public:
-  Tracker2D() { init(); }
-
-  void init() {
-    State x0;
-    x0.setZero();
-    kf_.init(x0);
-    // 可按需要调整 Q/R/P
-    kf_.setProcessNoise(Kalman::Covariance<State>::Identity() * 1e-3);            // Q
-    kf_.setMeasurementNoise(Kalman::Covariance<Measurement>::Identity() * 1e-2);  // R
-    kf_.setStateCovariance(Kalman::Covariance<State>::Identity());                // P0
-  }
-
   /**
-   * @param bbox_rect 检测框 (x,y,w,h)，像素
-   * @param dt_seconds 帧间隔（秒）
-   * @return 滤波后中心点 (x,y)
+   *
+   * @brief 主函数调用
+   *
+   * @param[in] x,y  当前状态
+   * @return 观测值 z
    */
-  Eigen::Vector2d update(const cv::Rect &bbox_rect, double dt_seconds) {
-    sys_.setDt(dt_seconds);
-    kf_.predict(sys_);
-    Measurement z;
-    z(Measurement::MX) = bbox_rect.x + bbox_rect.width * 0.5;
-    z(Measurement::MY) = bbox_rect.y + bbox_rect.height * 0.5;
-    auto x_post = kf_.update(meas_, z);
-    return {x_post(State::X), x_post(State::Y)};
-  }
 
-  /** 当前估计速度 (vx, vy) */
-  Eigen::Vector2d velocity() const {
-    const auto &x = kf_.getState();
-    return {x(State::VX), x(State::VY)};
+  class DronePredict {
+   public:
+    DroneMeasurement<T> operator()(int x, int y, T dt) const {
+      DroneState<T> x0;
+      x0.setZero();
+      DroneSystemModel<T> sys(dt);
+      DroneControl<T> u;
+      DroneMeasurementModel<T> measModel;
+      Kalman::UnscentedKalmanFilter<DroneState<T>> ukf(1.0f);
+      ukf.init(x0);
+      DroneMeasurement<T> z;
+      z.px() = x;
+      z.py() = y;
+      DroneState<T> x_pred = ukf.predict(sys, u);
+      DroneState<T> x_est = ukf.update(measModel, z);
+      return [ z.px(), z.py() ];
+    }
   }
-
- private:
-  SystemModel sys_;
-  MeasurementModel meas_;
-  Kalman::ExtendedKalmanFilter<State> kf_;
 };

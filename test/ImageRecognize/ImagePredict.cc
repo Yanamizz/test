@@ -55,8 +55,8 @@ int main() {
         last_fps_time = now;
       }
 
-      ImageShow::drawAndShow(frame, result, ms, fps);
-      if (ImageShow::waitForExit()) break;
+      ImageShow::DrawAndShow(frame, result, ms, fps);
+      if (ImageShow::WaitForExit()) break;
     }
   }
 

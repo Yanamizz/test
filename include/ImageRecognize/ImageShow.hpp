@@ -14,7 +14,7 @@ class ImageShow {
    * @param ms 推理耗时（毫秒）
    * @param fps 当前FPS
    */
-  static void drawAndShow(cv::Mat& frame, const OutputDataProcess::DataProcessResult& result, double ms, double fps) {
+  static void DrawAndShow(cv::Mat& frame, const OutputDataProcess::DataProcessResult& result, double ms, double fps) {
     // 绘制结果
     for (const auto& box : result.boxes) {
       cv::rectangle(frame, {static_cast<int>(box[0]), static_cast<int>(box[1])},
@@ -39,7 +39,7 @@ class ImageShow {
    * @brief 等待按键退出
    * @return true 如果按q或ESC退出
    */
-  static bool waitForExit() {
+  static bool WaitForExit() {
     char key = static_cast<char>(cv::waitKey(1));
     return (key == 'q' || key == 27);
   }
