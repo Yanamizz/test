@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include "OutputDataProcess.hpp"
+#include <Eigen/Dense>
 
 class ImageShow {
  public:
@@ -14,13 +15,13 @@ class ImageShow {
    * @param ms 推理耗时（毫秒）
    * @param fps 当前FPS
    */
-  static void DrawAndShow(cv::Mat& frame, const OutputDataProcess::DataProcessResult& result, double ms, double fps) {
+  static void ShowNow(cv::Mat& frame, const OutputDataProcess::DataProcessResult& result, double ms, double fps) {
     // 绘制结果
     for (const auto& box : result.boxes) {
       cv::rectangle(frame, {static_cast<int>(box[0]), static_cast<int>(box[1])},
                     {static_cast<int>(box[2]), static_cast<int>(box[3])}, {0, 255, 0}, 2);
-      cv::putText(frame, std::to_string(box[4]), {static_cast<int>(box[0]), std::max(0, static_cast<int>(box[1]) - 6)},
-                  cv::FONT_HERSHEY_SIMPLEX, 0.5, {0, 255, 0}, 1);
+      cv::putText(frame, "Now", {static_cast<int>(box[0]), static_cast<int>(box[1]) - 6}, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                  {0, 255, 0}, 1);
 
       // 计算并绘制中心点：((x1+x2)/2, (y1+y2)/2)
       int cx = static_cast<int>((box[0] + box[2]) * 0.5f);
@@ -34,11 +35,25 @@ class ImageShow {
                 {0, 200, 255}, 2);
     cv::imshow("ImagePredict - Camera", frame);
   }
+  /**
+   * @brief 绘制卡尔曼滤波预测位置
+   * @param frame 输入输出图像帧
+   * @param predict_center 预测中心点 (x, y)
+   * @param w 框宽度
+   * @param h 框高度
+   */
+  static void ShowPredict(cv::Mat& frame, const Eigen::Vector2d& predict_center, float w, float h) {
+    int x = static_cast<int>(predict_center[0] - w / 2);
+    int y = static_cast<int>(predict_center[1] - h / 2);
+    cv::rectangle(frame, cv::Point(x, y), cv::Point(x + static_cast<int>(w), y + static_cast<int>(h)),
+                  cv::Scalar(255, 0, 0), 2);
+    cv::putText(frame, "Predict", cv::Point(x, y - 6), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 0, 0), 1);
+    cv::imshow("ImagePredict - Camera", frame);
+  }
 
   /**
    * @brief 等待按键退出
-   * @return true 如果按q或ESC退出
-   */
+   *@ return true 如果按q或ESC退出 */
   static bool WaitForExit() {
     char key = static_cast<char>(cv::waitKey(1));
     return (key == 'q' || key == 27);

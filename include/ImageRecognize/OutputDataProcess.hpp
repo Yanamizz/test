@@ -72,6 +72,10 @@ class OutputDataProcess {
         x2 *= scale_x_;
         y2 *= scale_y_;
 
+        float w_h_ratio_ = w / h;
+        if (w_h_ratio_ < w_h_scale_ || (1.0f / w_h_ratio_) < w_h_scale_) {
+          continue;
+        }
         result_.boxes.push_back({x1, y1, x2, y2, score});
       }
     }
@@ -102,9 +106,9 @@ class OutputDataProcess {
     std::vector<int> order(boxes.size());
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&](int a, int b) { return boxes[a][4] > boxes[b][4]; });
-
     std::vector<char> removed(boxes.size(), 0);
     std::vector<std::array<float, 5>> keep;
+
     keep.reserve(boxes.size());
     for (size_t oi = 0; oi < order.size(); ++oi) {
       int i = order[oi];
@@ -127,7 +131,8 @@ class OutputDataProcess {
     return keep;
   }
   cv::Size cut_size_{640, 640};  ///< 预处理/模型输入的基准尺寸（用于反缩放）
-  float set_score_{0.8f};        ///< 分数阈值，低于该值的候选将被丢弃
+  float set_score_{0.9f};        ///< 分数阈值，低于该值的候选将被丢弃
   float nms_iou_thresh_{0.5f};   ///< NMS 的 IoU 阈值
+  float w_h_scale_{0.8f};        ///< 长宽比阈值
 };
 }  // namespace OutputDataProcess
