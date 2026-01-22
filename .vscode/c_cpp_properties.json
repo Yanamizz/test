@@ -4,6 +4,7 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/include/**",
+                "${workspaceFolder}/third_lib/kalman/include",
                 "/usr/local/include/opencv4",
                 "/usr/local/include/onnxruntime",
                 "/usr/local/include/eigen3"

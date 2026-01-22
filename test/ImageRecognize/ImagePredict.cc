@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <vector>
+#include "ImageRecognize/ImageShow.hpp"
 
 int main() {
   try {
@@ -54,28 +55,8 @@ int main() {
         last_fps_time = now;
       }
 
-      // 绘制结果
-      for (const auto &box : result.boxes) {
-        cv::rectangle(frame, {static_cast<int>(box[0]), static_cast<int>(box[1])},
-                      {static_cast<int>(box[2]), static_cast<int>(box[3])}, {0, 255, 0}, 2);
-        cv::putText(frame, std::to_string(box[4]),
-                    {static_cast<int>(box[0]), std::max(0, static_cast<int>(box[1]) - 6)}, cv::FONT_HERSHEY_SIMPLEX,
-                    0.5, {0, 255, 0}, 1);
-
-        // 计算并绘制中心点：((x1+x2)/2, (y1+y2)/2)
-        int cx = static_cast<int>((box[0] + box[2]) * 0.5f);
-        int cy = static_cast<int>((box[1] + box[3]) * 0.5f);
-        cv::circle(frame, {cx, cy}, 4, {0, 0, 255}, -1);
-      }
-
-      // FPS/耗时显示
-      cv::putText(frame, std::to_string(ms) + " ms", {10, 30}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 255}, 2);
-      cv::putText(frame, "FPS: " + std::to_string(static_cast<int>(fps + 0.5)), {10, 65}, cv::FONT_HERSHEY_SIMPLEX, 1.0,
-                  {0, 200, 255}, 2);
-      cv::imshow("ImagePredict - Camera", frame);
-      // 按 q 退出
-      char key = static_cast<char>(cv::waitKey(1));
-      if (key == 'q' || key == 27) break;
+      ImageShow::drawAndShow(frame, result, ms, fps);
+      if (ImageShow::waitForExit()) break;
     }
   }
 

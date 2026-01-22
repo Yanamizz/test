@@ -12,7 +12,7 @@ project(radar_track)
 # Debug模式下的编译指令
 SET(CMAKE_BUILD_TYPE "Debug")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_DEBUG}")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17 -pthread") 
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17 -pthread -O2 -Wall -DNDEBUG") 
  
 set(OpenCV_LIBS opencv_videoio opencv_imgcodecs opencv_imgproc opencv_core opencv_dnn opencv_highgui)
  
@@ -24,21 +24,24 @@ include_directories(
     ${EIGEN3_INCLUDE_DIR}
 )
  
+# 设置可执行文件输出目录
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+ 
 link_directories(
     /usr/local/lib/
 )
  
 #递归指定源码的路径
-file(GLOB_RECURSE SRCS ${PROJECT_SOURCE_DIR}/src/*.cc)
+file(GLOB_RECURSE SRCS ${PROJECT_SOURCE_DIR}/test/ImageRecognize/ImagePredict.cc)
  
 # Declare the executable target built from your sources
-add_executable(radar_track ${SRCS})
+add_executable(ImagePredict ${SRCS})
  
 option(KALMAN_BUILD_EXAMPLES "Build the Kalman examples" OFF)  # 可选，关闭示例
 add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/kalman)
 
 # Link your application with OpenCV libraries
-target_link_libraries(radar_track 
+target_link_libraries(ImagePredict 
 -lonnxruntime 
 ${OpenCV_LIBS}  
 )
