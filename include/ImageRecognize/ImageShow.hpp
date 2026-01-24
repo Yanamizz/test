@@ -13,8 +13,10 @@ class ImageShow {
    * @param frame 输入输出图像帧
    * @param boxes 检测框列表，每个框为 [x1, y1, x2, y2, confidence]
    * @param ms 推理耗时（毫秒）
-   * @param fps 当前FPS
    */
+
+  static void MainShow() {};
+
   static void ShowNow(cv::Mat& frame, const OutputDataProcess::DataProcessResult& result, double ms, double fps) {
     // 绘制结果
     for (const auto& box : result.boxes) {
@@ -33,7 +35,7 @@ class ImageShow {
     cv::putText(frame, std::to_string(ms) + " ms", {10, 30}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 255}, 2);
     cv::putText(frame, "FPS: " + std::to_string(static_cast<int>(fps + 0.5)), {10, 65}, cv::FONT_HERSHEY_SIMPLEX, 1.0,
                 {0, 200, 255}, 2);
-    cv::imshow("ImagePredict - Camera", frame);
+    cv::imshow("Detection Result", frame);
   }
   /**
    * @brief 绘制卡尔曼滤波预测位置
@@ -48,7 +50,13 @@ class ImageShow {
     cv::rectangle(frame, cv::Point(x, y), cv::Point(x + static_cast<int>(w), y + static_cast<int>(h)),
                   cv::Scalar(255, 0, 0), 2);
     cv::putText(frame, "Predict", cv::Point(x, y - 6), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 0, 0), 1);
-    cv::imshow("ImagePredict - Camera", frame);
+    cv::imshow("Detection Result", frame);
+  }
+
+  static void ShowAngles(cv::Mat& frame, float pitch, float yaw) {
+    cv::putText(frame, "Pitch: " + std::to_string(pitch), {10, 100}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 255}, 2);
+    cv::putText(frame, "Yaw: " + std::to_string(yaw), {10, 135}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 255}, 2);
+    cv::imshow("Detection Result", frame);
   }
 
   /**

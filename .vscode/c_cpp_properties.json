@@ -5,9 +5,11 @@
             "includePath": [
                 "${workspaceFolder}/include/**",
                 "${workspaceFolder}/third_lib/kalman/include",
+                "${workspaceFolder}/third_lib/Galaxy_camera/inc",
                 "/usr/local/include/opencv4",
                 "/usr/local/include/onnxruntime",
-                "/usr/local/include/eigen3"
+                "/usr/local/include/eigen3",
+                "/usr/local/include"
             ],
             "compilerPath": "/usr/bin/g++",
             "cStandard": "c17",

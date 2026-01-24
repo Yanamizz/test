@@ -2,74 +2,81 @@
  * @file    include\SerialTask\SerialRead.hpp
  * @brief   串口 IMU 数据读取与四元数转欧拉角
  * @brief   输入串口字节流，输出目标侧欧拉角帧（Roll，Pitch, Yaw）
- * 
- * @date    2026-01-19
+ *
+ * @date    2026-01-23
  */
 
 #pragma once
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <Eigen/Dense>
+
+#include "SerialTask/SerialConfig.hpp"
+#include "SerialTask/Common.hpp"
+#include <serial/serial.h>
+#include <cmath>
+#include <thread>
+#include <chrono>
+#include <iostream>  // For std::cerr
+
+namespace SerialTask {
+
+typedef struct {
+  float roll;   // 绕X轴旋转角度（单位：度）
+  float pitch;  // 绕Y轴旋转角度（单位：度）
+  float yaw;    // 绕Z轴旋转角度（单位：度）
+} EulerAngles;
 
 /**
- * @brief 目标侧欧拉角帧（Pitch, Yaw）
+ * @brief 从串口读取字节流，解析 GimbalImuFrame_SCM_t 数据，并将四元数转换为欧拉角
+ * @param serial_port 已配置好的串口对象
+ * @param angles 输出的欧拉角结构体（Roll, Pitch, Yaw）
  */
-typedef struct __attribute__((packed)) {
-  uint8_t _SOF;              ///< 包头 0x55
-  uint8_t ID;                ///< 接收 id 0x02
-  float PitchRelativeAngle;  ///< Pitch (°)
-  float YawRelativeAngle;    ///< Yaw   (°)
-  uint8_t _EOF;              ///< 包尾 0xff
-} AimbotFrame_SCM_t;
+inline bool ReadIMUData(serial::Serial& serial_port, EulerAngles& angles) {
+  GimbalImuFrame_SCM_t imu_frame;
+  size_t frame_size = sizeof(GimbalImuFrame_SCM_t);
 
-/**
- * @brief 上位机发送的 IMU 四元数帧
- */
-typedef struct __attribute__((packed)) {
-  uint8_t _SOF;  ///< 包头 0x55
-  uint8_t ID;    ///< 接收 id 0x01
-  float q0;      ///< 四元数 w
-  float q1;      ///< 四元数 x
-  float q2;      ///< 四元数 y
-  float q3;      ///< 四元数 z
-  uint8_t _EOF;  ///< 包尾 0xff
-} GimbalImuFrame_SCM_t;
-
-#define IMU_DATA_SEND_ID 0x1
-
-/**
- * @brief 解析串口字节流为 IMU 四元数帧
- * @param[in]  data   输入字节流
- * @param[in]  len    字节流长度
- * @param[out] frame  解析出的 IMU 帧
- * @return true 解析成功，false 失败
- */
-inline bool DecodeImuFrame(const uint8_t *data, size_t len, GimbalImuFrame_SCM_t &frame) {
-  constexpr size_t kFrameSize = sizeof(GimbalImuFrame_SCM_t);
-  if (!data || len < kFrameSize) return false;
-  // 边界检查
-  if (data[0] != 0x55 || data[1] != IMU_DATA_SEND_ID || data[kFrameSize - 1] != 0xff) return false;
-  std::memcpy(&frame, data, kFrameSize);
-  return true;
-}
-
-/**
- * @brief 将四元数帧转换为欧拉角并填充 Aimbot 帧
- * @param[in]  imu_frame   IMU 四元数帧
- * @param[out] aimbot      欧拉角输出帧（Pitch, Yaw）
- * @param[out] euler_rpy   返回 [roll, pitch, yaw]（角度）
- */
-inline void QuaternionToEulerAngles(const GimbalImuFrame_SCM_t &imu_frame, AimbotFrame_SCM_t &aimbot,
-                                    Eigen::Vector3f *euler_rpy = nullptr) {
-  Eigen::Quaternionf q(imu_frame.q0, imu_frame.q1, imu_frame.q2, imu_frame.q3);  // w, x, y, z
-  const Eigen::Vector3f euler = q.toRotationMatrix().eulerAngles(0, 1, 2);       // roll, pitch, yaw
-  if (euler_rpy) {
-    *euler_rpy = euler;
+  // 检查串口是否已打开
+  if (!serial_port.isOpen()) {
+    std::cerr << "[ERROR] 串口未打开，无法读取数据。" << std::endl;
+    return false;
   }
-  aimbot._SOF = 0x55;
-  aimbot.ID = 0x02;
-  aimbot.PitchRelativeAngle = euler.y();
-  aimbot.YawRelativeAngle = euler.z();
-  aimbot._EOF = 0xff;
+
+  // 检查是否有足够的数据可供读取
+  if (serial_port.available() < frame_size) {
+    std::cerr << "[DEBUG] 数据不足: 可用数据 = " << serial_port.available() << ", 需要数据 = " << frame_size
+              << std::endl;
+    return false;  // 数据不足，直接返回
+  }
+
+  // 初始化 buffer
+  uint8_t buffer[frame_size] = {0};
+
+  // 读取数据
+  serial_port.read(buffer, frame_size);
+
+  // 将字节流解析为 GimbalImuFrame_SCM_t 结构体
+  memcpy(&imu_frame, buffer, frame_size);
+
+  // 检查包头和包尾是否正确
+  if (imu_frame._SOF == 0x55 && imu_frame._EOF == 0xFF && imu_frame.ID == IMU_DATA_SEND_ID) {
+    // 提取四元数
+    float q0 = imu_frame.q0;  // w
+    float q1 = imu_frame.q1;  // x
+    float q2 = imu_frame.q2;  // y
+    float q3 = imu_frame.q3;  // z
+
+    // 四元数转欧拉角 (转为角度值)
+    angles.roll = std::atan2(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1 * q1 + q2 * q2)) * (180.0f / M_PI);  // Roll
+    angles.pitch = -std::asin(2.0f * (q0 * q2 - q3 * q1)) * (180.0f / M_PI);                                    // Pitch
+    angles.yaw = std::atan2(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3)) * (180.0f / M_PI);   // Yaw
+
+    // 输出调试信息
+    std::cerr << "[DEBUG] 转换后的欧拉角: Roll=" << angles.roll << ", Pitch=" << angles.pitch << ", Yaw=" << angles.yaw
+              << std::endl;
+
+    return true;  // 成功解析并转换
+  }
+
+  std::cerr << "[DEBUG] 数据包无效: SOF=" << imu_frame._SOF << ", EOF=" << imu_frame._EOF << ", ID=" << imu_frame.ID
+            << std::endl;
+  return false;  // 数据无效或解析失败
 }
+}  // namespace SerialTask

@@ -135,10 +135,10 @@ class Tracker2D {
     x0.setZero();
     kf_.init(x0);
 
-    // 参数验证：噪声矩阵必须为正
-    sys_.setCovariance(kalman::Covariance<State>::Identity() * 1e-2);  ///< 过程噪声 Q（调小以使预测更稳定）
-    meas_.setCovariance(kalman::Covariance<Measurement>::Identity() * 1e-4);  ///< 测量噪声 R（调小以使校正更接近测量）
-    kf_.setCovariance(kalman::Covariance<State>::Identity());  ///< 初始协方差 P
+    // 增大测量噪声权重，减少震荡
+    sys_.setCovariance(kalman::Covariance<State>::Identity() * 1e-2);         ///< 过程噪声 Q
+    meas_.setCovariance(kalman::Covariance<Measurement>::Identity() * 1e-2);  ///< 测量噪声 R
+    kf_.setCovariance(kalman::Covariance<State>::Identity());                 ///< 初始协方差 P
 
     initialized_ = false;
     last_time_ = std::chrono::steady_clock::time_point{};
@@ -151,6 +151,13 @@ class Tracker2D {
    */
   Eigen::Vector2d update(const cv::Rect &bbox_rect) {
     const double dt_seconds = computeDt();
+
+    if (bbox_rect.area() == 0) {
+      // 如果目标消失，返回最后一次更新的位置
+      State x_last = kf_.getState();
+      return {x_last(State::X), x_last(State::Y)};
+    }
+
     return updateImpl(bbox_rect, dt_seconds);
   }
 
@@ -160,26 +167,14 @@ class Tracker2D {
    * @param[in] dt_seconds 帧间隔（秒）
    * @return 滤波后的中心点 (x,y)
    */
-  Eigen::Vector2d update(const cv::Rect &bbox_rect, double dt_seconds) { return updateImpl(bbox_rect, dt_seconds); }
+  Eigen::Vector2d update(const cv::Rect &bbox_rect, double dt_seconds) {
+    if (bbox_rect.area() == 0) {
+      // 如果目标消失，返回最后一次更新的位置
+      State x_last = kf_.getState();
+      return {x_last(State::X), x_last(State::Y)};
+    }
 
-  /**
-   * @brief 单帧预测：只预测，不校正（用于无测量时）
-   * @param[in] dt_seconds 帧间隔（秒）
-   * @return 预测中心点 (x,y)
-   */
-  Eigen::Vector2d predict(double dt_seconds) {
-    sys_.setDt(dt_seconds);
-    State x_pred = kf_.predict(sys_);
-    return {x_pred(State::X), x_pred(State::Y)};
-  }
-
-  /**
-   * @brief 单帧预测：内部自动计算 dt
-   * @return 预测中心点 (x,y)
-   */
-  Eigen::Vector2d predict() {
-    const double dt_seconds = computeDt();
-    return predict(dt_seconds);
+    return updateImpl(bbox_rect, dt_seconds);
   }
 
  private:

@@ -17,13 +17,15 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17 -pthread -O2 -Wal
 set(OpenCV_LIBS opencv_videoio opencv_imgcodecs opencv_imgproc opencv_core opencv_dnn opencv_highgui)
  
 include_directories(
+    /usr/local/include
     /usr/local/include/opencv4
-    ${PROJECT_SOURCE_DIR}/include
     /usr/local/include/onnxruntime
+    ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/third_lib/kalman/include
+    ${PROJECT_SOURCE_DIR}/third_lib/Galaxy_camera/inc
     ${EIGEN3_INCLUDE_DIR}
 )
- 
+# find_package(serial REQUIRED)
 find_package(Eigen3 REQUIRED)
 include_directories(${EIGEN3_INCLUDE_DIRS})
  
@@ -32,19 +34,26 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
  
 link_directories(
     /usr/local/lib/
+    ${PROJECT_SOURCE_DIR}/third_lib/Galaxy_camera/lib/x86_64
 )
  
-#递归指定源码的路径
-file(GLOB_RECURSE SRCS ${PROJECT_SOURCE_DIR}/test/ImageRecognize/ImagePredict.cc)
- 
-# Declare the executable target built from your sources
-add_executable(ImagePredict ${SRCS})
+# 递归检索指定目录下所有 .cc
+set(SRC_ROOT ${PROJECT_SOURCE_DIR}/test/ImageRecognize)
+file(GLOB_RECURSE SRCS ${SRC_ROOT}/*.cc)
+
+# 为每个 .cc 生成对应文件名的可执行文件
+foreach(src ${SRCS})
+    get_filename_component(name_we ${src} NAME_WE)
+    add_executable(${name_we} ${src})
+    target_link_libraries(${name_we}
+        -lonnxruntime
+        -lgxiapi
+        ${OpenCV_LIBS}
+        serial  # 添加 serial 库
+    )       
+endforeach()
  
 option(KALMAN_BUILD_EXAMPLES "Build the Kalman examples" OFF)  # 可选，关闭示例
 add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/kalman)
 
-# Link your application with OpenCV libraries
-target_link_libraries(ImagePredict 
--lonnxruntime 
-${OpenCV_LIBS}  
-)
+# Link moved into per-target loop above

@@ -9,7 +9,13 @@
 
 #include "ImageRecognize/ImageShow.hpp"
 #include "ImageRecognize/ImagePredict.hpp"
+#include "ImageRecognize/AngleCalculate.hpp"
 #include "KalmanFilter/KalmanFilter.hpp"
+#include "CameraTask/Getimage.hpp"
+#include "SerialTask/SerialSend.hpp"
+#include "SerialTask/SerialConfig.hpp"
+
+#define minimum_angle 1.0f  // 最小角度阈值，避免发送过小角度
 
 int main() {
   try {
@@ -17,20 +23,17 @@ int main() {
     std::string model_path = "/home/hanni/code/rm/test/ImageRecognize/model/best.onnx";
     ImagePredict::ImagePredict predictor(model_path);  // 复用会话
 
-    cv::VideoCapture cap(0);
-    // 打开摄像头，优先用 V4L2 后端，失败则回退
-    cap.release();  // Release the previous capture before re-opening
-    if (!cap.open("/dev/video0", cv::CAP_V4L2)) {
-      std::cerr << "V4L2 打开 /dev/video0 失败，尝试 CAP_ANY/index 0" << std::endl;
-      if (!cap.open(0, cv::CAP_ANY)) {
-        std::cerr << "无法打开摄像头" << std::endl;
-        return -1;
-      }
-    }
-    // 设置常见支持格式与分辨率/FPS（根据设备能力，可能被驱动调整）
-    cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));  // 优先 MJPG，降低解码成本
-    cap.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
-    cap.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+    CameraTask::GalaxyCamera camera;
+
+    // cv::VideoCapture cap(0);
+    // cap.release();
+    // if (!cap.open("/dev/video0", cv::CAP_V4L2)) {
+    //   std::cerr << "无法打开摄像头" << std::endl;
+    //   return -1;
+    // }
+    // cap.set(cv::CAP_PROP_FRAME_WIDTH, 1920);
+    // cap.set(cv::CAP_PROP_FRAME_HEIGHT, 1080);
+    // cap.set(cv::CAP_PROP_FPS, 30);
 
     cv::Mat frame;
     int frame_count = 0;
@@ -46,16 +49,17 @@ int main() {
     bool has_measured = false;
     auto last_measure_time = std::chrono::steady_clock::now();
     auto last_predicted_time = std::chrono::steady_clock::now();
+
+    if (!camera.open() || !camera.start()) {
+      std::cerr << "无法打开 Galaxy 相机" << std::endl;
+      return -1;
+    }
+
     while (true) {
-      if (!cap.read(frame) || frame.empty()) {
-        std::cerr << "读取摄像头帧失败" << std::endl;
-        break;
-      }
+      frame = camera.grab(1000);
 
       auto t0 = std::chrono::high_resolution_clock::now();
       auto result = predictor.run(frame);
-      auto t1 = std::chrono::high_resolution_clock::now();
-      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
       const auto frame_time = std::chrono::steady_clock::now();
 
@@ -95,21 +99,39 @@ int main() {
         last_h = bound_boxes.height;
         has_detection = true;
       } else if (has_detection) {
-        // 无检测，但之前有，进行纯预测
-        const double predicted_dt = std::chrono::duration<double>(frame_time - last_predicted_time).count();
-        if (predicted_dt > 1e-6) {
-          ekf.predict(predicted_dt);
-          last_predict_center = last_predict_center + measured_velocity * predicted_dt;
-          last_predicted_time = frame_time;
-        }
+        // 无检测，但之前有，保持最后位置
+        last_predict_center = last_predict_center;
       }
+
+      DetectionResult predict_detection;
+      predict_detection.x = last_predict_center[0] - last_w / 2;
+      predict_detection.y = last_predict_center[1] - last_h / 2;
+      predict_detection.w = last_w;
+      predict_detection.h = last_h;
+      predict_detection.center_x = last_predict_center[0];
+      predict_detection.center_y = last_predict_center[1];
+      AngleCalculator angle_calculator;
+      GimbalAngles angles = angle_calculator.CalculateGimbalAngles(predict_detection);
+
+      // 通过串口发送角度数据
+      serial::Serial serial_port;
+      SerialTask::DefaultConfig(serial_port);
+
+      if (abs(angles.yaw) > minimum_angle && abs(angles.pitch) > minimum_angle) {
+        SerialTask::SerialSend(serial_port, static_cast<float>(-angles.pitch), static_cast<float>(-angles.yaw));
+      }
+
+      auto t1 = std::chrono::high_resolution_clock::now();
+      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
       ImageShow::ShowNow(frame, result, ms, fps);
       if (has_detection) {
         ImageShow::ShowPredict(frame, last_predict_center, last_w, last_h);
+        ImageShow::ShowAngles(frame, static_cast<float>(angles.pitch), static_cast<float>(angles.yaw));
       }
       if (ImageShow::WaitForExit()) break;
     }
+
   }
 
   catch (const Ort::Exception &e) {
