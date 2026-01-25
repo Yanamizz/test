@@ -35,7 +35,7 @@ class AngleCalculator {
     double x_norm = (detection.center_x - DEFAULT_CAMERA_PARAMS.cx) / DEFAULT_CAMERA_PARAMS.fx;
     double y_norm = (detection.center_y - DEFAULT_CAMERA_PARAMS.cy) / DEFAULT_CAMERA_PARAMS.fy;
 
-    target.yaw = std::atan(x_norm) * RAD_TO_DEG;
+    target.yaw = std::atan(x_norm) * RAD_TO_DEG * -1.0;
 
     target.pitch = std::atan(y_norm) * RAD_TO_DEG;
 
@@ -43,6 +43,6 @@ class AngleCalculator {
   }
 
  private:
-  const CameraParams DEFAULT_CAMERA_PARAMS = {1903.0, 1713.7, 641.35, 372.89};
+  const CameraParams DEFAULT_CAMERA_PARAMS = {1576.30, 1578.06, 952.45, 599.90};
   const double DEFAULT_OBJECT_LENGTH = 0.2;  // 米
 };

@@ -50,6 +50,30 @@ void SerialSend(serial::Serial& serial_port, float pitch_offset, float yaw_offse
   SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle, yaw_relative_angle);
 }
 
+// 重载：使用已知的当前角度发送，不再从串口读取（适用于接收线程在外部运行时）
+inline void SerialSend(serial::Serial& serial_port, const EulerAngles& angles_now, float pitch_offset,
+                       float yaw_offset) {
+  float pitch_relative_angle = (angles_now.pitch + pitch_offset);
+  float yaw_relative_angle = (angles_now.yaw + yaw_offset);
+
+  if (pitch_relative_angle > 180.0f) {
+    pitch_relative_angle -= 360.0f;
+  } else if (pitch_relative_angle < -180.0f) {
+    pitch_relative_angle += 360.0f;
+  }
+
+  if (yaw_relative_angle > 180.0f) {
+    yaw_relative_angle -= 360.0f;
+  } else if (yaw_relative_angle < -180.0f) {
+    yaw_relative_angle += 360.0f;
+  }
+
+  pitch_relative_angle = pitch_relative_angle / RAD_TO_DEG;
+  yaw_relative_angle = yaw_relative_angle / RAD_TO_DEG;
+
+  SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle, yaw_relative_angle);
+}
+
 inline void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle) {
   AimbotFrame_SCM_t aimbot_frame;
   aimbot_frame._SOF = 0x55;  // 包头

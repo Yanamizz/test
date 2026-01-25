@@ -136,9 +136,9 @@ class Tracker2D {
     kf_.init(x0);
 
     // 增大测量噪声权重，减少震荡
-    sys_.setCovariance(kalman::Covariance<State>::Identity() * 1e-2);         ///< 过程噪声 Q
-    meas_.setCovariance(kalman::Covariance<Measurement>::Identity() * 1e-2);  ///< 测量噪声 R
-    kf_.setCovariance(kalman::Covariance<State>::Identity());                 ///< 初始协方差 P
+    sys_.setCovariance(kalman::Covariance<State>::Identity() * 1e-3);  ///< 过程噪声 Q：越大越信任模型
+    meas_.setCovariance(kalman::Covariance<Measurement>::Identity() * 1e-1);  ///< 测量噪声 R：越大越信任测量
+    kf_.setCovariance(kalman::Covariance<State>::Identity());  ///< 初始协方差 P：越大越信任初始状态
 
     initialized_ = false;
     last_time_ = std::chrono::steady_clock::time_point{};

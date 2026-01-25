@@ -18,6 +18,7 @@
 #include <vector>
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/opencv.hpp>
+#include <thread>
 
 namespace ImagePredict {
 
@@ -32,7 +33,11 @@ class ImagePredict {
 
   // 基于模型路径构造，创建并缓存 ORT 会话与 I/O 名称，便于实时推理复用
   explicit ImagePredict(const std::string& model_path) {
-    session_ = std::make_unique<Ort::Session>(env_, model_path.c_str(), Ort::SessionOptions{nullptr});
+    // 优化：配置会话选项（线程数与图优化）并复用该会话以降低每帧开销
+    int cpu_threads = std::max(1u, std::thread::hardware_concurrency() > 0 ? std::thread::hardware_concurrency() : 1u);
+    session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    session_options_.SetIntraOpNumThreads(cpu_threads);
+    session_ = std::make_unique<Ort::Session>(env_, model_path.c_str(), session_options_);
     Ort::AllocatorWithDefaultOptions allocator{};
     if (session_->GetInputCount() != 1 || session_->GetOutputCount() != 1) {
       throw std::runtime_error("Model must have exactly one input and one output");

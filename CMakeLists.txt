@@ -14,7 +14,7 @@ SET(CMAKE_BUILD_TYPE "Debug")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_DEBUG}")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17 -pthread -O2 -Wall -DNDEBUG") 
  
-set(OpenCV_LIBS opencv_videoio opencv_imgcodecs opencv_imgproc opencv_core opencv_dnn opencv_highgui)
+set(OpenCV_LIBS opencv_videoio opencv_imgcodecs opencv_imgproc opencv_core opencv_dnn opencv_highgui opencv_calib3d)
  
 include_directories(
     /usr/local/include
@@ -38,7 +38,7 @@ link_directories(
 )
  
 # 递归检索指定目录下所有 .cc
-set(SRC_ROOT ${PROJECT_SOURCE_DIR}/test/ImageRecognize)
+set(SRC_ROOT ${PROJECT_SOURCE_DIR}/src)
 file(GLOB_RECURSE SRCS ${SRC_ROOT}/*.cc)
 
 # 为每个 .cc 生成对应文件名的可执行文件
