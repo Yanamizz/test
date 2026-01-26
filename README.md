@@ -9,11 +9,32 @@
 
 3.实际模型建模
 
-4.多线程间通信及优化（kalman滤波、模型推理）
+4.多线程间通信及优化(kalman滤波、模型推理)
 
 
 ## -------------环境配置---------------
 
-opencv 4.x
+**ubuntu 24.04LTS**
 
-onnxruntime 1.17.3  ------>   3080(CUDA11  cuDNN8.6.0)
+**opencv 4.x:**<br>
+<https://docs.opencv.ac.cn/4.12.0/d7/d9f/tutorial_linux_install.html>
+
+**onnxruntime 1.17.3  ------>   3080(CUDA11  cuDNN8.6.0)**<br>
+> git clone --recursive https://github.com/Microsoft/onnxruntime.git
+> cd onnxruntime
+>./build.sh --config RelWithDebInfo --build_shared_lib --parallel --compile_no_warning_as_error --skip_submodule_sync
+
+* 可能出现的问题：<br>
+hash值校验无法对应:修改本地hash校验值<br>
+
+**使用到的第三方库:**<br>
+kalman filter:<https://github.com/mherb/kalman.git>
+Galaxy SDK:<https://www.daheng-imaging.com/downloads/>
+
+
+
+
+
+
+
+
