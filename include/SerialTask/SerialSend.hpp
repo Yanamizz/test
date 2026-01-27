@@ -68,8 +68,13 @@ inline void SerialSend(serial::Serial& serial_port, const EulerAngles& angles_no
     yaw_relative_angle += 360.0f;
   }
 
+  // 在转换为弧度前保存度值以便打印
+  float pitch_deg = pitch_relative_angle;
+  float yaw_deg = yaw_relative_angle;
   pitch_relative_angle = pitch_relative_angle / RAD_TO_DEG;
   yaw_relative_angle = yaw_relative_angle / RAD_TO_DEG;
+  // 输出同时打印度与弧度，便于排查单位/范围问题
+  std::cout << "\n[DEBUG] 发送角度: PitchRelative(deg)=" << pitch_deg << ", YawRelative(deg)=" << yaw_deg;
 
   SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle, yaw_relative_angle);
 }
@@ -82,8 +87,6 @@ inline void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_an
   aimbot_frame.YawRelativeAngle = yaw_relative_angle;
   aimbot_frame._EOF = 0xFF;  // 包尾
   serial_port.write(reinterpret_cast<uint8_t*>(&aimbot_frame), sizeof(AimbotFrame_SCM_t));
-  std::cout << "已发送目标侧欧拉角帧: Pitch = " << pitch_relative_angle * RAD_TO_DEG
-            << ", Yaw = " << yaw_relative_angle * RAD_TO_DEG << std::endl;
 }
 
 SerialTask::EulerAngles GetAnglesNow(serial::Serial& serial_port) {
