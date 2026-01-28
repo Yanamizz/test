@@ -7,9 +7,8 @@
  */
 #pragma once
 
-#include "SerialTask/Common.hpp"
-#include "SerialTask/SerialRead.hpp"
-#include "ImageRecognize/AngleCalculate.hpp"
+#include "Common.hpp"
+#include "SerialRead.hpp"
 #include <serial/serial.h>
 #include <thread>
 #include <chrono>
@@ -17,6 +16,13 @@
 #define RAD_TO_DEG 57.29577951308232  // 180 / PI
 
 namespace SerialTask {
+// 将度数归一化到 [-180, 180]
+inline float NormalizeDegTo180(float d) {
+  while (d > 180.0f) d -= 360.0f;
+  while (d < -180.0f) d += 360.0f;
+  return d;
+}
+
 /**
  * @brief 发送目标侧欧拉角帧（Pitch, Yaw）到串口
  * @param serial_port 已配置好的串口对象
@@ -26,55 +32,21 @@ namespace SerialTask {
 SerialTask::EulerAngles GetAnglesNow(serial::Serial& serial_port);
 void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle);
 
-void SerialSend(serial::Serial& serial_port, float pitch_offset, float yaw_offset) {
-  EulerAngles angles_now = SerialTask::GetAnglesNow(serial_port);
-
-  float pitch_relative_angle = (angles_now.pitch + pitch_offset);
-  float yaw_relative_angle = (angles_now.yaw + yaw_offset);
-
-  if (pitch_relative_angle > 180.0f) {
-    pitch_relative_angle -= 360.0f;
-  } else if (pitch_relative_angle < -180.0f) {
-    pitch_relative_angle += 360.0f;
-  }
-
-  if (yaw_relative_angle > 180.0f) {
-    yaw_relative_angle -= 360.0f;
-  } else if (yaw_relative_angle < -180.0f) {
-    yaw_relative_angle += 360.0f;
-  }
-
-  pitch_relative_angle = pitch_relative_angle / RAD_TO_DEG;
-  yaw_relative_angle = yaw_relative_angle / RAD_TO_DEG;
-
-  SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle, yaw_relative_angle);
-}
+// Inline overload defined below; remove duplicate non-inline definition.
 
 // 重载：使用已知的当前角度发送，不再从串口读取（适用于接收线程在外部运行时）
-inline void SerialSend(serial::Serial& serial_port, const EulerAngles& angles_now, float pitch_offset,
-                       float yaw_offset) {
-  float pitch_relative_angle = (angles_now.pitch + pitch_offset);
-  float yaw_relative_angle = (angles_now.yaw + yaw_offset);
+inline void SerialSend(serial::Serial& serial_port, float absolute_pitch, float absolute_yaw) {
+  float pitch_relative_angle = (absolute_pitch);
+  float yaw_relative_angle = (absolute_yaw);
 
-  if (pitch_relative_angle > 180.0f) {
-    pitch_relative_angle -= 360.0f;
-  } else if (pitch_relative_angle < -180.0f) {
-    pitch_relative_angle += 360.0f;
-  }
-
-  if (yaw_relative_angle > 180.0f) {
-    yaw_relative_angle -= 360.0f;
-  } else if (yaw_relative_angle < -180.0f) {
-    yaw_relative_angle += 360.0f;
-  }
+  pitch_relative_angle = NormalizeDegTo180(pitch_relative_angle);
+  yaw_relative_angle = NormalizeDegTo180(yaw_relative_angle);
 
   // 在转换为弧度前保存度值以便打印
-  float pitch_deg = pitch_relative_angle;
-  float yaw_deg = yaw_relative_angle;
+
   pitch_relative_angle = pitch_relative_angle / RAD_TO_DEG;
   yaw_relative_angle = yaw_relative_angle / RAD_TO_DEG;
   // 输出同时打印度与弧度，便于排查单位/范围问题
-  std::cout << "\n[DEBUG] 发送角度: PitchRelative(deg)=" << pitch_deg << ", YawRelative(deg)=" << yaw_deg;
 
   SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle, yaw_relative_angle);
 }
@@ -89,12 +61,4 @@ inline void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_an
   serial_port.write(reinterpret_cast<uint8_t*>(&aimbot_frame), sizeof(AimbotFrame_SCM_t));
 }
 
-SerialTask::EulerAngles GetAnglesNow(serial::Serial& serial_port) {
-  SerialTask::EulerAngles angles;
-  if (SerialTask::ReadIMUData(serial_port, angles)) {
-    return angles;
-  } else {
-    throw std::runtime_error("无法读取当前欧拉角数据");
-  }
-}
 }  // namespace SerialTask

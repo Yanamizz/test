@@ -12,10 +12,13 @@ project(radar_track)
 # Debug模式下的编译指令
 SET(CMAKE_BUILD_TYPE "Debug")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_DEBUG}")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17 -pthread -O2 -Wall -DNDEBUG") 
+# Add -Wno-maybe-uninitialized to reduce false-positive warnings from Eigen internals
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17 -pthread -O2 -Wall -Wno-maybe-uninitialized -DNDEBUG") 
  
 set(OpenCV_LIBS opencv_videoio opencv_imgcodecs opencv_imgproc opencv_core opencv_dnn opencv_highgui opencv_calib3d)
  
+find_package(Eigen3 REQUIRED)
+
 include_directories(
     /usr/local/include
     /usr/local/include/opencv4
@@ -26,7 +29,7 @@ include_directories(
     ${EIGEN3_INCLUDE_DIR}
 )
 # find_package(serial REQUIRED)
-find_package(Eigen3 REQUIRED)
+
  
 # 设置可执行文件输出目录
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

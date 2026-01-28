@@ -15,7 +15,7 @@
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/opencv.hpp>
 
-namespace OutputDataProcess {
+namespace ImageRecognize {
 
 /**
  * @brief 后处理结果结构体。
@@ -131,8 +131,8 @@ class OutputDataProcess {
     return keep;
   }
   cv::Size cut_size_{320, 320};  ///< 预处理/模型输入的基准尺寸（用于反缩放）
-  float set_score_{0.85f};       ///< 分数阈值，低于该值的候选将被丢弃
+  float set_score_{0.9f};        ///< 分数阈值，低于该值的候选将被丢弃
   float nms_iou_thresh_{0.5f};   ///< NMS 的 IoU 阈值
   float w_h_scale_{0.5f};        ///< 长宽比阈值
 };
-}  // namespace OutputDataProcess
+}  // namespace ImageRecognize

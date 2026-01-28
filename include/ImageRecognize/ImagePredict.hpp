@@ -20,9 +20,9 @@
 #include <opencv2/opencv.hpp>
 #include <thread>
 
-namespace ImagePredict {
+namespace ImageRecognize {
 
-using PredictResult = OutputDataProcess::DataProcessResult;  ///< 推理的结果别名，复用后处理的结果结构
+using PredictResult = ImageRecognize::DataProcessResult;  ///< 推理的结果别名，复用后处理的结果结构
 
 /**
  * @brief 图像预测器：封装单次推理流程（预处理→推理→后处理）。
@@ -53,7 +53,7 @@ class ImagePredict {
    * @returns  PredictResult   检测框集合（角点坐标与分数）。
    */
   PredictResult run(const cv::Mat& origin_image_, std::string model_path_) const {
-    ImagePreprocess::ImagePreprocess preprocessor_{cv::Size(width_, height_)};
+    ImageRecognize::ImagePreprocess preprocessor_{cv::Size(width_, height_)};
     auto pre_image_ = preprocessor_.run(origin_image_);
 
     Ort::SessionOptions opts{};
@@ -78,7 +78,7 @@ class ImagePredict {
 
     auto output_tensors_ =
         session_.Run(Ort::RunOptions{nullptr}, input_names.data(), &input_tensor_, 1, output_names.data(), 1);
-    OutputDataProcess::OutputDataProcess output_processor_;
+    ImageRecognize::OutputDataProcess output_processor_;
     return output_processor_.run(output_tensors_[0], origin_image_.size());
   }
 
@@ -87,7 +87,7 @@ class ImagePredict {
     if (!session_) {
       throw std::runtime_error("Session not initialized. Use ImagePredict(model_path) constructor.");
     }
-    ImagePreprocess::ImagePreprocess preprocessor_{cv::Size(width_, height_)};
+    ImageRecognize::ImagePreprocess preprocessor_{cv::Size(width_, height_)};
     auto pre_image_ = preprocessor_.run(origin_image_);
 
     std::array<int64_t, 4> input_shape_ = pre_image_.shape;
@@ -98,7 +98,7 @@ class ImagePredict {
     const char* in_names[] = {input_name_.c_str()};
     const char* out_names[] = {output_name_.c_str()};
     auto output_tensors_ = session_->Run(Ort::RunOptions{nullptr}, in_names, &input_tensor_, 1, out_names, 1);
-    OutputDataProcess::OutputDataProcess output_processor_;
+    ImageRecognize::OutputDataProcess output_processor_;
     return output_processor_.run(output_tensors_[0], origin_image_.size());
   }
 
@@ -114,4 +114,4 @@ class ImagePredict {
   // Ort::Session session_{env_, model_path.c_str(), session_options_}; // 需要 model 路径时再初始化
 };
 
-}  // namespace ImagePredict
+}  // namespace ImageRecognize

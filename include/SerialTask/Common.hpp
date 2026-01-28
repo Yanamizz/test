@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include <ImageRecognize/AngleCalculate.hpp>
+#include <cstdint>
 /**
  * @brief 目标侧欧拉角帧（Pitch, Yaw）
  */

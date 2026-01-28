@@ -16,7 +16,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ImagePreprocess {
+namespace ImageRecognize {
 
 /**
  * @brief 预处理结果的容器，包含平铺的数据和对应的形状信息。
@@ -84,4 +84,4 @@ class ImagePreprocess {
   cv::Size inputSize_{320, 320};  ///< 模型期望的输入尺寸
 };
 
-}  // namespace ImagePreprocess
+}  // namespace ImageRecognize

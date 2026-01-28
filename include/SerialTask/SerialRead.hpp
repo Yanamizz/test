@@ -16,6 +16,7 @@
 #include <chrono>
 #include <iostream>  // For std::cerr
 #include <vector>    // For std::vector
+#include <Eigen/Geometry>
 
 namespace SerialTask {
 
@@ -25,7 +26,6 @@ typedef struct {
   float yaw;    // 绕Z轴旋转角度（单位：度）
 } EulerAngles;
 
-// 前向声明：解析原始 IMU 帧（不转换为欧拉角）
 inline bool ReadIMUFrame(serial::Serial& serial_port, GimbalImuFrame_SCM_t& out_frame);
 
 /**
@@ -47,7 +47,6 @@ inline bool ReadIMUData(serial::Serial& serial_port, EulerAngles& angles) {
   angles.roll = std::atan2(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1 * q1 + q2 * q2)) * (180.0f / M_PI);
   angles.pitch = -std::asin(2.0f * (q0 * q2 - q3 * q1)) * (180.0f / M_PI);
   angles.yaw = std::atan2(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3)) * (180.0f / M_PI);
-  std::cout << "\n收到角度" << "Pitch=" << angles.pitch << ", Yaw=" << angles.yaw << std::endl;
   return true;
 }
 
@@ -88,20 +87,5 @@ inline bool ReadIMUFrame(serial::Serial& serial_port, GimbalImuFrame_SCM_t& out_
   if (!found) return false;
   out_frame = latest_frame;
   return true;
-}
-
-/**
- * @brief 将 Eigen 四元数转换为 EulerAngles（度）
- */
-inline void QuaternionToEuler(const Eigen::Quaterniond& q, EulerAngles& angles) {
-  double q0 = q.w();
-  double q1 = q.x();
-  double q2 = q.y();
-  double q3 = q.z();
-  angles.roll =
-      static_cast<float>(std::atan2(2.0 * (q0 * q1 + q2 * q3), 1.0 - 2.0 * (q1 * q1 + q2 * q2)) * (180.0 / M_PI));
-  angles.pitch = static_cast<float>(-std::asin(2.0 * (q0 * q2 - q3 * q1)) * (180.0 / M_PI));
-  angles.yaw =
-      static_cast<float>(std::atan2(2.0 * (q0 * q3 + q1 * q2), 1.0 - 2.0 * (q2 * q2 + q3 * q3)) * (180.0 / M_PI));
 }
 }  // namespace SerialTask

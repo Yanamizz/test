@@ -1,443 +1,257 @@
-/**
- * @file src/ImagePredict.cc
- * @brief 主应用入口：负责摄像头采集、模型推理、视觉显示与串口通信流水线。
- *
- * 该文件将图像采集、推理与串口发送拆分到不同线程，通过帧缓存和命令队列保持最新帧
- * 同时在检测到目标时才发送角度，满足低延迟需求。
- */
-
-#include <opencv2/opencv.hpp>
-#include <onnxruntime_cxx_api.h>
-
-#include <atomic>
-#include <condition_variable>
-#include <deque>
 #include <iostream>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <Eigen/Geometry>
-#include <vector>
-#include <algorithm>
-#include <chrono>
-#include <thread>
-#include <queue>
 #include <serial/serial.h>
+#include <string>
+#include <thread>
+#include <chrono>
+#include <mutex>
+#include <condition_variable>
+#include <memory>
+#include <deque>
+#include <iterator>
+#include <atomic>
 
-#include "ImageRecognize/ImageShow.hpp"
 #include "ImageRecognize/ImagePredict.hpp"
-#include "ImageRecognize/AngleCalculate.hpp"
-#include "KalmanFilter/KalmanFilter.hpp"
-#include "CameraTask/Getimage.hpp"
 #include "SerialTask/SerialRead.hpp"
 #include "SerialTask/SerialSend.hpp"
-#include "SerialTask/SerialConfig.hpp"
+#include "ImageRecognize/ImageShow.hpp"
+#include "Tools/AngleCalculate.hpp"
+#include "Tools/AngularVelocityCalculate.hpp"
 #include "Tools/FpsCounter.hpp"
-#include "Tools/CalculateOffsetAngles.hpp"
+#include "CameraTask/GetImage.hpp"
 
-// 最小角度阈值，避免发送过小角度
-#define minimum_angle 1.0f
+std::string model_path = "/home/hanni/code/rm/src/model/best.onnx";
+std::atomic<bool> g_running(true);          // 全局运行标志
+static std::mutex g_frame_mutex;            // 保护最新帧的互斥锁
+static std::condition_variable g_frame_cv;  // 通知预测线程有新帧到达的条件变量
+static std::mutex g_result_mutex;           // 保护最新预测结果的互斥锁
+                                            // IMU 数据缓冲区
+static std::deque<std::pair<std::chrono::steady_clock::time_point, SerialTask::EulerAngles>> g_imu_buffer;
+static std::mutex g_imu_mutex;                       // 保护 IMU 缓冲区的互斥锁
+static std::atomic<float> g_current_yaw_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
+static std::atomic<float> g_current_pitch_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
 
-const std::string model_path = "/home/hanni/code/rm/src/model/best.onnx";
-
-// 限幅 + 平滑：限制每次最大变化并对发送值做一阶低通，避免突跳震荡
-static float last_sent_pitch_deg = 0.0f, last_sent_yaw_deg = 0.0f;
-const float max_delta_deg = 5.0f;       // 每次最大变化（度），调整以平衡抖动与响应
-const float smoothing_alpha = 0.6f;     // 平滑系数：send = alpha*last + (1-alpha)*desired
-const float MIN_PITCH_SEND_DEG = 0.3f;  // 单轴最小触发阈值（度）
-const float MIN_YAW_SEND_DEG = 0.3f;    // 单轴最小触发阈值（度）
-const size_t kAngleHistory = 7;         // 用于中值滤波的窗口大小（奇数）
-
-// 串口接收线程控制标志与最新角度（供主线程读取）
-std::atomic<bool> g_running(true);
-SerialTask::EulerAngles g_latest_angles = {0.0f, 0.0f, 0.0f};
-std::mutex g_angles_mutex;
-
-// IMU 时间序列缓冲，用于按帧时间对齐 IMU 姿态
-struct ImuSample {
-  std::chrono::steady_clock::time_point ts;
-  Eigen::Quaterniond q;  // 四元数 w,x,y,z
+// 全局：只保存最新一帧
+struct FrameItem {
+  cv::Mat frame;
+  std::chrono::steady_clock::time_point ts{};
 };
 
-std::deque<ImuSample> g_imu_buffer;
-std::mutex g_imu_mutex;
-const size_t kMaxImuBuf = 500;  // 保留最近若干 IMU 帧，取决于串口频率
-// 最近若干解析出的欧拉角，用于中值/去抖
-std::deque<SerialTask::EulerAngles> g_imu_angle_history;
-std::mutex g_imu_angle_history_mutex;
+static FrameItem g_latest_frame_item;  // 最新帧条目
+static bool g_has_frame = false;       // 是否有新帧到达
+static bool has_detection = false;     // 是否有目标被检测到
+static float minimum_angle = 1.0f;     // 最小角度阈值，低于该值不发送偏移
+static float g_send_abs_yaw = 0.0f;
+static float g_send_abs_pitch = 0.0f;
 
-/**
- * @brief 双帧缓冲：线程安全，仅保留两帧（old, new）。
- * Capture 线程 push 新帧，若满则丢弃最老帧；推理线程每次取出最新帧并清空缓冲。
- */
-struct FrameBuffer {
-  struct FrameItem {
-    std::shared_ptr<cv::Mat> frame;
-    std::chrono::steady_clock::time_point ts;
-  };
-
-  std::deque<FrameItem> frames;  // 最多保持 2 帧
-  std::mutex mutex;
-  std::condition_variable cv;
-
-  void push_frame(const std::shared_ptr<cv::Mat> &f, const std::chrono::steady_clock::time_point &ts) {
-    std::lock_guard<std::mutex> lock(mutex);
-    if (frames.size() >= 2) frames.pop_front();
-    frames.push_back({f, ts});
-    cv.notify_one();
-  }
-
-  // 等待并返回最新一帧，返回时清空缓冲，保证主循环总是处理最新帧
-  FrameItem pop_latest() {
-    std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [&]() { return !frames.empty() || !g_running; });
-    if (frames.empty()) {
-      return FrameItem{nullptr, std::chrono::steady_clock::time_point{}};
-    }
-    auto latest = frames.back();
-    frames.clear();
-    return latest;
-  }
+// 全局预测结果（获得 result 后写入）
+struct ResultWithImu {
+  ImageRecognize::PredictResult result;
+  SerialTask::EulerAngles imu;
+  std::chrono::steady_clock::time_point imu_ts{};  // 匹配到的 IMU 时间戳
+  std::chrono::steady_clock::duration delay{};
 };
 
-void ReceiveThread(serial::Serial *serial_port);
-void CaptureThread(CameraTask::GalaxyCamera *camera, FrameBuffer *frame_buffer);
-void InferenceThread(ImagePredict::ImagePredict *predictor, Tracker2D *tracker, FrameBuffer *frame_buffer,
-                     serial::Serial *serial_port, std::atomic<bool> *serial_ready, FPSCounter *fps_counter);
+static std::shared_ptr<ResultWithImu> g_last_matched_result;  // 保护最新预测结果的互斥锁
 
-/**
- * @brief 程序入口，初始化硬件与模块后启动采集/推理/串口线程。
- * @return 返回 0 表示正常退出，非零表示错误。
- */
+static const std::chrono::milliseconds g_imu_buffer_max_age(1000);
+
+void CaptureThread(CameraTask::GalaxyCamera *camera);
+void ImagePredictThread(ImageRecognize::ImagePredict &predictor);
+void IMUReadThread(serial::Serial &port);
+void IMUSendThread(serial::Serial &port);
+
 int main() {
-  try {
-    serial::Serial serial_port;
-    std::atomic<bool> serial_ready(false);
-    bool serial_available = false;
+  CameraTask::GalaxyCamera camera;
+  serial::Serial port;
+  ImageRecognize::ImagePredict predictor(model_path);
+
+  if (!port.isOpen()) {
+    SerialTask::DefaultConfig(port);
     try {
-      SerialTask::DefaultConfig(serial_port);
-      serial_port.open();
-      serial_available = true;
-      serial_ready.store(true);
+      port.open();
     } catch (const std::exception &e) {
-      std::cerr << "串口打开失败，继续运行但将禁用串口功能: " << e.what() << std::endl;
-    }
-
-    ImagePredict::ImagePredict predictor(model_path);
-    CameraTask::GalaxyCamera camera;
-    Tracker2D tracker;
-    FrameBuffer frame_buffer;
-    FPSCounter fps_counter(500);
-
-    if (!camera.open() || !camera.start()) {
-      std::cerr << "无法打开 Galaxy 相机" << std::endl;
+      std::cerr << "Failed to open IMU serial port in main: " << e.what() << std::endl;
       return -1;
     }
+  }
 
-    std::thread receiver;
-    if (serial_available) {
-      receiver = std::thread(ReceiveThread, &serial_port);
-    }
+  std::thread image_capture(CaptureThread, &camera);
+  std::thread image_predict(ImagePredictThread, std::ref(predictor));
+  std::thread imu_read(IMUReadThread, std::ref(port));
+  std::thread imu_send(IMUSendThread, std::ref(port));
 
-    std::thread capture_thread(CaptureThread, &camera, &frame_buffer);
-    std::thread inference_thread(InferenceThread, &predictor, &tracker, &frame_buffer, &serial_port, &serial_ready,
-                                 &fps_counter);
+  if (image_capture.joinable()) image_capture.join();
+  if (image_predict.joinable()) image_predict.join();
+  if (imu_read.joinable()) imu_read.join();
+  if (imu_send.joinable()) imu_send.join();
 
-    inference_thread.join();
+  return 0;
+}
+
+void CaptureThread(CameraTask::GalaxyCamera *camera) {
+  if (!camera->open()) {
+    std::cerr << "Failed to open camera." << std::endl;
     g_running = false;
-    frame_buffer.cv.notify_all();
-
-    if (capture_thread.joinable()) {
-      capture_thread.join();
-    }
-
-    if (serial_available && receiver.joinable()) {
-      receiver.join();
-    }
-    if (serial_available) {
-      serial_port.close();
-    }
-    return 0;
+    return;
   }
-
-  catch (const Ort::Exception &e) {
-    std::cerr << "ONNX Runtime 错误: " << e.what() << " 状态码: " << e.GetOrtErrorCode() << std::endl;
-    return -1;
-  }
-}
-
-/**
- * @brief 串口读取线程，周期性获取 IMU 报文并更新角度缓存。
- * @param serial_port 已配置好参数并打开的串口实例。
- * @brief 串口模块：接收线程实现（将接收逻辑集中在此，便于后续抽取为 SerialManager）
- * @brief 说明：该线程负责不断从串口读取 IMU 四元数并更新全局 `g_latest_angles`。
- * @brief 当 `g_running` 变为 false 时线程会退出。
- */
-// 解析并保存 IMU 数据（包括四元数），供按时间对齐查询使用
-void ReceiveThread(serial::Serial *serial_port) {
-  while (g_running) {
-    if (!serial_port->isOpen()) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      continue;
-    }
-
-    GimbalImuFrame_SCM_t latest_frame{};
-    bool ok = false;
-    try {
-      ok = SerialTask::ReadIMUFrame(*serial_port, latest_frame);
-    } catch (const std::exception &e) {
-      std::cerr << "Serial read exception: " << e.what() << std::endl;
-      ok = false;
-    }
-
-    if (ok) {
-      // 读取四元数并记录时间戳（四元数缓冲用于按帧时间插值）
-      ImuSample imu_sample;
-      imu_sample.ts = std::chrono::steady_clock::now();
-      imu_sample.q = Eigen::Quaterniond(static_cast<double>(latest_frame.q0), static_cast<double>(latest_frame.q1),
-                                        static_cast<double>(latest_frame.q2), static_cast<double>(latest_frame.q3));
-      {
-        std::lock_guard<std::mutex> lk(g_imu_mutex);
-        g_imu_buffer.push_back(imu_sample);
-        while (g_imu_buffer.size() > kMaxImuBuf) g_imu_buffer.pop_front();
-      }
-
-      // 同时维持向后兼容的欧拉角缓存（度），使用头文件提供的转换逻辑
-      SerialTask::EulerAngles angles;
-      Eigen::Quaterniond imu_quaternion_raw(static_cast<double>(latest_frame.q0), static_cast<double>(latest_frame.q1),
-                                            static_cast<double>(latest_frame.q2), static_cast<double>(latest_frame.q3));
-      SerialTask::QuaternionToEuler(imu_quaternion_raw, angles);
-
-      {
-        std::lock_guard<std::mutex> lk(g_imu_angle_history_mutex);
-        g_imu_angle_history.push_back(angles);
-        if (g_imu_angle_history.size() > kAngleHistory) g_imu_angle_history.pop_front();
-      }
-
-      SerialTask::EulerAngles filtered = angles;
-      {
-        std::lock_guard<std::mutex> lk(g_imu_angle_history_mutex);
-        std::vector<double> pitch_history_values, yaw_history_values;
-        pitch_history_values.reserve(g_imu_angle_history.size());
-        yaw_history_values.reserve(g_imu_angle_history.size());
-        for (auto &a : g_imu_angle_history) {
-          pitch_history_values.push_back(a.pitch);
-          yaw_history_values.push_back(a.yaw);
-        }
-        auto median_of = [](std::vector<double> &v) {
-          if (v.empty()) return 0.0;
-          std::sort(v.begin(), v.end());
-          return v[v.size() / 2];
-        };
-        filtered.pitch = static_cast<float>(median_of(pitch_history_values));
-        filtered.yaw = static_cast<float>(median_of(yaw_history_values));
-      }
-      {
-        std::lock_guard<std::mutex> lock(g_angles_mutex);
-        g_latest_angles = filtered;
-      }
-      std::cout << "\n收到角度 原始(Pitch,Yn)=" << angles.pitch << "," << angles.yaw
-                << " 过滤后(Pitch,Yn)=" << filtered.pitch << "," << filtered.yaw << std::endl;
-    }
-    std::this_thread::sleep_for(std::chrono::microseconds(200));
-  }
-}
-
-/**
- * @brief 摄像头采集线程，不断获取最新帧并推送到共享缓存。
- * @param camera GalaxyCamera 实例。
- * @param buffer 共享帧缓存用于与推理线程通信。
- */
-void CaptureThread(CameraTask::GalaxyCamera *camera, FrameBuffer *buffer) {
+  static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
   while (g_running) {
     cv::Mat frame = camera->grab(1000);
     if (frame.empty()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
       continue;
     }
-    auto shared_frame = std::make_shared<cv::Mat>(frame);
-    auto ts = std::chrono::steady_clock::now();
-    buffer->push_frame(shared_frame, ts);
+
+    // 只保留最新一帧（附带时间戳）：直接覆盖并通知预测线程
+    {
+      std::lock_guard<std::mutex> lk(g_frame_mutex);
+      g_latest_frame_item.frame = frame.clone();
+      g_latest_frame_item.ts = std::chrono::steady_clock::now();
+      g_has_frame = true;
+    }
+    g_frame_cv.notify_one();
   }
+
+  camera->close();
 }
-// the sequence: get frame -> inference -> get IMU -> calc offset -> send.
 
-/**
- * @brief 推理线程：从帧缓存取帧、跑模型、更新预测、发送结果。
- * @param predictor 模型推理器。
- * @param ekf 卡尔曼滤波器实例。
- * @param buffer 图像帧缓存。
- * @param queue 串口命令队列。
- * @param fps_counter FPS 统计器。
- */
-void InferenceThread(ImagePredict::ImagePredict *predictor, Tracker2D *tracker, FrameBuffer *buffer,
-                     serial::Serial *serial_port, std::atomic<bool> *serial_ready, FPSCounter *fps_counter) {
-  OffsetAngles offset_calculator;
-  Eigen::Vector2d last_predicted_center(0, 0);
-  float last_width = 0, last_height = 0;
-  bool detection_present = false;
+void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
+  FPSCounter fps_counter;
   while (g_running) {
-    auto item = buffer->pop_latest();
-    if (!item.frame) {
+    cv::Mat frame;
+    std::chrono::steady_clock::time_point frame_ts{};
+    // 等待最新帧
+    {
+      std::unique_lock<std::mutex> lk(g_frame_mutex);
+      g_frame_cv.wait(lk, [] { return g_has_frame || !g_running; });
       if (!g_running) break;
-      continue;
-    }
-    auto frame_ptr = item.frame;
-    auto frame_ts = item.ts;
-
-    auto time_start = std::chrono::high_resolution_clock::now();
-    auto result = predictor->run(*frame_ptr);
-
-    cv::Rect bound_boxes;
-    bool detection_now = !result.boxes.empty();
-    if (detection_now) {
-      bound_boxes = cv::Rect(static_cast<int>(result.boxes[0][0]), static_cast<int>(result.boxes[0][1]),
-                             static_cast<int>(result.boxes[0][2] - result.boxes[0][0]),
-                             static_cast<int>(result.boxes[0][3] - result.boxes[0][1]));
-      last_predicted_center = tracker->update(bound_boxes);
-      last_width = bound_boxes.width;
-      last_height = bound_boxes.height;
-      detection_present = true;
-    } else {
-      detection_present = false;
-      last_predicted_center = Eigen::Vector2d(0, 0);
-      last_width = 0;
-      last_height = 0;
+      if (g_has_frame) {
+        frame = g_latest_frame_item.frame.clone();
+        frame_ts = g_latest_frame_item.ts;
+        // 已取走最新帧，标记为无新帧（下一次仍可被覆盖）
+        g_has_frame = false;
+      }
     }
 
-    GimbalAngles angles =
-        offset_calculator.CalculateOffsetAngles(last_predicted_center, last_width, last_height, detection_present);
-    if (detection_present) {
-      // 获取与帧时间对齐的 IMU 姿态（插值或小幅外推）
-      Eigen::Quaterniond imu_quaternion_at_frame = Eigen::Quaterniond::Identity();
+    if (frame.empty()) continue;
+    ImageRecognize::PredictResult result;
+    try {
+      result = predictor.run(frame);
+      // 关联最近一次 IMU 状态并记录延迟
+      ResultWithImu wrapped{result};
       {
         std::lock_guard<std::mutex> lk(g_imu_mutex);
-        // 查找区间
-        if (g_imu_buffer.empty()) {
-        } else if (frame_ts <= g_imu_buffer.front().ts) {
-          imu_quaternion_at_frame = g_imu_buffer.front().q;
-        } else if (frame_ts >= g_imu_buffer.back().ts) {
-          // 小幅外推：用最近两个样本估计旋转速率
-          if (g_imu_buffer.size() >= 2) {
-            const ImuSample &sample_a = g_imu_buffer[g_imu_buffer.size() - 2];
-            const ImuSample &sample_b = g_imu_buffer.back();
-            double dt = std::chrono::duration<double>(sample_b.ts - sample_a.ts).count();
-            if (dt <= 1e-6) {
-              imu_quaternion_at_frame = sample_b.q;
-            } else {
-              Eigen::Quaterniond delta_quaternion = sample_b.q * sample_a.q.conjugate();
-              // 轴角
-              Eigen::AngleAxisd angle_axis(delta_quaternion);
-              double angle = angle_axis.angle();
-              Eigen::Vector3d axis = angle_axis.axis();
-              double dt_ext = std::chrono::duration<double>(frame_ts - sample_b.ts).count();
-              if (std::abs(dt_ext) > 0.05) {
-                imu_quaternion_at_frame = sample_b.q;
-              } else {
-                double angle_ext = (angle / dt) * dt_ext;
-                Eigen::Quaterniond dq_ext(Eigen::AngleAxisd(angle_ext, axis));
-                imu_quaternion_at_frame = sample_b.q * dq_ext;
-              }
+        if (!g_imu_buffer.empty()) {
+          // 寻找与 frame_ts 时间差最小的 IMU 条目
+          auto best_it = g_imu_buffer.begin();
+          auto best_diff = std::chrono::steady_clock::duration::max();
+          for (auto it = g_imu_buffer.begin(); it != g_imu_buffer.end(); ++it) {
+            auto diff = (it->first > frame_ts) ? (it->first - frame_ts) : (frame_ts - it->first);
+            if (diff < best_diff) {
+              best_diff = diff;
+              best_it = it;
             }
-          } else {
-            imu_quaternion_at_frame = g_imu_buffer.back().q;
           }
+          wrapped.imu = best_it->second;
+          wrapped.imu_ts = best_it->first;
+          wrapped.delay = frame_ts - best_it->first;
+
+          // 删除缓冲区中时间点 t 及之前的 IMU 条目，避免重复使用已匹配的数据
+          g_imu_buffer.erase(g_imu_buffer.begin(), std::next(best_it));
         } else {
-          // 插值
-          for (size_t i = 1; i < g_imu_buffer.size(); ++i) {
-            if (g_imu_buffer[i].ts >= frame_ts) {
-              const ImuSample &sample_a = g_imu_buffer[i - 1];
-              const ImuSample &sample_b = g_imu_buffer[i];
-              double interp_alpha =
-                  double((frame_ts - sample_a.ts).count()) / double((sample_b.ts - sample_a.ts).count());
-              imu_quaternion_at_frame = sample_a.q.slerp(interp_alpha, sample_b.q);
-              break;
-            }
-          }
+          wrapped.delay = std::chrono::steady_clock::duration::zero();
         }
       }
+      {
+        std::lock_guard<std::mutex> lk(g_result_mutex);
+        g_last_matched_result = std::make_shared<ResultWithImu>(std::move(wrapped));
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "ImagePredictThread exception: " << e.what() << std::endl;
+    }
 
-      // 转换为欧拉角并发送
-      if (serial_ready->load()) {
-        // 将 imu_quaternion_at_frame 转为 EulerAngles（度）
-        SerialTask::EulerAngles imu_angles_at_frame;
-        SerialTask::QuaternionToEuler(imu_quaternion_at_frame, imu_angles_at_frame);
+    cv::Point2d offset_angles;
+    if (!result.boxes.empty()) {
+      float center_x = (result.boxes[0][0] + result.boxes[0][2]) / 2.0f;
+      float center_y = (result.boxes[0][1] + result.boxes[0][3]) / 2.0f;
+      SerialTask::EulerAngles matched_imu{};
+      bool has_matched_imu = false;
 
-        float desired_pitch = static_cast<float>(imu_angles_at_frame.pitch + (angles.pitch));
-        float desired_yaw = static_cast<float>(imu_angles_at_frame.yaw + (angles.yaw));
+      std::lock_guard<std::mutex> lk(g_result_mutex);
+      if (g_last_matched_result) {
+        matched_imu = g_last_matched_result->imu;
+        has_matched_imu = true;
+      }
 
-        // 归一化差值到 [-180,180]
-        auto normalize_angle_delta = [](float d) {
-          while (d > 180.0f) d -= 360.0f;
-          while (d < -180.0f) d += 360.0f;
-          return d;
-        };
+      static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
 
-        float delta_pitch = normalize_angle_delta(desired_pitch - last_sent_pitch_deg);
-        if (delta_pitch > max_delta_deg) delta_pitch = max_delta_deg;
-        if (delta_pitch < -max_delta_deg) delta_pitch = -max_delta_deg;
-        float delta_yaw = normalize_angle_delta(desired_yaw - last_sent_yaw_deg);
-        if (delta_yaw > max_delta_deg) delta_yaw = max_delta_deg;
-        if (delta_yaw < -max_delta_deg) delta_yaw = -max_delta_deg;
-
-        float send_pitch_candidate = last_sent_pitch_deg + delta_pitch;
-        float send_yaw_candidate = last_sent_yaw_deg + delta_yaw;
-
-        // 指数平滑（度）
-        float send_pitch = smoothing_alpha * last_sent_pitch_deg + (1.0f - smoothing_alpha) * send_pitch_candidate;
-        float send_yaw = smoothing_alpha * last_sent_yaw_deg + (1.0f - smoothing_alpha) * send_yaw_candidate;
-
-        // 计算相对偏移（度）
-        float pitch_offset_to_send = send_pitch - static_cast<float>(imu_angles_at_frame.pitch);
-        float yaw_offset_to_send = send_yaw - static_cast<float>(imu_angles_at_frame.yaw);
-
-        // 详细发送前日志：时间、IMU窗口、imu_at_frame、期望与偏移
-        {
-          std::lock_guard<std::mutex> lk(g_imu_mutex);
-          auto now = std::chrono::steady_clock::now();
-          auto front_ts = g_imu_buffer.empty() ? std::chrono::steady_clock::time_point{} : g_imu_buffer.front().ts;
-          auto back_ts = g_imu_buffer.empty() ? std::chrono::steady_clock::time_point{} : g_imu_buffer.back().ts;
-          auto to_ms = [](std::chrono::steady_clock::time_point t) -> long long {
-            return std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count();
-          };
-          std::cout << "\n[DEBUG SEND] frame_ts=" << to_ms(frame_ts) << " now=" << to_ms(now)
-                    << " imu_front=" << (front_ts == std::chrono::steady_clock::time_point{} ? 0 : to_ms(front_ts))
-                    << " imu_back=" << (back_ts == std::chrono::steady_clock::time_point{} ? 0 : to_ms(back_ts))
-                    << " imu_at_frame(p,y)=" << imu_angles_at_frame.pitch << "," << imu_angles_at_frame.yaw
-                    << " desired(p,y)=" << desired_pitch << "," << desired_yaw << " send(p,y)=" << send_pitch << ","
-                    << send_yaw << " delta(p,y)=" << pitch_offset_to_send << "," << yaw_offset_to_send << std::endl;
-        }
-
-        // 根据单轴阈值决定是否发送
-        if (std::abs(pitch_offset_to_send) > MIN_PITCH_SEND_DEG || std::abs(yaw_offset_to_send) > MIN_YAW_SEND_DEG) {
-          try {
-            SerialTask::SerialSend(*serial_port, imu_angles_at_frame, pitch_offset_to_send, yaw_offset_to_send);
-            last_sent_pitch_deg = send_pitch;
-            last_sent_yaw_deg = send_yaw;
-          } catch (const std::exception &e) {
-            std::cerr << "串口发送失败: " << e.what() << std::endl;
-          }
+      if (has_matched_imu) {
+        auto [absolute_yaw, absolute_pitch] =
+            angle_calculator.CalculateAbsoluteAngles(center_x, center_y, matched_imu.yaw, matched_imu.pitch);
+        offset_angles.x = absolute_yaw - matched_imu.yaw;
+        offset_angles.y = absolute_pitch - matched_imu.pitch;
+        if (abs(offset_angles.x) > minimum_angle || abs(offset_angles.y) > minimum_angle) {
+          has_detection = true;
+          g_send_abs_yaw = absolute_yaw;
+          g_send_abs_pitch = absolute_pitch;
         } else {
-          // 不发送，仅输出说明
-          std::cout << "[DEBUG SEND] skip send: below per-axis thresholds" << std::endl;
+          has_detection = false;
         }
+        ImageRecognize::ImageShow::ShowAngles(frame, absolute_yaw, absolute_pitch, matched_imu.yaw, matched_imu.pitch,
+                                              offset_angles.x, offset_angles.y);
       }
     }
 
-    fps_counter->tick();
-    double fps = fps_counter->get();
-    auto time_end = std::chrono::high_resolution_clock::now();
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count();
-    std::cout << "\rfps:" << fps << ", ms:" << elapsed_ms << ", pitch:" << angles.pitch << ", yaw:" << angles.yaw
-              << std::flush;
-    ImageShow::ShowNow(*frame_ptr, result, elapsed_ms, fps);
-    if (detection_present) {
-      ImageShow::ShowPredict(*frame_ptr, last_predicted_center, last_width, last_height);
-      ImageShow::ShowAngles(*frame_ptr, static_cast<float>(angles.pitch), static_cast<float>(angles.yaw));
-    }
-    if (ImageShow::WaitForExit()) {
+    // 可视化显示
+    fps_counter.tick();
+    double fps = fps_counter.get();
+
+    auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - frame_ts).count();
+    ImageRecognize::ImageShow::ShowNow(frame, result, elapsed_ms, fps);
+
+    // 处理 GUI 事件并允许按键退出
+    if (ImageRecognize::ImageShow::WaitForExit()) {
       g_running = false;
-      buffer->cv.notify_all();
       break;
+    }
+  }
+}
+
+void IMUReadThread(serial::Serial &port) {
+  // 用于计算即时速率的上一次 IMU
+  SerialTask::EulerAngles prev_local_imu{};
+  std::chrono::steady_clock::time_point prev_local_ts{};
+
+  while (g_running) {
+    SerialTask::EulerAngles angles;
+    if (SerialTask::ReadIMUData(port, angles)) {
+      auto ts = std::chrono::steady_clock::now();
+      prev_local_imu = angles;
+      prev_local_ts = ts;
+
+      std::lock_guard<std::mutex> lk(g_imu_mutex);
+      // 添加到缓冲区末尾
+      g_imu_buffer.emplace_back(ts, angles);
+
+      // 裁剪过旧的 IMU 条目，保持缓冲区只包含最近一段时间的数据
+      while (!g_imu_buffer.empty() && (ts - g_imu_buffer.front().first) > g_imu_buffer_max_age) {
+        g_imu_buffer.pop_front();
+      }
+
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+  }
+
+  if (port.isOpen()) port.close();
+}
+
+void IMUSendThread(serial::Serial &port) {
+  while (g_running) {
+    if (has_detection) {
+      SerialTask::SerialSend(port, g_send_abs_pitch, g_send_abs_yaw);
+      has_detection = false;
     }
   }
 }
