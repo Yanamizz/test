@@ -15,7 +15,6 @@
 #include "SerialTask/SerialSend.hpp"
 #include "ImageRecognize/ImageShow.hpp"
 #include "Tools/AngleCalculate.hpp"
-#include "Tools/AngularVelocityCalculate.hpp"
 #include "Tools/FpsCounter.hpp"
 #include "CameraTask/GetImage.hpp"
 
