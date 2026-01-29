@@ -25,8 +25,8 @@ static std::condition_variable g_frame_cv;  // 通知预测线程有新帧到达
 static std::mutex g_result_mutex;           // 保护最新预测结果的互斥锁
                                             // IMU 数据缓冲区
 static std::deque<std::pair<std::chrono::steady_clock::time_point, SerialTask::EulerAngles>> g_imu_buffer;
-static std::mutex g_imu_mutex;                       // 保护 IMU 缓冲区的互斥锁
-static std::atomic<float> g_current_yaw_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
+static std::mutex g_imu_mutex;                         // 保护 IMU 缓冲区的互斥锁
+static std::atomic<float> g_current_yaw_rate{0.0f};    // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
 static std::atomic<float> g_current_pitch_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
 
 // 全局：只保存最新一帧
@@ -36,9 +36,10 @@ struct FrameItem {
 };
 
 static FrameItem g_latest_frame_item;  // 最新帧条目
-static bool g_has_frame = false;       // 是否有新帧到达
-static bool has_detection = false;     // 是否有目标被检测到
-static float minimum_angle = 1.0f;     // 最小角度阈值，低于该值不发送偏移
+
+static bool g_has_frame = false;    // 是否有新帧到达
+static bool has_detection = false;  // 是否有目标被检测到
+static float minimum_angle = 1.0f;  // 最小角度阈值，低于该值不发送偏移
 static float g_send_abs_yaw = 0.0f;
 static float g_send_abs_pitch = 0.0f;
 
@@ -151,6 +152,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
               best_it = it;
             }
           }
+
           wrapped.imu = best_it->second;
           wrapped.imu_ts = best_it->first;
           wrapped.delay = frame_ts - best_it->first;
@@ -237,12 +239,10 @@ void IMUReadThread(serial::Serial &port) {
       while (!g_imu_buffer.empty() && (ts - g_imu_buffer.front().first) > g_imu_buffer_max_age) {
         g_imu_buffer.pop_front();
       }
-
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
   }
-
   if (port.isOpen()) port.close();
 }
 

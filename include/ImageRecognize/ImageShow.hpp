@@ -4,7 +4,6 @@
 #include <vector>
 #include <string>
 #include "OutputDataProcess.hpp"
-#include <Eigen/Dense>
 namespace ImageRecognize {
 class ImageShow {
  public:
@@ -15,10 +14,10 @@ class ImageShow {
    * @param ms 推理耗时（毫秒）
    */
 
-  static void ShowNow(cv::Mat& frame, const ImageRecognize::DataProcessResult& result, double ms, double fps) {
+  static void ShowNow(cv::Mat &frame, const ImageRecognize::DataProcessResult &result, double ms, double fps) {
     // 绘制结果
 
-    for (const auto& box : result.boxes) {
+    for (const auto &box : result.boxes) {
       cv::rectangle(frame, {static_cast<int>(box[0]), static_cast<int>(box[1])},
                     {static_cast<int>(box[2]), static_cast<int>(box[3])}, {0, 255, 0}, 2);
       cv::putText(frame, "Now", {static_cast<int>(box[0]), static_cast<int>(box[1]) - 6}, cv::FONT_HERSHEY_SIMPLEX, 0.5,
@@ -36,23 +35,8 @@ class ImageShow {
                 {0, 200, 255}, 2);
     cv::imshow("Detection Result", frame);
   }
-  /**
-   * @brief 绘制卡尔曼滤波预测位置
-   * @param frame 输入输出图像帧
-   * @param predict_center 预测中心点 (x, y)
-   * @param w 框宽度
-   * @param h 框高度
-   */
-  static void ShowPredict(cv::Mat& frame, const Eigen::Vector2d& predict_center, float w, float h) {
-    int x = static_cast<int>(predict_center[0] - w / 2);
-    int y = static_cast<int>(predict_center[1] - h / 2);
-    cv::rectangle(frame, cv::Point(x, y), cv::Point(x + static_cast<int>(w), y + static_cast<int>(h)),
-                  cv::Scalar(255, 0, 0), 2);
-    cv::putText(frame, "Predict", cv::Point(x, y - 6), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 0, 0), 1);
-    cv::imshow("Detection Result", frame);
-  }
 
-  static void ShowAngles(cv::Mat& frame, float yaw, float pitch, float imu_yaw, float imu_pitch, float offset_yaw,
+  static void ShowAngles(cv::Mat &frame, float yaw, float pitch, float imu_yaw, float imu_pitch, float offset_yaw,
                          float offset_pitch) {
     cv::putText(frame, "Pitch: " + std::to_string(pitch), {10, 100}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 255}, 2);
     cv::putText(frame, "Yaw: " + std::to_string(yaw), {10, 135}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 255}, 2);
