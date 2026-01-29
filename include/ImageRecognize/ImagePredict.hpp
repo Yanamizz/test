@@ -105,8 +105,8 @@ class ImagePredict {
  private:
   Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "predict"};  ///< ORT 环境对象
   Ort::SessionOptions session_options_;                 ///< ORT 会话选项（如需可扩展）
-  static constexpr int width_ = 320;                    ///< 模型输入宽
-  static constexpr int height_ = 320;                   ///< 模型输入高
+  static constexpr int width_ = 480;                    ///< 模型输入宽
+  static constexpr int height_ = 480;                   ///< 模型输入高
   std::unique_ptr<Ort::Session> session_;               ///< 复用的 ORT 会话
   std::string input_name_;                              ///< 模型输入名称
   std::string output_name_;                             ///< 模型输出名称

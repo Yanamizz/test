@@ -10,12 +10,13 @@
 #include <iterator>
 #include <atomic>
 
+#include "ImageRecognize/ImageShow.hpp"
 #include "ImageRecognize/ImagePredict.hpp"
 #include "SerialTask/SerialRead.hpp"
 #include "SerialTask/SerialSend.hpp"
-#include "ImageRecognize/ImageShow.hpp"
 #include "Tools/AngleCalculate.hpp"
 #include "Tools/FpsCounter.hpp"
+#include "Tools/LaserAngleCalculate.hpp"
 #include "CameraTask/GetImage.hpp"
 
 std::string model_path = "/home/hanni/code/rm/src/model/best.onnx";
@@ -25,8 +26,8 @@ static std::condition_variable g_frame_cv;  // 通知预测线程有新帧到达
 static std::mutex g_result_mutex;           // 保护最新预测结果的互斥锁
                                             // IMU 数据缓冲区
 static std::deque<std::pair<std::chrono::steady_clock::time_point, SerialTask::EulerAngles>> g_imu_buffer;
-static std::mutex g_imu_mutex;                         // 保护 IMU 缓冲区的互斥锁
-static std::atomic<float> g_current_yaw_rate{0.0f};    // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
+static std::mutex g_imu_mutex;                       // 保护 IMU 缓冲区的互斥锁
+static std::atomic<float> g_current_yaw_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
 static std::atomic<float> g_current_pitch_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
 
 // 全局：只保存最新一帧
@@ -95,6 +96,7 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
     return;
   }
   static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
+  static Tools::LaserAngleCalculator laser_angle_calculator;  // 持久化 LaserAngleCalculator，避免每次调用时重置
   while (g_running) {
     cv::Mat frame = camera->grab(1000);
     if (frame.empty()) {
@@ -175,6 +177,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
     if (!result.boxes.empty()) {
       float center_x = (result.boxes[0][0] + result.boxes[0][2]) / 2.0f;
       float center_y = (result.boxes[0][1] + result.boxes[0][3]) / 2.0f;
+      float width = result.boxes[0][2] - result.boxes[0][0];
+      float height = result.boxes[0][3] - result.boxes[0][1];
+      float distance = Tools::DistanceCalculator().CalculateDistance(width > height ? width : height);
+
       SerialTask::EulerAngles matched_imu{};
       bool has_matched_imu = false;
 
@@ -191,15 +197,20 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
             angle_calculator.CalculateAbsoluteAngles(center_x, center_y, matched_imu.yaw, matched_imu.pitch);
         offset_angles.x = absolute_yaw - matched_imu.yaw;
         offset_angles.y = absolute_pitch - matched_imu.pitch;
+
+        static Tools::LaserAngleCalculator laser_angle_calculator;
+
+        float laser_angle = laser_angle_calculator.CalculateLaserAngle(width > height ? width : height);
+
         if (abs(offset_angles.x) > minimum_angle || abs(offset_angles.y) > minimum_angle) {
           has_detection = true;
-          g_send_abs_yaw = absolute_yaw;
+          g_send_abs_yaw = absolute_yaw - laser_angle;
           g_send_abs_pitch = absolute_pitch;
         } else {
           has_detection = false;
         }
         ImageRecognize::ImageShow::ShowAngles(frame, absolute_yaw, absolute_pitch, matched_imu.yaw, matched_imu.pitch,
-                                              offset_angles.x, offset_angles.y);
+                                              offset_angles.x, offset_angles.y , distance);
       }
     }
 
