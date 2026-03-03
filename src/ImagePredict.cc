@@ -30,19 +30,33 @@ static std::mutex g_imu_mutex;                       // 保护 IMU 缓冲区的�
 static std::atomic<float> g_current_yaw_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
 static std::atomic<float> g_current_pitch_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
 
-// 全局：只保存最新一帧
+// 全局：双buffer避免重复clone
 struct FrameItem {
   cv::Mat frame;
   std::chrono::steady_clock::time_point ts{};
 };
 
-static FrameItem g_latest_frame_item;  // 最新帧条目
+static FrameItem g_frame_buffers[2];     // 双buffer
+static std::atomic<int> g_write_idx{0};  // 当前写入buffer索引
+static std::atomic<int> g_read_idx{-1};  // 当前可读buffer索引，-1表示无新帧
 
-static bool g_has_frame = false;    // 是否有新帧到达
-static bool has_detection = false;  // 是否有目标被检测到
-static float minimum_angle = 1.0f;  // 最小角度阈值，低于该值不发送偏移
-static float g_send_abs_yaw = 0.0f;
-static float g_send_abs_pitch = 0.0f;
+static std::atomic<bool> has_detection{false};  // 是否有目标被检测到
+static float minimum_angle = 1.0f;              // 最小角度阈值，低于该值不发送偏移
+static std::atomic<float> g_send_abs_yaw{0.0f};
+static std::atomic<float> g_send_abs_pitch{0.0f};
+static constexpr float g_max_send_delta = 15.0f;  // 每次相对当前IMU允许的最大角差
+
+static inline float NormalizeDeltaDeg(float delta) {
+  while (delta > 180.0f) delta -= 360.0f;
+  while (delta < -180.0f) delta += 360.0f;
+  return delta;
+}
+
+static inline float NormalizeAbsDeg(float angle) {
+  while (angle > 180.0f) angle -= 360.0f;
+  while (angle < -180.0f) angle += 360.0f;
+  return angle;
+}
 
 // 全局预测结果（获得 result 后写入）
 struct ResultWithImu {
@@ -104,13 +118,15 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
       continue;
     }
 
-    // 只保留最新一帧（附带时间戳）：直接覆盖并通知预测线程
-    {
-      std::lock_guard<std::mutex> lk(g_frame_mutex);
-      g_latest_frame_item.frame = frame.clone();
-      g_latest_frame_item.ts = std::chrono::steady_clock::now();
-      g_has_frame = true;
-    }
+    // 双buffer写入：无锁切换，避免clone
+    int write_idx = g_write_idx.load(std::memory_order_relaxed);
+    g_frame_buffers[write_idx].frame = std::move(frame);  // 移动语义，避免拷贝
+    g_frame_buffers[write_idx].ts = std::chrono::steady_clock::now();
+
+    // 原子切换读写索引
+    int next_write = 1 - write_idx;
+    g_write_idx.store(next_write, std::memory_order_release);
+    g_read_idx.store(write_idx, std::memory_order_release);
     g_frame_cv.notify_one();
   }
 
@@ -124,16 +140,16 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
   while (g_running) {
     cv::Mat frame;
     std::chrono::steady_clock::time_point frame_ts{};
-    // 等待最新帧
+    // 等待最新帧（双buffer无锁读取）
     {
       std::unique_lock<std::mutex> lk(g_frame_mutex);
-      g_frame_cv.wait(lk, [] { return g_has_frame || !g_running; });
+      g_frame_cv.wait(lk, [] { return g_read_idx.load(std::memory_order_acquire) >= 0 || !g_running; });
       if (!g_running) break;
-      if (g_has_frame) {
-        frame = g_latest_frame_item.frame.clone();
-        frame_ts = g_latest_frame_item.ts;
-        // 已取走最新帧，标记为无新帧（下一次仍可被覆盖）
-        g_has_frame = false;
+
+      int read_idx = g_read_idx.load(std::memory_order_acquire);
+      if (read_idx >= 0) {
+        frame = g_frame_buffers[read_idx].frame;  // 直接引用，无clone
+        frame_ts = g_frame_buffers[read_idx].ts;
       }
     }
 
@@ -174,7 +190,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
     } catch (const std::exception &e) {
       std::cerr << "ImagePredictThread exception: " << e.what() << std::endl;
     }
-
     cv::Point2d offset_angles;
     if (!result.boxes.empty()) {
       float center_x = (result.boxes[0][0] + result.boxes[0][2]) / 2.0f;
@@ -186,10 +201,13 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
       SerialTask::EulerAngles matched_imu{};
       bool has_matched_imu = false;
 
-      std::lock_guard<std::mutex> lk(g_result_mutex);
-      if (g_last_matched_result) {
-        matched_imu = g_last_matched_result->imu;
-        has_matched_imu = true;
+      // 缩短锁范围：只拷贝IMU，其余放锁外
+      {
+        std::lock_guard<std::mutex> lk(g_result_mutex);
+        if (g_last_matched_result) {
+          matched_imu = g_last_matched_result->imu;
+          has_matched_imu = true;
+        }
       }
 
       static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
@@ -205,8 +223,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
 
         auto [absolute_yaw, absolute_pitch] =
             angle_calculator.CalculateAbsoluteAngles(center_x, center_y, matched_imu.yaw, matched_imu.pitch, dt);
-        offset_angles.x = absolute_yaw - matched_imu.yaw;
-        offset_angles.y = absolute_pitch - matched_imu.pitch;
+        // 必须用“最短角差”，否则跨越 ±180° 时会出现 300° 级突变
+        offset_angles.x = NormalizeDeltaDeg(absolute_yaw - matched_imu.yaw);
+        offset_angles.y = NormalizeDeltaDeg(absolute_pitch - matched_imu.pitch);
 
         static Tools::LaserAngleCalculator laser_angle_calculator;
 
@@ -214,12 +233,21 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
 
         if (abs(offset_angles.x) > minimum_angle || abs(offset_angles.y) > minimum_angle) {
           has_detection = true;
-          g_send_abs_yaw = absolute_yaw - laser_angle;
-          g_send_abs_pitch = absolute_pitch;
-          std::cout << "Offset angles (deg): Yaw = " << g_send_abs_yaw << ", Pitch = " << g_send_abs_pitch << std::endl;
+          // 下位机只接受绝对角：先算目标绝对角，再对“相对当前IMU的角差”限幅，最后回到绝对角
+          float desired_abs_yaw = NormalizeAbsDeg(static_cast<float>(absolute_yaw - laser_angle));
+          float desired_abs_pitch = NormalizeAbsDeg(static_cast<float>(absolute_pitch));
 
+          float delta_yaw = NormalizeDeltaDeg(desired_abs_yaw - matched_imu.yaw);
+          float delta_pitch = NormalizeDeltaDeg(desired_abs_pitch - matched_imu.pitch);
+
+          delta_yaw = std::clamp(delta_yaw, -g_max_send_delta, g_max_send_delta);
+          delta_pitch = std::clamp(delta_pitch, -g_max_send_delta, g_max_send_delta);
+
+          g_send_abs_yaw.store(NormalizeAbsDeg(matched_imu.yaw + delta_yaw), std::memory_order_release);
+          g_send_abs_pitch.store(NormalizeAbsDeg(matched_imu.pitch + delta_pitch), std::memory_order_release);
+          has_detection.store(true, std::memory_order_release);
         } else {
-          has_detection = false;
+          has_detection.store(false, std::memory_order_release);
         }
         ImageRecognize::ImageShow::ShowAngles(frame, absolute_yaw, absolute_pitch, matched_imu.yaw, matched_imu.pitch,
                                               offset_angles.x, offset_angles.y, distance);
@@ -271,9 +299,13 @@ void IMUReadThread(serial::Serial &port) {
 
 void IMUSendThread(serial::Serial &port) {
   while (g_running) {
-    if (has_detection) {
-      SerialTask::SerialSend(port, g_send_abs_pitch, g_send_abs_yaw);
-      has_detection = false;
+    if (has_detection.load(std::memory_order_acquire)) {
+      float pitch = g_send_abs_pitch.load(std::memory_order_acquire);
+      float yaw = g_send_abs_yaw.load(std::memory_order_acquire);
+      SerialTask::SerialSend(port, pitch, yaw);
+      has_detection.store(false, std::memory_order_release);
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
 }

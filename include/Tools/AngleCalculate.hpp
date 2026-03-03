@@ -8,6 +8,8 @@
 #include <algorithm>  // for std::clamp
 
 #include "KalmanFilter/KalmanFilter.hpp"
+#include "KalmanFilter/ExtendedKalmanFilter.hpp"
+#include "KalmanFilter/UnscentedKalmanFilter.hpp"
 #include "Tools/CameraData.hpp"
 
 #define PI 3.1415926
@@ -69,8 +71,9 @@ class AngleCalculator {
     return angle;
   }
 
-  KalmanFilter kf_yaw{0.01, 1.0};
-  KalmanFilter kf_pitch{0.01, 1.0};
+  UnscentedKalmanFilter kf_yaw{0.01, 1.0};
+  UnscentedKalmanFilter kf_pitch{0.01, 1.0};
+
   std::chrono::steady_clock::time_point last_time;
   bool is_initialized = false;
 };
