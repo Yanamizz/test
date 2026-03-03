@@ -1,5 +1,6 @@
 #pragma once
 #include <cmath>
+#include <chrono>
 #include <iostream>
 #include <opencv2/opencv.hpp>
 #include <vector>
@@ -15,14 +16,19 @@ namespace Tools {
 class AngleCalculator {
  public:
   CameraData cameraData;
-  std::pair<float, float> CalculateAbsoluteAngles(float targetX, float targetY, float currentYaw, float currentPitch) {
-    auto now = std::chrono::steady_clock::now();
+  std::pair<float, float> CalculateAbsoluteAngles(float targetX, float targetY, float currentYaw, float currentPitch,
+                                                  double dt_from_main = -1.0) {
     double dt = 0.033;  // 默认帧间隔 (30fps)
-    if (is_initialized) {
-      dt = std::chrono::duration<double>(now - last_time).count();
+    if (dt_from_main > 0.0) {
+      dt = dt_from_main;
+    } else {
+      auto now = std::chrono::steady_clock::now();
+      if (is_initialized) {
+        dt = std::chrono::duration<double>(now - last_time).count();
+      }
+      last_time = now;
+      is_initialized = true;
     }
-    last_time = now;
-    is_initialized = true;
 
     // 去畸变并计算偏移角
     double fx = cameraData.cameraMatrix.at<double>(0, 0);
@@ -43,6 +49,10 @@ class AngleCalculator {
     // 计算偏移角
     double offset_yaw = -std::atan(rxNew) / PI * 180.0;
     double offset_pitch = std::atan(ryNew) / PI * 180.0;
+
+    if (std::abs(offset_yaw) > 15.0f) offset_yaw = 15.0f * (offset_yaw > 0 ? 1.0f : -1.0f);  // 超出范围的角度置零
+    if (std::abs(offset_pitch) > 15.0f) offset_pitch = 15.0f * (offset_pitch > 0 ? 1.0f : -1.0f);  // 超出范围的角度置零
+
     double absolute_yaw = normalizeAngle(currentYaw + offset_yaw);
     double absolute_pitch = normalizeAngle(currentPitch + offset_pitch);
 

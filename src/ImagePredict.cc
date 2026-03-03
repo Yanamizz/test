@@ -119,6 +119,8 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
 
 void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
   FPSCounter fps_counter;
+  std::chrono::steady_clock::time_point prev_frame_ts{};
+  bool has_prev_frame_ts = false;
   while (g_running) {
     cv::Mat frame;
     std::chrono::steady_clock::time_point frame_ts{};
@@ -193,8 +195,16 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
       static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
 
       if (has_matched_imu) {
+        double dt = 0.033;
+        if (has_prev_frame_ts) {
+          dt = std::chrono::duration<double>(frame_ts - prev_frame_ts).count();
+        }
+        prev_frame_ts = frame_ts;
+        has_prev_frame_ts = true;
+        if (dt <= 0.0 || dt > 0.2) dt = 0.033;
+
         auto [absolute_yaw, absolute_pitch] =
-            angle_calculator.CalculateAbsoluteAngles(center_x, center_y, matched_imu.yaw, matched_imu.pitch);
+            angle_calculator.CalculateAbsoluteAngles(center_x, center_y, matched_imu.yaw, matched_imu.pitch, dt);
         offset_angles.x = absolute_yaw - matched_imu.yaw;
         offset_angles.y = absolute_pitch - matched_imu.pitch;
 
@@ -206,11 +216,13 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
           has_detection = true;
           g_send_abs_yaw = absolute_yaw - laser_angle;
           g_send_abs_pitch = absolute_pitch;
+          std::cout << "Offset angles (deg): Yaw = " << g_send_abs_yaw << ", Pitch = " << g_send_abs_pitch << std::endl;
+
         } else {
           has_detection = false;
         }
         ImageRecognize::ImageShow::ShowAngles(frame, absolute_yaw, absolute_pitch, matched_imu.yaw, matched_imu.pitch,
-                                              offset_angles.x, offset_angles.y , distance);
+                                              offset_angles.x, offset_angles.y, distance);
       }
     }
 

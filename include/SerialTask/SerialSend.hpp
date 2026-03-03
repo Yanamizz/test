@@ -46,7 +46,6 @@ inline void SerialSend(serial::Serial& serial_port, float absolute_pitch, float 
 
   pitch_relative_angle = pitch_relative_angle / RAD_TO_DEG;
   yaw_relative_angle = yaw_relative_angle / RAD_TO_DEG;
-  // 输出同时打印度与弧度，便于排查单位/范围问题
 
   SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle, yaw_relative_angle);
 }

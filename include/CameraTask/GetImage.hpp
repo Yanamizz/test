@@ -29,9 +29,9 @@ class GalaxyCamera {
   bool enable_auto_white_balance = false;  ///< Use one-time auto white balance on start
   bool enable_auto_exposure = false;       ///< Use one-time auto exposure on start
   bool enable_auto_gain = false;           ///< Use one-time auto gain on start
-  double white_balance_red = 1.65;         ///< Red balance ratio, used when auto white balance is off
+  double white_balance_red = 1.8;          ///< Red balance ratio, used when auto white balance is off
   double exposure_time_us = 4500.0;        ///< Exposure time (microseconds), used when auto exposure is off
-  double gain_db = 10.0;                   ///< Gain value (dB), used when auto gain is off
+  double gain_db = 20.0;                   ///< Gain value (dB), used when auto gain is off
   // 手动设置接口（优先使用这些 setter）
   void setWhiteBalanceAuto(bool enable) { enable_auto_white_balance = enable; }
   void setWhiteBalanceChannel(const std::string &channel_name) { wb_channel_name_ = channel_name; }
