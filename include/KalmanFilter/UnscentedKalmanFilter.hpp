@@ -8,7 +8,7 @@
 namespace Tools {
 
 /**
- * @brief 无香卡尔曼滤波 (UKF - Unscented Kalman Filter)
+ * @brief 无迹卡尔曼滤波 (UKF - Unscented Kalman Filter)
  *
  * UKF 相比标准KF和EKF的优势：
  * 1. 无需计算Jacobian矩阵（自动处理非线性）
@@ -55,7 +55,7 @@ class UnscentedKalmanFilter {
    * @return 滤波后的角度估计值（单位：度）
    */
   double update(double z_measurement, double dt) {
-    if (dt <= 0.0) dt = 0.033;  // 默认30fps
+    if (dt <= 0.0) dt = 0.05;  // 默认20fps
 
     // ========== 预测阶段 (Predict) ==========
 

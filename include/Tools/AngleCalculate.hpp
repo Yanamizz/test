@@ -52,8 +52,8 @@ class AngleCalculator {
     double offset_yaw = -std::atan(rxNew) / PI * 180.0;
     double offset_pitch = std::atan(ryNew) / PI * 180.0;
 
-    if (std::abs(offset_yaw) > 15.0f) offset_yaw = 15.0f * (offset_yaw > 0 ? 1.0f : -1.0f);  // 超出范围的角度置零
-    if (std::abs(offset_pitch) > 15.0f) offset_pitch = 15.0f * (offset_pitch > 0 ? 1.0f : -1.0f);  // 超出范围的角度置零
+    if (std::abs(offset_yaw) > 15.0f) offset_yaw = 15.0f * (offset_yaw > 0 ? 1.0f : -1.0f);  // 限制超出范围的角度
+    if (std::abs(offset_pitch) > 15.0f) offset_pitch = 15.0f * (offset_pitch > 0 ? 1.0f : -1.0f);  // 限制超出范围的角度
 
     double absolute_yaw = normalizeAngle(currentYaw + offset_yaw);
     double absolute_pitch = normalizeAngle(currentPitch + offset_pitch);
@@ -71,8 +71,8 @@ class AngleCalculator {
     return angle;
   }
 
-  UnscentedKalmanFilter kf_yaw{0.01, 1.0};
-  UnscentedKalmanFilter kf_pitch{0.01, 1.0};
+  UnscentedKalmanFilter kf_yaw{0.01, 0.8};
+  UnscentedKalmanFilter kf_pitch{0.01, 0.8};
 
   std::chrono::steady_clock::time_point last_time;
   bool is_initialized = false;

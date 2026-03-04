@@ -41,7 +41,7 @@ static std::atomic<int> g_write_idx{0};  // 当前写入buffer索引
 static std::atomic<int> g_read_idx{-1};  // 当前可读buffer索引，-1表示无新帧
 
 static std::atomic<bool> has_detection{false};  // 是否有目标被检测到
-static float minimum_angle = 1.0f;              // 最小角度阈值，低于该值不发送偏移
+static float minimum_angle = 0.7f;              // 最小角度阈值，低于该值不发送偏移
 static std::atomic<float> g_send_abs_yaw{0.0f};
 static std::atomic<float> g_send_abs_pitch{0.0f};
 static constexpr float g_max_send_delta = 15.0f;  // 每次相对当前IMU允许的最大角差
@@ -213,13 +213,13 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
       static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
 
       if (has_matched_imu) {
-        double dt = 0.033;
+        double dt = 0.05;
         if (has_prev_frame_ts) {
           dt = std::chrono::duration<double>(frame_ts - prev_frame_ts).count();
         }
         prev_frame_ts = frame_ts;
         has_prev_frame_ts = true;
-        if (dt <= 0.0 || dt > 0.2) dt = 0.033;
+        if (dt <= 0.0 || dt > 0.2) dt = 0.05;
 
         auto [absolute_yaw, absolute_pitch] =
             angle_calculator.CalculateAbsoluteAngles(center_x, center_y, matched_imu.yaw, matched_imu.pitch, dt);
