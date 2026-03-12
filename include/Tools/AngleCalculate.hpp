@@ -20,7 +20,7 @@ class AngleCalculator {
   CameraData cameraData;
   std::pair<float, float> CalculateAbsoluteAngles(float targetX, float targetY, float currentYaw, float currentPitch,
                                                   double dt_from_main = -1.0) {
-    double dt = 0.033;  // 默认帧间隔 (30fps)
+    double dt = 0.05;  // 默认帧间隔 (20fps)
     if (dt_from_main > 0.0) {
       dt = dt_from_main;
     } else {

@@ -17,6 +17,7 @@
 #include "Tools/AngleCalculate.hpp"
 #include "Tools/FpsCounter.hpp"
 #include "Tools/LaserAngleCalculate.hpp"
+#include "Tools/SaveImage.hpp"
 #include "CameraTask/GetImage.hpp"
 
 std::string model_path = "/home/hanni/code/rm/src/model/best.onnx";
@@ -135,6 +136,7 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
 
 void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
   FPSCounter fps_counter;
+  static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
   std::chrono::steady_clock::time_point prev_frame_ts{};
   bool has_prev_frame_ts = false;
   while (g_running) {
@@ -191,6 +193,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
       std::cerr << "ImagePredictThread exception: " << e.what() << std::endl;
     }
     cv::Point2d offset_angles;
+    const bool detected_target = !result.boxes.empty();
     if (!result.boxes.empty()) {
       float center_x = (result.boxes[0][0] + result.boxes[0][2]) / 2.0f;
       float center_y = (result.boxes[0][1] + result.boxes[0][3]) / 2.0f;
@@ -229,13 +232,14 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
 
         static Tools::LaserAngleCalculator laser_angle_calculator;
 
-        float laser_angle = laser_angle_calculator.CalculateLaserAngle(width > height ? width : height);
+        float laser_angle = laser_angle_calculator.CalculateLaserAngle(width > height ? height : width);
 
         if (abs(offset_angles.x) > minimum_angle || abs(offset_angles.y) > minimum_angle) {
           has_detection = true;
           // 下位机只接受绝对角：先算目标绝对角，再对“相对当前IMU的角差”限幅，最后回到绝对角
-          float desired_abs_yaw = NormalizeAbsDeg(static_cast<float>(absolute_yaw - laser_angle));
-          float desired_abs_pitch = NormalizeAbsDeg(static_cast<float>(absolute_pitch));
+          float desired_abs_yaw = NormalizeAbsDeg(static_cast<float>(absolute_yaw));
+          float desired_abs_pitch =
+              NormalizeAbsDeg(static_cast<float>(absolute_pitch + laser_angle));  // 加上激光角补偿
 
           float delta_yaw = NormalizeDeltaDeg(desired_abs_yaw - matched_imu.yaw);
           float delta_pitch = NormalizeDeltaDeg(desired_abs_pitch - matched_imu.pitch);
@@ -261,6 +265,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
     auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - frame_ts).count();
     ImageRecognize::ImageShow::ShowNow(frame, result, elapsed_ms, fps);
+
+    // 无目标时，每隔若干帧保存图像到本次运行目录
+    no_target_saver.Update(frame, detected_target);
 
     // 处理 GUI 事件并允许按键退出
     if (ImageRecognize::ImageShow::WaitForExit()) {

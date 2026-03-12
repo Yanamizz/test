@@ -8,7 +8,7 @@
 #pragma once
 
 #include "Common.hpp"
-#include "SerialRead.hpp"
+#include "SerialTask/SerialRead.hpp"
 #include <serial/serial.h>
 #include <thread>
 #include <chrono>
@@ -29,7 +29,6 @@ inline float NormalizeDegTo180(float d) {
  * @param pitch_relative_angle 目标侧 Pitch 相对角度（单位：度）
  * @param yaw_relative_angle 目标侧 Yaw 相对角度（单位：度）
  */
-SerialTask::EulerAngles GetAnglesNow(serial::Serial& serial_port);
 void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle);
 
 // Inline overload defined below; remove duplicate non-inline definition.
