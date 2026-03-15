@@ -30,7 +30,7 @@ class GalaxyCamera {
   bool enable_auto_exposure = false;      ///< Use one-time auto exposure on start
   bool enable_auto_gain = false;          ///< Use one-time auto gain on start
   double white_balance_red = 1.75;        ///< Red balance ratio, used when auto white balance is off
-  double exposure_time_us = 2500.0;       ///< Exposure time (microseconds), used when auto exposure is off
+  double exposure_time_us = 4500.0;       ///< Exposure time (microseconds), used when auto exposure is off
   double gain_db = 0.0;                   ///< Gain value (dB), used when auto gain is off
   // 手动设置接口（优先使用这些 setter）
   void setWhiteBalanceAuto(bool enable) { enable_auto_white_balance = enable; }
@@ -186,9 +186,22 @@ class GalaxyCamera {
 
     GX_STATUS status = GXGetImage(device_handle_, &frame_data_, timeout_ms);
     if (status != GX_STATUS_SUCCESS) {
+      if (status == GX_STATUS_TIMEOUT) {
+        // 超时是正常现象（相机暂时无新帧），静默重试；连续超时过多则重启采集
+        if (++consecutive_timeouts_ >= 30) {
+          std::cerr << "[GalaxyCamera] " << consecutive_timeouts_ << " consecutive timeouts, restarting acquisition..."
+                    << std::endl;
+          stop();
+          start();
+          consecutive_timeouts_ = 0;
+        }
+        return {};
+      }
+      consecutive_timeouts_ = 0;
       logLastError("GXGetImage");
       return {};
     }
+    consecutive_timeouts_ = 0;
     if (frame_data_.nStatus != GX_FRAME_STATUS_SUCCESS) return {};
 
     return convertToMat();
@@ -379,6 +392,7 @@ class GalaxyCamera {
   bool started_ = false;
   bool has_color_filter_ = false;
   int64_t color_filter_ = GX_COLOR_FILTER_NONE;
+  int consecutive_timeouts_ = 0;  ///< 连续超时帧计数，用于触发自动重启
 
   // 相机内参与畸变系数（用于去畸变）
   cv::Mat camera_matrix_ =

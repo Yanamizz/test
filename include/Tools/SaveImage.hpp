@@ -67,7 +67,7 @@ class SaveImageOnNoTarget {
 #endif
 
       std::ostringstream folder_name;
-      folder_name << "run_" << std::put_time(&tm_buf, "%Y%m%d_%H%M%S");
+      folder_name << "frame_" << std::put_time(&tm_buf, "%Y%m%d_%H%M%S");
 
       run_folder_ = base_dir_ / folder_name.str();
       std::filesystem::create_directories(run_folder_);
@@ -81,7 +81,7 @@ class SaveImageOnNoTarget {
 
   std::string BuildImageName() {
     std::ostringstream oss;
-    oss << "frame_" << std::setw(2) << std::setfill('0') << saved_index_++ << ".jpg";
+    oss << run_folder_.filename().string() << "_" << std::setw(2) << std::setfill('0') << saved_index_++ << ".jpg";
     return oss.str();
   }
 };

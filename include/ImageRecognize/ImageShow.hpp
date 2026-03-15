@@ -50,8 +50,6 @@ class ImageShow {
                 {255, 0, 255}, 2);
     cv::putText(frame, "Distance: " + std::to_string(distance), {10, 310}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 255},
                 2);
-
-    cv::imshow("Detection Result", frame);
   }
 
   /**

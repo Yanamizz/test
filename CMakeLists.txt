@@ -26,6 +26,7 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/third_lib/kalman/include
     ${PROJECT_SOURCE_DIR}/third_lib/Galaxy_camera/inc
+    /usr/include
     ${EIGEN3_INCLUDE_DIR}
 )
 # find_package(serial REQUIRED)
@@ -49,6 +50,7 @@ foreach(src ${SRCS})
     add_executable(${name_we} ${src})
     target_link_libraries(${name_we}
         -lonnxruntime
+        -lopenvino
         -lgxiapi
         ${OpenCV_LIBS}
         serial  # 添加 serial 库

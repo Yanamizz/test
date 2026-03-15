@@ -72,10 +72,6 @@ class OutputDataProcess {
         x2 *= scale_x_;
         y2 *= scale_y_;
 
-        float w_h_ratio_ = w / h;
-        if (w_h_ratio_ < w_h_scale_ || (1.0f / w_h_ratio_) < w_h_scale_) {
-          continue;
-        }
         result_.boxes.push_back({x1, y1, x2, y2, score});
       }
     }
@@ -131,7 +127,7 @@ class OutputDataProcess {
     return keep;
   }
   cv::Size cut_size_{480, 480};  ///< 预处理/模型输入的基准尺寸（用于反缩放）
-  float set_score_{0.9f};        ///< 分数阈值，低于该值的候选将被丢弃
+  float set_score_{0.5f};        ///< 分数阈值，低于该值的候选将被丢弃
   float nms_iou_thresh_{0.5f};   ///< NMS 的 IoU 阈值
   float w_h_scale_{0.5f};        ///< 长宽比阈值
 };

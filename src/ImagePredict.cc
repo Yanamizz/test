@@ -11,20 +11,20 @@
 #include <atomic>
 
 #include "ImageRecognize/ImageShow.hpp"
-#include "ImageRecognize/ImagePredict.hpp"
+// #include "ImageRecognize/ImagePredict_ONNX.hpp"
+#include "ImageRecognize/ImagePredict_OPENVINO.hpp"  // 切换到 OpenVINO 时，注释上一行并启用这一行
 #include "SerialTask/SerialRead.hpp"
 #include "SerialTask/SerialSend.hpp"
 #include "Tools/AngleCalculate.hpp"
 #include "Tools/FpsCounter.hpp"
 #include "Tools/LaserAngleCalculate.hpp"
-#include "Tools/SaveImage.hpp"
+// #include "Tools/SaveImage.hpp"
 #include "CameraTask/GetImage.hpp"
 
-std::string model_path = "/home/hanni/code/rm/src/model/best.onnx";
+std::string model_path = "/home/hanni/code/rm/src/model/best_v8s.onnx";
 std::atomic<bool> g_running(true);          // 全局运行标志
 static std::mutex g_frame_mutex;            // 保护最新帧的互斥锁
 static std::condition_variable g_frame_cv;  // 通知预测线程有新帧到达的条件变量
-static std::mutex g_result_mutex;           // 保护最新预测结果的互斥锁
                                             // IMU 数据缓冲区
 static std::deque<std::pair<std::chrono::steady_clock::time_point, SerialTask::EulerAngles>> g_imu_buffer;
 static std::mutex g_imu_mutex;                       // 保护 IMU 缓冲区的互斥锁
@@ -58,16 +58,6 @@ static inline float NormalizeAbsDeg(float angle) {
   while (angle < -180.0f) angle += 360.0f;
   return angle;
 }
-
-// 全局预测结果（获得 result 后写入）
-struct ResultWithImu {
-  ImageRecognize::PredictResult result;
-  SerialTask::EulerAngles imu;
-  std::chrono::steady_clock::time_point imu_ts{};  // 匹配到的 IMU 时间戳
-  std::chrono::steady_clock::duration delay{};
-};
-
-static std::shared_ptr<ResultWithImu> g_last_matched_result;  // 保护最新预测结果的互斥锁
 
 static const std::chrono::milliseconds g_imu_buffer_max_age(1000);
 
@@ -136,7 +126,7 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
 
 void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
   FPSCounter fps_counter;
-  static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
+  // static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
   std::chrono::steady_clock::time_point prev_frame_ts{};
   bool has_prev_frame_ts = false;
   while (g_running) {
@@ -157,10 +147,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
 
     if (frame.empty()) continue;
     ImageRecognize::PredictResult result;
+    SerialTask::EulerAngles matched_imu{};
+    bool has_matched_imu = false;
     try {
       result = predictor.run(frame);
+
       // 关联最近一次 IMU 状态并记录延迟
-      ResultWithImu wrapped{result};
       {
         std::lock_guard<std::mutex> lk(g_imu_mutex);
         if (!g_imu_buffer.empty()) {
@@ -175,43 +167,27 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
             }
           }
 
-          wrapped.imu = best_it->second;
-          wrapped.imu_ts = best_it->first;
-          wrapped.delay = frame_ts - best_it->first;
+          matched_imu = best_it->second;
+          has_matched_imu = true;
 
           // 删除缓冲区中时间点 t 及之前的 IMU 条目，避免重复使用已匹配的数据
           g_imu_buffer.erase(g_imu_buffer.begin(), std::next(best_it));
-        } else {
-          wrapped.delay = std::chrono::steady_clock::duration::zero();
         }
-      }
-      {
-        std::lock_guard<std::mutex> lk(g_result_mutex);
-        g_last_matched_result = std::make_shared<ResultWithImu>(std::move(wrapped));
       }
     } catch (const std::exception &e) {
       std::cerr << "ImagePredictThread exception: " << e.what() << std::endl;
     }
+
     cv::Point2d offset_angles;
-    const bool detected_target = !result.boxes.empty();
+    [[maybe_unused]] const bool detected_target = !result.boxes.empty();
     if (!result.boxes.empty()) {
       float center_x = (result.boxes[0][0] + result.boxes[0][2]) / 2.0f;
       float center_y = (result.boxes[0][1] + result.boxes[0][3]) / 2.0f;
       float width = result.boxes[0][2] - result.boxes[0][0];
       float height = result.boxes[0][3] - result.boxes[0][1];
-      float distance = Tools::DistanceCalculator().CalculateDistance(width > height ? width : height);
-
-      SerialTask::EulerAngles matched_imu{};
-      bool has_matched_imu = false;
-
-      // 缩短锁范围：只拷贝IMU，其余放锁外
-      {
-        std::lock_guard<std::mutex> lk(g_result_mutex);
-        if (g_last_matched_result) {
-          matched_imu = g_last_matched_result->imu;
-          has_matched_imu = true;
-        }
-      }
+      static Tools::LaserAngleCalculator laser_angle_calculator;
+      static Tools::DistanceCalculator distance_calculator;
+      float distance = distance_calculator.CalculateDistance(height, width);
 
       static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
 
@@ -230,16 +206,13 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
         offset_angles.x = NormalizeDeltaDeg(absolute_yaw - matched_imu.yaw);
         offset_angles.y = NormalizeDeltaDeg(absolute_pitch - matched_imu.pitch);
 
-        static Tools::LaserAngleCalculator laser_angle_calculator;
-
-        float laser_angle = laser_angle_calculator.CalculateLaserAngle(width > height ? height : width);
+        auto [laser_yaw_angle, laser_pitch_angle] = laser_angle_calculator.CalculateLaserAngles(distance);
 
         if (abs(offset_angles.x) > minimum_angle || abs(offset_angles.y) > minimum_angle) {
           has_detection = true;
           // 下位机只接受绝对角：先算目标绝对角，再对“相对当前IMU的角差”限幅，最后回到绝对角
-          float desired_abs_yaw = NormalizeAbsDeg(static_cast<float>(absolute_yaw));
-          float desired_abs_pitch =
-              NormalizeAbsDeg(static_cast<float>(absolute_pitch + laser_angle));  // 加上激光角补偿
+          float desired_abs_yaw = NormalizeAbsDeg(static_cast<float>(absolute_yaw + laser_yaw_angle));
+          float desired_abs_pitch = NormalizeAbsDeg(static_cast<float>(absolute_pitch + laser_pitch_angle));
 
           float delta_yaw = NormalizeDeltaDeg(desired_abs_yaw - matched_imu.yaw);
           float delta_pitch = NormalizeDeltaDeg(desired_abs_pitch - matched_imu.pitch);
@@ -267,7 +240,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
     ImageRecognize::ImageShow::ShowNow(frame, result, elapsed_ms, fps);
 
     // 无目标时，每隔若干帧保存图像到本次运行目录
-    no_target_saver.Update(frame, detected_target);
+    // no_target_saver.Update(frame, detected_target);
 
     // 处理 GUI 事件并允许按键退出
     if (ImageRecognize::ImageShow::WaitForExit()) {
