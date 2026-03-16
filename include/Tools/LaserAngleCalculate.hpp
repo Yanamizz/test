@@ -44,8 +44,8 @@ class LaserAngleCalculator {
   }
 
  private:
-  float laser_distance_x = -0.025f;  // 激光传感器到相机中心的x距离，单位：米
-  float laser_distance_y = 0.0f;     // 激光传感器到相机中心的y距离，单位：米
+  float laser_distance_x = 0.0f;   // 激光传感器到相机中心的x距离，单位：米
+  float laser_distance_y = 0.06f;  // 激光传感器到相机中心的y距离，单位：米
   cv::Mat cameraMatrix_ = CameraData().cameraMatrix;
   cv::Mat distCoeffs_ = CameraData().distCoeffs;
 };

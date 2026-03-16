@@ -54,7 +54,7 @@ foreach(src ${SRCS})
         -lgxiapi
         ${OpenCV_LIBS}
         serial  # 添加 serial 库
-    )       
+    )      
 endforeach()
  
 option(KALMAN_BUILD_EXAMPLES "Build the Kalman examples" OFF)  # 可选，关闭示例

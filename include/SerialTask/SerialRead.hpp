@@ -16,6 +16,7 @@
 #include <chrono>
 #include <iostream>  // For std::cerr
 #include <vector>    // For std::vector
+#include <cstring>
 #include <Eigen/Geometry>
 
 namespace SerialTask {
@@ -45,8 +46,8 @@ inline bool ReadIMUData(serial::Serial& serial_port, EulerAngles& angles) {
   float q3 = latest_frame.q3;  // z
 
   angles.roll = std::atan2(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1 * q1 + q2 * q2)) * (180.0f / M_PI);
-  angles.pitch = -std::asin(2.0f * (q0 * q2 - q3 * q1)) * (180.0f / M_PI);
-  angles.yaw = std::atan2(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3)) * (180.0f / M_PI);
+  angles.pitch = -std::asin(2.0f * (q0 * q2 - q3 * q1)) * (180.0f / M_PI) - 180.0f;
+  angles.yaw = std::atan2(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3)) * (180.0f / M_PI) + 180.0f;
 
   return true;
 }
@@ -57,31 +58,54 @@ inline bool ReadIMUData(serial::Serial& serial_port, EulerAngles& angles) {
  * @param out_frame 输出的最新帧（若找到返回 true）
  */
 inline bool ReadIMUFrame(serial::Serial& serial_port, GimbalImuFrame_SCM_t& out_frame) {
-  size_t frame_size = sizeof(GimbalImuFrame_SCM_t);
+  constexpr size_t kFrameSize = sizeof(GimbalImuFrame_SCM_t);
+  constexpr size_t kIdOffset = 1;
+  constexpr size_t kTimeStampOffset = 2;
+  constexpr size_t kQ0Offset = kTimeStampOffset + sizeof(uint32_t);
+  constexpr size_t kQ1Offset = kQ0Offset + sizeof(float);
+  constexpr size_t kQ2Offset = kQ1Offset + sizeof(float);
+  constexpr size_t kQ3Offset = kQ2Offset + sizeof(float);
+  constexpr size_t kRobotIdOffset = kQ3Offset + sizeof(float);
+  constexpr size_t kAimModeOffset = kRobotIdOffset + sizeof(uint8_t);
+  constexpr size_t kEofOffset = kAimModeOffset + sizeof(uint8_t);
+
   if (!serial_port.isOpen()) {
     std::cerr << "[ERROR] 串口未打开，无法读取数据。" << std::endl;
     return false;
   }
 
   size_t available_bytes = serial_port.available();
-  if (available_bytes < frame_size) {
+  if (available_bytes < kFrameSize) {
     return false;
   }
 
   std::vector<uint8_t> buffer(available_bytes);
   size_t read_count = serial_port.read(buffer.data(), available_bytes);
-  if (read_count < frame_size) return false;
+  if (read_count < kFrameSize) return false;
 
   bool found = false;
   GimbalImuFrame_SCM_t latest_frame{};
-  for (size_t i = 0; i + frame_size <= read_count; ++i) {
+  for (size_t i = 0; i + kFrameSize <= read_count; ++i) {
     if (buffer[i] == 0x55) {
-      GimbalImuFrame_SCM_t tmp;
-      memcpy(&tmp, &buffer[i], frame_size);
-      if (tmp._EOF == 0xFF && tmp.ID == IMU_DATA_SEND_ID) {
+      if (buffer[i + kIdOffset] == IMU_DATA_SEND_ID && buffer[i + kEofOffset] == 0xFF) {
+        GimbalImuFrame_SCM_t tmp{};
+        tmp._SOF = 0x55;
+        tmp.ID = IMU_DATA_SEND_ID;
+
+        // 发送方新增字段不参与业务逻辑，直接跳过，仅提取四元数。
+        std::memcpy(&tmp.q0, &buffer[i + kQ0Offset], sizeof(float));
+        std::memcpy(&tmp.q1, &buffer[i + kQ1Offset], sizeof(float));
+        std::memcpy(&tmp.q2, &buffer[i + kQ2Offset], sizeof(float));
+        std::memcpy(&tmp.q3, &buffer[i + kQ3Offset], sizeof(float));
+
+        tmp.TimeStamp = 0;
+        tmp.robot_id = 0;
+        tmp.aim_mode = 0;
+        tmp._EOF = 0xFF;
+
         latest_frame = tmp;
         found = true;
-        i += frame_size - 1;
+        i += kFrameSize - 1;
       }
     }
   }

@@ -30,6 +30,8 @@ static std::deque<std::pair<std::chrono::steady_clock::time_point, SerialTask::E
 static std::mutex g_imu_mutex;                       // 保护 IMU 缓冲区的互斥锁
 static std::atomic<float> g_current_yaw_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
 static std::atomic<float> g_current_pitch_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
+static std::atomic<float> g_current_imu_yaw{0.0f};    // 最新 IMU 绝对 Yaw（由 IMUReadThread 更新）
+static std::atomic<float> g_current_imu_pitch{0.0f};  // 最新 IMU 绝对 Pitch（由 IMUReadThread 更新）
 
 // 全局：双buffer避免重复clone
 struct FrameItem {
@@ -261,6 +263,8 @@ void IMUReadThread(serial::Serial &port) {
       auto ts = std::chrono::steady_clock::now();
       prev_local_imu = angles;
       prev_local_ts = ts;
+      g_current_imu_yaw.store(angles.yaw, std::memory_order_release);
+      g_current_imu_pitch.store(angles.pitch, std::memory_order_release);
 
       std::lock_guard<std::mutex> lk(g_imu_mutex);
       // 添加到缓冲区末尾
@@ -282,9 +286,13 @@ void IMUSendThread(serial::Serial &port) {
     if (has_detection.load(std::memory_order_acquire)) {
       float pitch = g_send_abs_pitch.load(std::memory_order_acquire);
       float yaw = g_send_abs_yaw.load(std::memory_order_acquire);
-      SerialTask::SerialSend(port, pitch, yaw);
+      SerialTask::SerialSend(port, pitch, yaw, 0x01);
       has_detection.store(false, std::memory_order_release);
     } else {
+      float imu_pitch = g_current_imu_pitch.load(std::memory_order_acquire);
+      float imu_yaw = g_current_imu_yaw.load(std::memory_order_acquire);
+      SerialTask::SerialSend(port, imu_pitch, imu_yaw, 0x00);
+
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }

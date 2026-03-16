@@ -67,7 +67,13 @@ class ImagePredict {
     infer_request_.set_tensor(input_name_, input_tensor);
     infer_request_.infer();
 
-    const ov::Tensor output_tensor = infer_request_.get_tensor(output_name_);
+    ov::Tensor output_tensor;
+    if (output_name_.empty()) {
+      std::cerr << "[Warning] output_name_ is empty, fallback to index 0." << std::endl;
+      output_tensor = infer_request_.get_output_tensor(0);
+    } else {
+      output_tensor = infer_request_.get_tensor(output_name_);
+    }
     return postprocess_(output_tensor, origin_image_.size());
   }
 
@@ -99,6 +105,9 @@ class ImagePredict {
 
     input_name_ = compiled_model_.input().get_any_name();
     output_name_ = compiled_model_.output().get_any_name();
+    if (output_name_.empty()) {
+      std::cerr << "[Warning] Model output has no name, will use index fallback." << std::endl;
+    }
     initialized_ = true;
   }
 

@@ -23,22 +23,30 @@ inline float NormalizeDegTo180(float d) {
   return d;
 }
 
+inline float NormalizeDegTo360(float d) {
+  while (d > 0.0f) d -= 360.0f;
+  while (d < -360.0f) d += 360.0f;
+  return d;
+}
+
 /**
  * @brief 发送目标侧欧拉角帧（Pitch, Yaw）到串口
  * @param serial_port 已配置好的串口对象
  * @param pitch_relative_angle 目标侧 Pitch 相对角度（单位：度）
  * @param yaw_relative_angle 目标侧 Yaw 相对角度（单位：度）
+ * @param AimbotState 是否有目标：0x00 无目标，0x01 有目标
  */
-void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle);
+void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle,
+                     uint8_t AimbotState);
 
 // Inline overload defined below; remove duplicate non-inline definition.
 
 // 重载：使用已知的当前角度发送，不再从串口读取（适用于接收线程在外部运行时）
-inline void SerialSend(serial::Serial& serial_port, float absolute_pitch, float absolute_yaw) {
+inline void SerialSend(serial::Serial& serial_port, float absolute_pitch, float absolute_yaw, uint8_t AimbotState) {
   float pitch_relative_angle = (absolute_pitch);
   float yaw_relative_angle = (absolute_yaw);
 
-  pitch_relative_angle = NormalizeDegTo180(pitch_relative_angle);
+  pitch_relative_angle = NormalizeDegTo360(pitch_relative_angle);
   yaw_relative_angle = NormalizeDegTo180(yaw_relative_angle);
 
   // 在转换为弧度前保存度值以便打印
@@ -46,16 +54,20 @@ inline void SerialSend(serial::Serial& serial_port, float absolute_pitch, float 
   pitch_relative_angle = pitch_relative_angle / RAD_TO_DEG;
   yaw_relative_angle = yaw_relative_angle / RAD_TO_DEG;
 
-  SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle, yaw_relative_angle);
+  SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle, yaw_relative_angle, AimbotState);
 }
 
-inline void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle) {
+inline void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle,
+                            uint8_t AimbotState) {
   AimbotFrame_SCM_t aimbot_frame;
-  aimbot_frame._SOF = 0x55;  // 包头
-  aimbot_frame.ID = 0x02;    // 发送 ID
+  aimbot_frame._SOF = 0x55;                // 包头
+  aimbot_frame.ID = 0x02;                  // 发送 ID
+  aimbot_frame.AimbotState = AimbotState;  ///< 0x00 无目标，0x01 有目标
+  aimbot_frame.AimbotTarget = 0x00;        // 目前未使用，默认为 0
   aimbot_frame.PitchRelativeAngle = pitch_relative_angle;
   aimbot_frame.YawRelativeAngle = yaw_relative_angle;
-  aimbot_frame._EOF = 0xFF;  // 包尾
+  aimbot_frame.SystemTimer = 0.0f;  ///< 时间戳
+  aimbot_frame._EOF = 0xFF;         // 包尾
   serial_port.write(reinterpret_cast<uint8_t*>(&aimbot_frame), sizeof(AimbotFrame_SCM_t));
 }
 
