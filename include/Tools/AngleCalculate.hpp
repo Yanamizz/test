@@ -49,14 +49,22 @@ class AngleCalculator {
     double rxNew = (pnt.x - cx) / fx;
     double ryNew = (pnt.y - cy) / fy;
     // 计算偏移角
-    double offset_yaw = -std::atan(rxNew) / PI * 180.0;
-    double offset_pitch = std::atan(ryNew) / PI * 180.0;
+    double offset_yaw = -std::atan2(rxNew, 1.0) / PI * 180.0;
+    double offset_pitch = std::atan2(ryNew, 1.0) / PI * 180.0;
 
-    if (std::abs(offset_yaw) > 15.0f) offset_yaw = 15.0f * (offset_yaw > 0 ? 1.0f : -1.0f);  // 限制超出范围的角度
-    if (std::abs(offset_pitch) > 15.0f) offset_pitch = 15.0f * (offset_pitch > 0 ? 1.0f : -1.0f);  // 限制超出范围的角度
+    if (std::abs(offset_yaw) > 5.0f) offset_yaw = 5.0f * (offset_yaw > 0 ? 1.0f : -1.0f);  // 限制超出范围的角度
+    if (std::abs(offset_pitch) > 5.0f) offset_pitch = 5.0f * (offset_pitch > 0 ? 1.0f : -1.0f);  // 限制超出范围的角度
 
-    double absolute_yaw = normalizeAngle(currentYaw + offset_yaw);
-    double absolute_pitch = normalizeAngle(currentPitch + offset_pitch);
+    double absolute_yaw = currentYaw + offset_yaw;
+    double absolute_pitch = currentPitch + offset_pitch;
+
+    // 冷启动时先用首帧测量初始化滤波器，避免从 0° 拉到 ±180° 导致发送直接饱和到 ±5°。
+    if (!filter_initialized) {
+      kf_yaw.reset(absolute_yaw, 0.0);
+      kf_pitch.reset(absolute_pitch, 0.0);
+      filter_initialized = true;
+      return {static_cast<float>(absolute_yaw), static_cast<float>(absolute_pitch)};
+    }
 
     float filtered_yaw = kf_yaw.update(absolute_yaw, dt);
     float filtered_pitch = kf_pitch.update(absolute_pitch, dt);
@@ -65,14 +73,9 @@ class AngleCalculator {
   }
 
  private:
-  float normalizeAngle(float angle) {
-    while (angle > 180.0f) angle -= 360.0f;
-    while (angle < -180.0f) angle += 360.0f;
-    return angle;
-  }
-
-  UnscentedKalmanFilter kf_yaw{0.01, 0.8};
-  UnscentedKalmanFilter kf_pitch{0.01, 0.8};
+  UnscentedKalmanFilter kf_yaw{1.0, 0.05};
+  UnscentedKalmanFilter kf_pitch{0.01, 1.5};
+  bool filter_initialized = false;
 
   std::chrono::steady_clock::time_point last_time;
   bool is_initialized = false;

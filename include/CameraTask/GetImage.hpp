@@ -25,13 +25,13 @@ class GalaxyCamera {
   GalaxyCamera &operator=(const GalaxyCamera &) = delete;
 
   // User-configurable settings (set before open/start)
-  bool enable_invert = true;              ///< Whether to flip image vertically and horizontally
+  bool enable_invert = false;             ///< Whether to flip image vertically and horizontally
   bool enable_auto_white_balance = true;  ///< Use one-time auto white balance on start
   bool enable_auto_exposure = false;      ///< Use one-time auto exposure on start
   bool enable_auto_gain = false;          ///< Use one-time auto gain on start
   double white_balance_red = 1.75;        ///< Red balance ratio, used when auto white balance is off
-  double exposure_time_us = 4500.0;       ///< Exposure time (microseconds), used when auto exposure is off
-  double gain_db = 20;                    ///< Gain value (dB), used when auto gain is off
+  double exposure_time_us = 4000.0;       ///< Exposure time (microseconds), used when auto exposure is off
+  double gain_db = 24;                    ///< Gain value (dB), used when auto gain is off
   // 手动设置接口（优先使用这些 setter）
   void setWhiteBalanceAuto(bool enable) { enable_auto_white_balance = enable; }
   void setWhiteBalanceChannel(const std::string &channel_name) { wb_channel_name_ = channel_name; }
@@ -242,8 +242,7 @@ class GalaxyCamera {
       cv::Mat rgb(height, width, CV_8UC3, rgb_buffer_.data());
       cv::Mat bgr;
       cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
-      cv::Mat out = bgr.clone();
-      return postProcess(out);
+      return postProcess(bgr);
     }
 
     if (isBayer16(pixel_format)) {
@@ -260,8 +259,7 @@ class GalaxyCamera {
       cv::Mat rgb(height, width, CV_8UC3, rgb_buffer_.data());
       cv::Mat bgr;
       cv::cvtColor(rgb, bgr, cv::COLOR_RGB2BGR);
-      cv::Mat out = bgr.clone();
-      return postProcess(out);
+      return postProcess(bgr);
     }
 
     return {};
@@ -398,7 +396,7 @@ class GalaxyCamera {
   cv::Mat camera_matrix_ =
       (cv::Mat_<double>(3, 3) << 1576.303044, 0.0, 952.451125, 0.0, 1578.069737, 599.901423, 0.0, 0.0, 1.0);
   cv::Mat dist_coeffs_ = (cv::Mat_<double>(1, 5) << -0.275212, 0.210437, -0.000083, 0.000589, 0.0);
-  bool enable_undistort_ = true;  // 默认启用去畸变
+  bool enable_undistort_ = false;  // 默认关闭去畸变以降低延迟
   // -------- 手动默认设置 (可直接在此处修改) --------
   // 白平衡：优先使用通道名（wb_channel_name_），若置空则使用索引(wb_channel_index_)
   std::string wb_channel_name_ = "Red";  // 可改为 "Green"/"Blue" 或置空使用索引

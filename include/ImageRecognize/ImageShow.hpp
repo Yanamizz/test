@@ -28,11 +28,7 @@ class ImageShow {
       int cy = static_cast<int>((box[1] + box[3]) * 0.5f);
       cv::circle(frame, {cx, cy}, 4, {0, 0, 255}, -1);
     }
-
-    // FPS/耗时显示
-    cv::putText(frame, std::to_string(ms) + " ms", {10, 30}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 255}, 2);
-    cv::putText(frame, "FPS: " + std::to_string(static_cast<int>(fps + 0.5)), {10, 65}, cv::FONT_HERSHEY_SIMPLEX, 1.0,
-                {0, 200, 255}, 2);
+    cv::putText(frame, "FPS: " + std::to_string(fps), {10, 30}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 0}, 2);
     cv::imshow("Detection Result", frame);
   }
 

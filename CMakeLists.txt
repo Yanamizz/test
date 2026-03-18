@@ -16,13 +16,11 @@ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_DEBUG}")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17 -pthread -O2 -Wall -Wno-maybe-uninitialized -DNDEBUG") 
  
 set(OpenCV_LIBS opencv_videoio opencv_imgcodecs opencv_imgproc opencv_core opencv_dnn opencv_highgui opencv_calib3d)
- 
 find_package(Eigen3 REQUIRED)
 
 include_directories(
     /usr/local/include
     /usr/local/include/opencv4
-    /usr/local/include/onnxruntime
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/third_lib/kalman/include
     ${PROJECT_SOURCE_DIR}/third_lib/Galaxy_camera/inc
@@ -40,6 +38,10 @@ link_directories(
     ${PROJECT_SOURCE_DIR}/third_lib/Galaxy_camera/lib/x86_64
 )
  
+## Add third-party subdirectories that provide libraries used by targets
+add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/kalman)
+add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/serial)
+
 # 递归检索指定目录下所有 .cc
 set(SRC_ROOT ${PROJECT_SOURCE_DIR}/src)
 file(GLOB_RECURSE SRCS ${SRC_ROOT}/*.cc)
@@ -49,7 +51,6 @@ foreach(src ${SRCS})
     get_filename_component(name_we ${src} NAME_WE)
     add_executable(${name_we} ${src})
     target_link_libraries(${name_we}
-        -lonnxruntime
         -lopenvino
         -lgxiapi
         ${OpenCV_LIBS}
@@ -57,7 +58,6 @@ foreach(src ${SRCS})
     )      
 endforeach()
  
-option(KALMAN_BUILD_EXAMPLES "Build the Kalman examples" OFF)  # 可选，关闭示例
-add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/kalman)
 
+option(KALMAN_BUILD_EXAMPLES "Build the Kalman examples" OFF)  # 可选，关闭示例
 # Link moved into per-target loop above

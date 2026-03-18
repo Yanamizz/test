@@ -12,7 +12,6 @@
 #include <iostream>
 #include <algorithm>
 #include <numeric>
-#include <onnxruntime_cxx_api.h>
 #include <opencv2/opencv.hpp>
 
 namespace ImageRecognize {
@@ -32,54 +31,6 @@ struct DataProcessResult {
 class OutputDataProcess {
  public:
   OutputDataProcess() = default;
-
-  /**
-   * @brief 解析模型输出张量，过滤并抑制重叠框，返回最终检测结果。
-   * @param[in] output_tensor_         ONNX Runtime 输出张量，形状期望为 [1, 5, N]
-   * @param[in] original_image_size_   原图尺寸，用于将 640×640 空间坐标缩放回原图坐标
-   * @returns   DataProcessResult      包含最终用于绘制的边框与分数
-   */
-  DataProcessResult run(Ort::Value &output_tensor_, cv::Size original_image_size_) const {
-    DataProcessResult result_{};
-
-    float *output_data_ = output_tensor_.GetTensorMutableData<float>();
-    Ort::TensorTypeAndShapeInfo output_info_ = output_tensor_.GetTensorTypeAndShapeInfo();
-    std::vector<int64_t> output_shape_ = output_info_.GetShape();
-    // 期望形状为 [1, 5, 8400]，其中 5 为 (cx, cy, w, h, score)，8400 为候选数
-
-    const int num_detections_ = static_cast<int>(output_shape_[2]);  // 8400
-
-    float scale_x_ = static_cast<float>(original_image_size_.width) / static_cast<float>(cut_size_.width);
-    float scale_y_ = static_cast<float>(original_image_size_.height) / static_cast<float>(cut_size_.height);
-    float max = -1e9, min = 1e9;
-    // 通道优先：每个通道连续存放所有候选的该通道值
-    for (int i = 0; i < num_detections_; ++i) {
-      float cx = output_data_[0 * num_detections_ + i];
-      float cy = output_data_[1 * num_detections_ + i];
-      float w = output_data_[2 * num_detections_ + i];
-      float h = output_data_[3 * num_detections_ + i];
-      float score = output_data_[4 * num_detections_ + i];
-      if (score > max) max = score;
-      if (score < min) min = score;
-
-      if (score > set_score_) {
-        float x1 = cx - w / 2.0f;
-        float y1 = cy - h / 2.0f;
-        float x2 = cx + w / 2.0f;
-        float y2 = cy + h / 2.0f;
-        x1 *= scale_x_;
-        y1 *= scale_y_;
-        x2 *= scale_x_;
-        y2 *= scale_y_;
-
-        result_.boxes.push_back({x1, y1, x2, y2, score});
-      }
-    }
-
-    // 应用 NMS 过滤重叠框
-    result_.boxes = nms_(result_.boxes, nms_iou_thresh_);
-    return result_;
-  }
 
  private:
   static float iou_(const std::array<float, 5> &a, const std::array<float, 5> &b) {
@@ -126,7 +77,7 @@ class OutputDataProcess {
     }
     return keep;
   }
-  cv::Size cut_size_{480, 480};  ///< 预处理/模型输入的基准尺寸（用于反缩放）
+  cv::Size cut_size_{480, 300};  ///< 预处理/模型输入的基准尺寸（用于反缩放）
   float set_score_{0.5f};        ///< 分数阈值，低于该值的候选将被丢弃
   float nms_iou_thresh_{0.5f};   ///< NMS 的 IoU 阈值
   float w_h_scale_{0.5f};        ///< 长宽比阈值

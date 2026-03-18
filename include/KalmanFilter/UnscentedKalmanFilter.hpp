@@ -131,6 +131,12 @@ class UnscentedKalmanFilter {
   double getVelocity() const { return X.at<double>(1, 0); }
 
   /**
+   * @brief 强制设置角速度（单位：度/秒）
+   * @param velocity 角速度
+   */
+  void setVelocity(double velocity) { X.at<double>(1, 0) = velocity; }
+
+  /**
    * @brief 获取当前估计的角度
    * @return 角度（单位：度）
    */

@@ -37,15 +37,16 @@ class LaserAngleCalculator {
     return angle_deg;
   }
 
-  std::pair<float, float> CalculateLaserAngles(float distance) {
-    float yaw_angle = CalculateLaserYawAngleByDistance(distance);
-    float pitch_angle = CalculateLaserPitchAngleByDistance(distance);
+  std::pair<float, float> CalculateLaserAngles(float distance , float offset_angles) {
+    float yaw_angle = 0.66;
+
+    float pitch_angle = 0.33;
     return {yaw_angle, pitch_angle};
   }
 
  private:
-  float laser_distance_x = 0.0f;   // 激光传感器到相机中心的x距离，单位：米
-  float laser_distance_y = 0.06f;  // 激光传感器到相机中心的y距离，单位：米
+  float laser_distance_x = 0.0f;  // 激光传感器到相机中心的x距离，单位：米
+  float laser_distance_y = 0.0f;  // 激光传感器到相机中心的y距离，单位：米
   cv::Mat cameraMatrix_ = CameraData().cameraMatrix;
   cv::Mat distCoeffs_ = CameraData().distCoeffs;
 };

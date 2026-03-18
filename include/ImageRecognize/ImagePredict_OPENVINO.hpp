@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -59,7 +60,6 @@ class ImagePredict {
       throw std::runtime_error("OpenVINO session not initialized. Use ImagePredict(model_path) constructor.");
     }
 
-    ImageRecognize::ImagePreprocess preprocessor_{cv::Size(width_, height_)};
     auto pre_image_ = preprocessor_.run(origin_image_);
 
     ov::Tensor input_tensor(ov::element::f32, {1, 3, static_cast<size_t>(height_), static_cast<size_t>(width_)},
@@ -83,11 +83,37 @@ class ImagePredict {
       throw std::runtime_error("Model path is empty.");
     }
 
-    model_path_ = model_path;
+    namespace fs = std::filesystem;
+    fs::path input_path(model_path);
+    fs::path abs_input_path = fs::absolute(input_path);
+    model_path_ = abs_input_path.string();
     device_name_ = device_name.empty() ? std::string("AUTO") : device_name;
 
     core_ = std::make_unique<ov::Core>();
-    auto model = core_->read_model(model_path_);
+    std::shared_ptr<ov::Model> model;
+
+    const bool is_ir_xml = abs_input_path.has_extension() && abs_input_path.extension() == ".xml";
+    if (is_ir_xml) {
+      fs::path bin_path = abs_input_path;
+      bin_path.replace_extension(".bin");
+
+      if (!fs::exists(abs_input_path)) {
+        throw std::runtime_error("OpenVINO XML model not found: " + abs_input_path.string());
+      }
+      if (!fs::exists(bin_path)) {
+        throw std::runtime_error("OpenVINO BIN weights not found: " + bin_path.string());
+      }
+      if (fs::file_size(bin_path) == 0) {
+        throw std::runtime_error("OpenVINO BIN weights file is empty: " + bin_path.string());
+      }
+
+      model = core_->read_model(abs_input_path.string(), bin_path.string());
+    } else {
+      if (!fs::exists(abs_input_path)) {
+        throw std::runtime_error("Model file not found: " + abs_input_path.string());
+      }
+      model = core_->read_model(abs_input_path.string());
+    }
 
     // 从模型自动读取输入 H/W（shape = [1,3,H,W]），动态维度则保持默认 640
     const auto &pshape = model->input().get_partial_shape();
@@ -96,7 +122,21 @@ class ImagePredict {
       if (pshape[3].is_static()) width_ = static_cast<int>(pshape[3].get_length());
     }
 
-    compiled_model_ = core_->compile_model(model, device_name_);
+    // 预处理器只初始化一次，避免每帧重复构造
+    preprocessor_ = ImageRecognize::ImagePreprocess(cv::Size(width_, height_));
+
+    try {
+      const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
+      const unsigned int infer_threads = std::max(1u, hw_threads > 2 ? (hw_threads - 2) : hw_threads);
+      // 低延迟优先：单流 + LATENCY hint，减少排队与吞吐导向调度带来的时延。
+      compiled_model_ = core_->compile_model(
+          model, device_name_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY), ov::streams::num(1),
+          ov::inference_num_threads(infer_threads));
+    } catch (const std::exception &e) {
+      std::cerr << "[Warning] Failed to apply low-latency OpenVINO properties on device '" << device_name_
+                << "': " << e.what() << ". Fallback to default compile_model." << std::endl;
+      compiled_model_ = core_->compile_model(model, device_name_);
+    }
     infer_request_ = compiled_model_.create_infer_request();
 
     if (compiled_model_.inputs().size() != 1 || compiled_model_.outputs().size() != 1) {
@@ -211,8 +251,8 @@ class ImagePredict {
   }
 
  private:
-  int width_ = 640;   ///< 从模型自动读取的输入宽
-  int height_ = 640;  ///< 从模型自动读取的输入高
+  int width_ = 480;   ///< 从模型自动读取的输入宽
+  int height_ = 300;  ///< 从模型自动读取的输入高
 
   std::unique_ptr<ov::Core> core_;
   ov::CompiledModel compiled_model_;
@@ -223,6 +263,8 @@ class ImagePredict {
   std::string device_name_ = "AUTO";
   std::string input_name_;
   std::string output_name_;
+
+  ImageRecognize::ImagePreprocess preprocessor_{cv::Size(640, 640)};
 
   float score_thresh_ = 0.5f;
   float nms_iou_thresh_ = 0.5f;

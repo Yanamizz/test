@@ -44,8 +44,8 @@ int main() {
     // 直接使用 SerialRead.hpp 中的统一解析与姿态解算逻辑
     if (SerialTask::ReadIMUData(port, angles)) {
       ++recv_count;
-      std::cout << "[" << recv_count << "]" << "  Roll=" << angles.roll << "  Pitch=" << angles.pitch / 180 * 3.14
-                << "  Yaw=" << angles.yaw / 180 * 3.14 << std::endl;
+      std::cout << "[" << recv_count << "]" << "  Roll=" << angles.roll << "  Pitch=" << angles.pitch
+                << "  Yaw=" << angles.yaw << std::endl;
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
