@@ -33,7 +33,14 @@ class KalmanFilter {
     return X.at<double>(0, 0);  // 返回滤波后的角度
   }
 
-  double getVelocity() { return X.at<double>(1, 0); }  // 获取估算的角速度
+  double getVelocity() const { return X.at<double>(1, 0); }  // 获取估算的角速度
+
+  double getAngle() const { return X.at<double>(0, 0); }
+
+  void reset(double initial_angle = 0.0, double initial_velocity = 0.0) {
+    X = (cv::Mat_<double>(2, 1) << initial_angle, initial_velocity);
+    P = cv::Mat::eye(2, 2, CV_64F);
+  }
 
  private:
   cv::Mat X, P;

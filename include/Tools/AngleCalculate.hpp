@@ -8,6 +8,7 @@
 #include <algorithm>  // for std::clamp
 
 #include "KalmanFilter/KalmanFilter.hpp"
+#include "KalmanFilter/CubatureKalmanFilter.hpp"
 #include "KalmanFilter/ExtendedKalmanFilter.hpp"
 #include "KalmanFilter/UnscentedKalmanFilter.hpp"
 #include "Tools/CameraData.hpp"
@@ -15,8 +16,71 @@
 #define PI 3.1415926
 
 namespace Tools {
+
+enum class FilterType {
+  KF,
+  EKF,
+  UKF,
+  CKF,
+};
+
+inline const char* ToString(FilterType type) {
+  switch (type) {
+    case FilterType::KF:
+      return "KF";
+    case FilterType::EKF:
+      return "EKF";
+    case FilterType::UKF:
+      return "UKF";
+    case FilterType::CKF:
+      return "CKF";
+    default:
+      return "UNKNOWN";
+  }
+}
+
 class AngleCalculator {
  public:
+  explicit AngleCalculator(FilterType type = FilterType::UKF) : filter_type(type) {}
+
+  void SetFilterType(FilterType type) {
+    if (filter_type == type) return;
+    filter_type = type;
+    filter_initialized = false;
+  }
+
+  FilterType GetFilterType() const { return filter_type; }
+
+  bool SetFilterTypeFromString(const std::string& type) {
+    std::string s;
+    s.reserve(type.size());
+    for (char c : type) {
+      if (c >= 'a' && c <= 'z') {
+        s.push_back(static_cast<char>(c - 'a' + 'A'));
+      } else {
+        s.push_back(c);
+      }
+    }
+
+    if (s == "KF") {
+      SetFilterType(FilterType::KF);
+      return true;
+    }
+    if (s == "EKF") {
+      SetFilterType(FilterType::EKF);
+      return true;
+    }
+    if (s == "UKF") {
+      SetFilterType(FilterType::UKF);
+      return true;
+    }
+    if (s == "CKF") {
+      SetFilterType(FilterType::CKF);
+      return true;
+    }
+    return false;
+  }
+
   CameraData cameraData;
   std::pair<float, float> CalculateAbsoluteAngles(float targetX, float targetY, float currentYaw, float currentPitch,
                                                   double dt_from_main = -1.0) {
@@ -60,21 +124,76 @@ class AngleCalculator {
 
     // 冷启动时先用首帧测量初始化滤波器，避免从 0° 拉到 ±180° 导致发送直接饱和到 ±5°。
     if (!filter_initialized) {
-      kf_yaw.reset(absolute_yaw, 0.0);
-      kf_pitch.reset(absolute_pitch, 0.0);
+      ResetFilters(absolute_yaw, absolute_pitch);
       filter_initialized = true;
       return {static_cast<float>(absolute_yaw), static_cast<float>(absolute_pitch)};
     }
 
-    float filtered_yaw = kf_yaw.update(absolute_yaw, dt);
-    float filtered_pitch = kf_pitch.update(absolute_pitch, dt);
+    float filtered_yaw = static_cast<float>(UpdateYaw(absolute_yaw, dt));
+    float filtered_pitch = static_cast<float>(UpdatePitch(absolute_pitch, dt));
 
     return {filtered_yaw, filtered_pitch};
   }
 
  private:
-  UnscentedKalmanFilter kf_yaw{1.0, 0.05};
-  UnscentedKalmanFilter kf_pitch{0.01, 1.5};
+  void ResetFilters(double yaw, double pitch) {
+    kf_yaw.reset(yaw, 0.0);
+    kf_pitch.reset(pitch, 0.0);
+
+    ekf_yaw.reset(yaw, 0.0);
+    ekf_pitch.reset(pitch, 0.0);
+
+    ukf_yaw.reset(yaw, 0.0);
+    ukf_pitch.reset(pitch, 0.0);
+
+    ckf_yaw.reset(yaw, 0.0);
+    ckf_pitch.reset(pitch, 0.0);
+  }
+
+  double UpdateYaw(double measurement, double dt) {
+    switch (filter_type) {
+      case FilterType::KF:
+        return kf_yaw.update(measurement, dt);
+      case FilterType::EKF:
+        return ekf_yaw.update(measurement, dt);
+      case FilterType::UKF:
+        return ukf_yaw.update(measurement, dt);
+      case FilterType::CKF:
+        return ckf_yaw.update(measurement, dt);
+      default:
+        return ukf_yaw.update(measurement, dt);
+    }
+  }
+
+  double UpdatePitch(double measurement, double dt) {
+    switch (filter_type) {
+      case FilterType::KF:
+        return kf_pitch.update(measurement, dt);
+      case FilterType::EKF:
+        return ekf_pitch.update(measurement, dt);
+      case FilterType::UKF:
+        return ukf_pitch.update(measurement, dt);
+      case FilterType::CKF:
+        return ckf_pitch.update(measurement, dt);
+      default:
+        return ukf_pitch.update(measurement, dt);
+    }
+  }
+
+  FilterType filter_type = FilterType::UKF;
+
+  KalmanFilter kf_yaw{1.0, 0.05};
+  KalmanFilter kf_pitch{0.01, 1.5};
+
+  ExtendedKalmanFilter ekf_yaw{1.0, 0.05};
+  ExtendedKalmanFilter ekf_pitch{0.01, 1.5};
+
+  UnscentedKalmanFilter ukf_yaw{1.0, 0.05};
+  UnscentedKalmanFilter ukf_pitch{0.01, 1.5};
+
+  CubatureKalmanFilter ckf_yaw{1.0, 0.05};
+  CubatureKalmanFilter ckf_pitch{0.01, 1.5};
+
   bool filter_initialized = false;
 
   std::chrono::steady_clock::time_point last_time;

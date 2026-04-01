@@ -46,12 +46,13 @@ static std::atomic<int> g_write_idx{0};  // 当前写入buffer索引
 static std::atomic<int> g_read_idx{-1};  // 当前可读buffer索引，-1表示无新帧
 
 static std::atomic<bool> has_detection{false};  // 是否有目标被检测到
-static float minimum_angle = 0.008f;              // 最小角度阈值，低于该值不发送偏移
+static float minimum_angle = 0.008f;            // 最小角度阈值，低于该值不发送偏移
 static std::atomic<float> g_send_abs_yaw{0.0f};
 static std::atomic<float> g_send_abs_pitch{0.0f};
 static std::atomic<float> g_send_offset_yaw{0.0f};
 static std::atomic<float> g_send_offset_pitch{0.0f};
-static constexpr float g_max_send_delta = 5.0f;  // 每次相对当前IMU允许的最大角差
+static constexpr float g_max_send_delta = 5.0f;        // 每次相对当前IMU允许的最大角差
+static const std::string g_angle_filter_type = "UKF";  // 可选: KF / EKF / UKF / CKF
 
 static inline float NormalizeDeltaDeg(float delta) {
   while (delta > 180.0f) delta -= 360.0f;
@@ -108,8 +109,6 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
     g_running = false;
     return;
   }
-  static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
-  static Tools::LaserAngleCalculator laser_angle_calculator;  // 持久化 LaserAngleCalculator，避免每次调用时重置
   while (g_running) {
     cv::Mat frame = camera->grab(1000);
     if (frame.empty()) {
@@ -134,6 +133,18 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
 
 void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
   FPSCounter fps_counter;
+  static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
+  static Tools::LaserAngleCalculator laser_angle_calculator;
+  static Tools::DistanceCalculator distance_calculator;
+
+  const bool filter_ok = angle_calculator.SetFilterTypeFromString(g_angle_filter_type);
+  if (filter_ok) {
+    std::cout << "[AngleFilter] using type: " << Tools::ToString(angle_calculator.GetFilterType()) << std::endl;
+  } else {
+    std::cerr << "[AngleFilter] invalid type: " << g_angle_filter_type << ", fallback to "
+              << Tools::ToString(angle_calculator.GetFilterType()) << std::endl;
+  }
+
   // static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
   std::chrono::steady_clock::time_point prev_frame_ts{};
   bool has_prev_frame_ts = false;
@@ -200,11 +211,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
       float center_y = (result.boxes[0][1] + result.boxes[0][3]) / 2.0f;
       float width = result.boxes[0][2] - result.boxes[0][0];
       float height = result.boxes[0][3] - result.boxes[0][1];
-      static Tools::LaserAngleCalculator laser_angle_calculator;
-      static Tools::DistanceCalculator distance_calculator;
       float distance = distance_calculator.CalculateDistance(height, width);
-
-      static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
 
       if (has_matched_imu) {
         double dt = 0.05;
@@ -221,13 +228,13 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
         offset_angles.x = NormalizeDeltaDeg(absolute_yaw - matched_imu.yaw);
         offset_angles.y = NormalizeDeltaDeg(absolute_pitch - matched_imu.pitch);
 
-        auto [laser_yaw_angle, laser_pitch_angle] = laser_angle_calculator.CalculateLaserAngles(distance , offset_angles.x);
-        
+        auto [laser_yaw_angle, laser_pitch_angle] =
+            laser_angle_calculator.CalculateLaserAngles(distance, offset_angles.x);
+
         float delta_yaw_raw = NormalizeDeltaDeg(static_cast<float>(offset_angles.x + laser_yaw_angle));
         float delta_pitch_raw = NormalizeDeltaDeg(static_cast<float>(offset_angles.y + laser_pitch_angle));
         if (abs(delta_pitch_raw) > minimum_angle || abs(delta_yaw_raw) > minimum_angle) {
           // 直接基于“当前IMU到目标的角差”叠加激光补偿，再限幅后转回绝对角。
-          
 
           // 新锁定目标时渐进放开限幅，避免第一拍打满导致过冲。
           if (!target_locked_last_frame) {
@@ -353,10 +360,10 @@ void IMUSendThread(serial::Serial &port) {
       std::cout << std::fixed << std::setprecision(2) << "°, Offset Yaw: " << offset_yaw
                 << "°, Offset Pitch: " << offset_pitch << "°" << std::endl;
       if (abs(offset_yaw) > 0.6f)
-        if (offset_yaw>0)
+        if (offset_yaw > 0)
           yaw += 3.0f * (1.0f - minimum_angle / abs(offset_yaw));  // 根据偏移量大小动态调整补偿力度，越接近中心越温和
         else
-          yaw -=  3.0f * (1.0f - minimum_angle / abs(offset_yaw));
+          yaw -= 3.0f * (1.0f - minimum_angle / abs(offset_yaw));
 
       SerialTask::SerialSend(port, pitch, yaw, 0x01);
       has_detection.store(false, std::memory_order_release);
