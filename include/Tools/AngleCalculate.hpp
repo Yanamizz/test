@@ -1,11 +1,8 @@
 #pragma once
 #include <cmath>
 #include <chrono>
-#include <iostream>
 #include <opencv2/opencv.hpp>
 #include <vector>
-#include <memory>
-#include <algorithm>  // for std::clamp
 
 #include "KalmanFilter/KalmanFilter.hpp"
 #include "KalmanFilter/CubatureKalmanFilter.hpp"

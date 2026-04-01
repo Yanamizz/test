@@ -8,13 +8,12 @@ namespace ImageRecognize {
 class ImageShow {
  public:
   /**
-   * @brief 绘制检测框、中心点、FPS和耗时，并在窗口中显示图像
+   * @brief 绘制检测框、中心点和 FPS，并在窗口中显示图像
    * @param frame 输入输出图像帧
    * @param boxes 检测框列表，每个框为 [x1, y1, x2, y2, confidence]
-   * @param ms 推理耗时（毫秒）
    */
 
-  static void ShowNow(cv::Mat &frame, const ImageRecognize::DataProcessResult &result, double ms, double fps) {
+  static void ShowNow(cv::Mat &frame, const ImageRecognize::DataProcessResult &result, double fps) {
     // 绘制结果
 
     for (const auto &box : result.boxes) {

@@ -29,11 +29,7 @@ static std::mutex g_frame_mutex;            // 保护最新帧的互斥锁
 static std::condition_variable g_frame_cv;  // 通知预测线程有新帧到达的条件变量
                                             // IMU 数据缓冲区
 static std::deque<std::pair<std::chrono::steady_clock::time_point, SerialTask::EulerAngles>> g_imu_buffer;
-static std::mutex g_imu_mutex;                       // 保护 IMU 缓冲区的互斥锁
-static std::atomic<float> g_current_yaw_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/sgre
-static std::atomic<float> g_current_pitch_rate{0.0f};  // 即时角速度（由 IMUReadThread 计算并更新）——单位 deg/s
-static std::atomic<float> g_current_imu_yaw{0.0f};    // 最新 IMU 绝对 Yaw（由 IMUReadThread 更新）
-static std::atomic<float> g_current_imu_pitch{0.0f};  // 最新 IMU 绝对 Pitch（由 IMUReadThread 更新）
+static std::mutex g_imu_mutex;  // 保护 IMU 缓冲区的互斥锁
 
 // 全局：双buffer避免重复clone
 struct FrameItem {
@@ -154,6 +150,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
   int lock_frame_count = 0;
   float last_cmd_delta_yaw = 0.0f;
   float last_cmd_delta_pitch = 0.0f;
+
+  auto resetTrackingState = [&]() {
+    has_detection.store(false, std::memory_order_release);
+    target_locked_last_frame = false;
+    lock_frame_count = 0;
+  };
 
   while (g_running) {
     cv::Mat frame;
@@ -276,28 +278,20 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
           ImageRecognize::ImageShow::ShowAngles(frame, send_abs_yaw, send_abs_pitch, matched_imu.yaw, matched_imu.pitch,
                                                 cmd_delta_yaw, cmd_delta_pitch, distance);
         } else {
-          has_detection.store(false, std::memory_order_release);
-          target_locked_last_frame = false;
-          lock_frame_count = 0;
+          resetTrackingState();
         }
       } else {
-        has_detection.store(false, std::memory_order_release);
-        target_locked_last_frame = false;
-        lock_frame_count = 0;
+        resetTrackingState();
       }
     } else {
-      has_detection.store(false, std::memory_order_release);
-      target_locked_last_frame = false;
-      lock_frame_count = 0;
+      resetTrackingState();
     }
 
     // 可视化显示
     fps_counter.tick();
     double fps = fps_counter.get();
 
-    auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - frame_ts).count();
-    ImageRecognize::ImageShow::ShowNow(frame, result, elapsed_ms, fps);
+    ImageRecognize::ImageShow::ShowNow(frame, result, fps);
 
     // 无目标时，每隔若干帧保存图像到本次运行目录
     // no_target_saver.Update(frame, detected_target);
@@ -311,29 +305,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
 }
 
 void IMUReadThread(serial::Serial &port) {
-  // 用于计算即时速率的上一次 IMU
-  SerialTask::EulerAngles prev_local_imu{};
-  std::chrono::steady_clock::time_point prev_local_ts{};
-
   while (g_running) {
     SerialTask::EulerAngles angles;
     if (SerialTask::ReadIMUData(port, angles)) {
       auto ts = std::chrono::steady_clock::now();
-
-      if (prev_local_ts.time_since_epoch().count() != 0) {
-        const double dt = std::chrono::duration<double>(ts - prev_local_ts).count();
-        if (dt > 1e-4 && dt < 0.2) {
-          const float yaw_rate = NormalizeDeltaDeg(angles.yaw - prev_local_imu.yaw) / static_cast<float>(dt);
-          const float pitch_rate = NormalizeDeltaDeg(angles.pitch - prev_local_imu.pitch) / static_cast<float>(dt);
-          g_current_yaw_rate.store(std::clamp(yaw_rate, -720.0f, 720.0f), std::memory_order_release);
-          g_current_pitch_rate.store(std::clamp(pitch_rate, -720.0f, 720.0f), std::memory_order_release);
-        }
-      }
-
-      prev_local_imu = angles;
-      prev_local_ts = ts;
-      g_current_imu_yaw.store(angles.yaw, std::memory_order_release);
-      g_current_imu_pitch.store(angles.pitch, std::memory_order_release);
 
       std::lock_guard<std::mutex> lk(g_imu_mutex);
       // 添加到缓冲区末尾

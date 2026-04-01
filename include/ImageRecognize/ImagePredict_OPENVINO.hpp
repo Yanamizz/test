@@ -35,8 +35,6 @@
 
 namespace ImageRecognize {
 
-using PredictResult = ImageRecognize::DataProcessResult;
-
 #if IMAGE_RECOGNIZE_HAS_OPENVINO
 class ImagePredict {
  public:
@@ -129,9 +127,9 @@ class ImagePredict {
       const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
       const unsigned int infer_threads = std::max(1u, hw_threads > 2 ? (hw_threads - 2) : hw_threads);
       // 低延迟优先：单流 + LATENCY hint，减少排队与吞吐导向调度带来的时延。
-      compiled_model_ = core_->compile_model(
-          model, device_name_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY), ov::streams::num(1),
-          ov::inference_num_threads(infer_threads));
+      compiled_model_ =
+          core_->compile_model(model, device_name_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
+                               ov::streams::num(1), ov::inference_num_threads(infer_threads));
     } catch (const std::exception &e) {
       std::cerr << "[Warning] Failed to apply low-latency OpenVINO properties on device '" << device_name_
                 << "': " << e.what() << ". Fallback to default compile_model." << std::endl;

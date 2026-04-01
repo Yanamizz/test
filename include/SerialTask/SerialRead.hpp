@@ -12,12 +12,9 @@
 #include "SerialTask/Common.hpp"
 #include <serial/serial.h>
 #include <cmath>
-#include <thread>
-#include <chrono>
 #include <iostream>  // For std::cerr
 #include <vector>    // For std::vector
 #include <cstring>
-#include <Eigen/Geometry>
 
 namespace SerialTask {
 

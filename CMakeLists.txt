@@ -11,7 +11,6 @@ project(radar_track)
  
 # Debug模式下的编译指令
 SET(CMAKE_BUILD_TYPE "Debug")
-set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_DEBUG}")
 # Add -Wno-maybe-uninitialized to reduce false-positive warnings from Eigen internals
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17 -pthread -O2 -Wall -Wno-maybe-uninitialized -DNDEBUG") 
  
@@ -40,7 +39,9 @@ link_directories(
  
 ## Add third-party subdirectories that provide libraries used by targets
 add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/kalman)
-add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/serial)
+if(EXISTS "${PROJECT_SOURCE_DIR}/third_lib/serial/CMakeLists.txt")
+    add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/serial)
+endif()
 
 # 递归检索指定目录下所有 .cc
 set(SRC_ROOT ${PROJECT_SOURCE_DIR}/src)
