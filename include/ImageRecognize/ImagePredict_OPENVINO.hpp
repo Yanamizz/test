@@ -249,8 +249,8 @@ class ImagePredict {
   }
 
  private:
-  int width_ = 480;   ///< 从模型自动读取的输入宽
-  int height_ = 300;  ///< 从模型自动读取的输入高
+  int width_ = 640;   ///< 从模型自动读取的输入宽
+  int height_ = 640;  ///< 从模型自动读取的输入高
 
   std::unique_ptr<ov::Core> core_;
   ov::CompiledModel compiled_model_;

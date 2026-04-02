@@ -33,18 +33,9 @@ class ImageShow {
 
   static void ShowAngles(cv::Mat &frame, float yaw, float pitch, float imu_yaw, float imu_pitch, float offset_yaw,
                          float offset_pitch, float distance) {
-    cv::putText(frame, "Pitch: " + std::to_string(pitch), {10, 100}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 255}, 2);
-    cv::putText(frame, "Yaw: " + std::to_string(yaw), {10, 135}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 255}, 2);
-    cv::putText(frame, "IMU Pitch: " + std::to_string(imu_pitch), {10, 170}, cv::FONT_HERSHEY_SIMPLEX, 1.0,
-                {255, 0, 255}, 2);
-    cv::putText(frame, "IMU Yaw: " + std::to_string(imu_yaw), {10, 205}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 255},
-                2);
-    cv::putText(frame, "Offset Pitch: " + std::to_string(offset_pitch), {10, 240}, cv::FONT_HERSHEY_SIMPLEX, 1.0,
-                {255, 0, 255}, 2);
-    cv::putText(frame, "Offset Yaw: " + std::to_string(offset_yaw), {10, 275}, cv::FONT_HERSHEY_SIMPLEX, 1.0,
-                {255, 0, 255}, 2);
-    cv::putText(frame, "Distance: " + std::to_string(distance), {10, 310}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 255},
-                2);
+    std::string text = " Offset_Yaw: " + std::to_string(offset_yaw) + " Offset_Pitch: " + std::to_string(offset_pitch) +
+                       " Distance: " + std::to_string(distance);
+    std::cout << text << std::endl;
   }
 
   /**

@@ -23,7 +23,7 @@ namespace ImageRecognize {
  */
 struct PreprocessResult {
   std::vector<float> data;                       ///< 预处理后的平铺数据，按 CHW 顺序存储
-  std::array<int64_t, 4> shape{1, 3, 300, 480};  ///< 图像形状：{batch, channel, height, width}
+  std::array<int64_t, 4> shape{1, 3, 640, 640};  ///< 图像形状：{batch, channel, height, width}
 };
 
 /**
@@ -81,7 +81,7 @@ class ImagePreprocess {
   }
 
  private:
-  cv::Size inputSize_{480, 300};  ///< 模型期望的输入尺寸
+  cv::Size inputSize_{640, 640};  ///< 模型期望的输入尺寸
 };
 
 }  // namespace ImageRecognize

@@ -177,7 +177,7 @@ class AngleCalculator {
     }
   }
 
-  FilterType filter_type = FilterType::UKF;
+  FilterType filter_type = FilterType::CKF;
 
   KalmanFilter kf_yaw{1.0, 0.05};
   KalmanFilter kf_pitch{0.01, 1.5};

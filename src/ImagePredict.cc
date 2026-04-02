@@ -20,7 +20,7 @@
 #include "Tools/CpuAffinity.hpp"
 #include "Tools/FpsCounter.hpp"
 #include "Tools/LaserAngleCalculate.hpp"
-// #include "Tools/SaveImage.hpp"
+#include "Tools/SaveImage.hpp"
 #include "CameraTask/GetImage.hpp"
 
 std::string model_path = "/home/nuc/Downloads/rm/src/model/best_v8s.xml";
@@ -141,7 +141,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
               << Tools::ToString(angle_calculator.GetFilterType()) << std::endl;
   }
 
-  // static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
+  static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
   std::chrono::steady_clock::time_point prev_frame_ts{};
   bool has_prev_frame_ts = false;
 
@@ -294,7 +294,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
     ImageRecognize::ImageShow::ShowNow(frame, result, fps);
 
     // 无目标时，每隔若干帧保存图像到本次运行目录
-    // no_target_saver.Update(frame, detected_target);
+    no_target_saver.Update(frame, detected_target);
 
     // 处理 GUI 事件并允许按键退出
     if (ImageRecognize::ImageShow::WaitForExit()) {
@@ -339,7 +339,6 @@ void IMUSendThread(serial::Serial &port) {
           yaw += 3.0f * (1.0f - minimum_angle / abs(offset_yaw));  // 根据偏移量大小动态调整补偿力度，越接近中心越温和
         else
           yaw -= 3.0f * (1.0f - minimum_angle / abs(offset_yaw));
-
       SerialTask::SerialSend(port, pitch, yaw, 0x01);
       has_detection.store(false, std::memory_order_release);
     } else {
