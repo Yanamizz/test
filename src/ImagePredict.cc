@@ -12,7 +12,6 @@
 #include <atomic>
 
 #include "ImageRecognize/ImageShow.hpp"
-// #include "ImageRecognize/ImagePredict_ONNX.hpp"
 #include "ImageRecognize/ImagePredict_OPENVINO.hpp"  // 切换到 OpenVINO 时，注释上一行并启用这一行
 #include "SerialTask/SerialRead.hpp"
 #include "SerialTask/SerialSend.hpp"
@@ -23,7 +22,7 @@
 #include "Tools/SaveImage.hpp"
 #include "CameraTask/GetImage.hpp"
 
-std::string model_path = "/home/nuc/Downloads/rm/src/model/best_v8s.xml";
+std::string model_path = "/home/nuc/antidrone/src/model/best_v8s.xml";
 std::atomic<bool> g_running(true);          // 全局运行标志
 static std::mutex g_frame_mutex;            // 保护最新帧的互斥锁
 static std::condition_variable g_frame_cv;  // 通知预测线程有新帧到达的条件变量
@@ -141,7 +140,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
               << Tools::ToString(angle_calculator.GetFilterType()) << std::endl;
   }
 
-  static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
+  // static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
   std::chrono::steady_clock::time_point prev_frame_ts{};
   bool has_prev_frame_ts = false;
 
@@ -294,7 +293,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
     ImageRecognize::ImageShow::ShowNow(frame, result, fps);
 
     // 无目标时，每隔若干帧保存图像到本次运行目录
-    no_target_saver.Update(frame, detected_target);
+    // no_target_saver.Update(frame, detected_target);
 
     // 处理 GUI 事件并允许按键退出
     if (ImageRecognize::ImageShow::WaitForExit()) {

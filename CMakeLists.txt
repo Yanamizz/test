@@ -17,17 +17,21 @@ set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17 -pthread -O2 -Wal
 set(OpenCV_LIBS opencv_videoio opencv_imgcodecs opencv_imgproc opencv_core opencv_dnn opencv_highgui opencv_calib3d)
 find_package(Eigen3 REQUIRED)
 
+# 允许优先使用仓库内 third_lib/openvino 的 CMake 包配置
+set(_LOCAL_OPENVINO_DIR "${PROJECT_SOURCE_DIR}/third_lib/openvino/build")
+if(EXISTS "${_LOCAL_OPENVINO_DIR}/OpenVINOConfig.cmake")
+    list(APPEND CMAKE_PREFIX_PATH "${_LOCAL_OPENVINO_DIR}")
+endif()
+find_package(OpenVINO CONFIG QUIET)
+
 include_directories(
-    /usr/local/include
-    /usr/local/include/opencv4
+    /usr/include
+    /usr/include/opencv4
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/third_lib/kalman/include
     ${PROJECT_SOURCE_DIR}/third_lib/Galaxy_camera/inc
-    /usr/include
     ${EIGEN3_INCLUDE_DIR}
 )
-# find_package(serial REQUIRED)
-
  
 # 设置可执行文件输出目录
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -52,11 +56,24 @@ foreach(src ${SRCS})
     get_filename_component(name_we ${src} NAME_WE)
     add_executable(${name_we} ${src})
     target_link_libraries(${name_we}
-        -lopenvino
-        -lgxiapi
         ${OpenCV_LIBS}
         serial  # 添加 serial 库
-    )      
+    )
+
+    if(name_we STREQUAL "ImagePredict")
+        target_link_libraries(${name_we}
+            gxiapi
+        )
+
+        if(OpenVINO_FOUND)
+            target_link_libraries(${name_we}
+                openvino::runtime
+            )
+            message(STATUS "ImagePredict: OpenVINO enabled via ${OpenVINO_DIR}")
+        else()
+            message(WARNING "ImagePredict: OpenVINO package not found. It will compile fallback path that throws at runtime.")
+        endif()
+    endif()
 endforeach()
  
 

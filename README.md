@@ -30,7 +30,9 @@ hash值校验无法对应:修改本地hash校验值<br>
 **使用到的第三方库:**<br>
 kalman filter:<https://github.com/mherb/kalman.git>
 Galaxy SDK:<https://www.daheng-imaging.com/downloads/>
-
+Serial:<https://github.com/wjwwood/serial.git>
+OpenVINO:<https://github.com/openvinotoolkit/openvino.git>
+<https://github.com/openvinotoolkit/openvino/blob/2026.0.0/docs/dev/build_linux.md>
 
 
 
