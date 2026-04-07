@@ -22,7 +22,7 @@
 #include "Tools/SaveImage.hpp"
 #include "CameraTask/GetImage.hpp"
 
-std::string model_path = "/home/nuc/antidrone/src/model/best_v8s.xml";
+std::string model_path = "/home/nuc/antidrone/src/model/antidrone_v8n.xml";
 std::atomic<bool> g_running(true);          // 全局运行标志
 static std::mutex g_frame_mutex;            // 保护最新帧的互斥锁
 static std::condition_variable g_frame_cv;  // 通知预测线程有新帧到达的条件变量
@@ -47,7 +47,7 @@ static std::atomic<float> g_send_abs_pitch{0.0f};
 static std::atomic<float> g_send_offset_yaw{0.0f};
 static std::atomic<float> g_send_offset_pitch{0.0f};
 static constexpr float g_max_send_delta = 5.0f;        // 每次相对当前IMU允许的最大角差
-static const std::string g_angle_filter_type = "UKF";  // 可选: KF / EKF / UKF / CKF
+static const std::string g_angle_filter_type = "CKF";  // 可选: KF / EKF / UKF / CKF
 
 static inline float NormalizeDeltaDeg(float delta) {
   while (delta > 180.0f) delta -= 360.0f;
@@ -66,6 +66,7 @@ int main() {
   Tools::BindCurrentThreadToBigCores();
   CameraTask::GalaxyCamera camera;
   serial::Serial port;
+  bool serial_enabled = false;
   std::unique_ptr<ImageRecognize::ImagePredict> predictor;
   try {
     predictor = std::make_unique<ImageRecognize::ImagePredict>(model_path);
@@ -79,16 +80,25 @@ int main() {
     SerialTask::DefaultConfig(port);
     try {
       port.open();
+      serial_enabled = true;
     } catch (const std::exception &e) {
-      std::cerr << "Failed to open IMU serial port in main: " << e.what() << std::endl;
-      return -1;
+      std::cerr << "Warning: failed to open IMU serial port, continue without serial: " << e.what() << std::endl;
+      serial_enabled = false;
     }
+  } else {
+    serial_enabled = true;
   }
 
   std::thread image_capture(CaptureThread, &camera);
   std::thread image_predict(ImagePredictThread, std::ref(*predictor));
-  std::thread imu_read(IMUReadThread, std::ref(port));
-  std::thread imu_send(IMUSendThread, std::ref(port));
+  std::thread imu_read;
+  std::thread imu_send;
+  if (serial_enabled) {
+    imu_read = std::thread(IMUReadThread, std::ref(port));
+    imu_send = std::thread(IMUSendThread, std::ref(port));
+  } else {
+    std::cout << "[IMU] serial disabled, running detection/display only." << std::endl;
+  }
 
   if (image_capture.joinable()) image_capture.join();
   if (image_predict.joinable()) image_predict.join();
@@ -140,7 +150,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
               << Tools::ToString(angle_calculator.GetFilterType()) << std::endl;
   }
 
-  // static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
+  static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
   std::chrono::steady_clock::time_point prev_frame_ts{};
   bool has_prev_frame_ts = false;
 
@@ -178,7 +188,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
     bool has_matched_imu = false;
     try {
       result = predictor.run(frame);
-
       // 关联最近一次 IMU 状态并记录延迟
       {
         std::lock_guard<std::mutex> lk(g_imu_mutex);
@@ -223,11 +232,16 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
         has_prev_frame_ts = true;
         if (dt <= 0.0 || dt > 0.2) dt = 0.05;
 
-        auto [absolute_yaw, absolute_pitch] =
+        auto [filtered_yaw, filtered_pitch] =
             angle_calculator.CalculateAbsoluteAngles(center_x, center_y, matched_imu.yaw, matched_imu.pitch, dt);
+
+        cv::Point2f pred_point =
+          angle_calculator.AbsoluteAnglesToPixel(filtered_yaw, filtered_pitch, matched_imu.yaw, matched_imu.pitch);
+        ImageRecognize::ImageShow::ShowPred(frame, pred_point.x, pred_point.y);
+
         // 必须用“最短角差”，否则跨越 ±180° 时会出现 300° 级突变
-        offset_angles.x = NormalizeDeltaDeg(absolute_yaw - matched_imu.yaw);
-        offset_angles.y = NormalizeDeltaDeg(absolute_pitch - matched_imu.pitch);
+        offset_angles.x = NormalizeDeltaDeg(filtered_yaw - matched_imu.yaw);
+        offset_angles.y = NormalizeDeltaDeg(filtered_pitch - matched_imu.pitch);
 
         auto [laser_yaw_angle, laser_pitch_angle] =
             laser_angle_calculator.CalculateLaserAngles(distance, offset_angles.x);
@@ -235,7 +249,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
         float delta_yaw_raw = NormalizeDeltaDeg(static_cast<float>(offset_angles.x + laser_yaw_angle));
         float delta_pitch_raw = NormalizeDeltaDeg(static_cast<float>(offset_angles.y + laser_pitch_angle));
         if (abs(delta_pitch_raw) > minimum_angle || abs(delta_yaw_raw) > minimum_angle) {
-          // 直接基于“当前IMU到目标的角差”叠加激光补偿，再限幅后转回绝对角。
 
           // 新锁定目标时渐进放开限幅，避免第一拍打满导致过冲。
           if (!target_locked_last_frame) {
@@ -293,7 +306,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
     ImageRecognize::ImageShow::ShowNow(frame, result, fps);
 
     // 无目标时，每隔若干帧保存图像到本次运行目录
-    // no_target_saver.Update(frame, detected_target);
+    no_target_saver.Update(frame, detected_target);
 
     // 处理 GUI 事件并允许按键退出
     if (ImageRecognize::ImageShow::WaitForExit()) {

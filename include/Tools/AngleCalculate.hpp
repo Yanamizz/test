@@ -128,8 +128,25 @@ class AngleCalculator {
 
     float filtered_yaw = static_cast<float>(UpdateYaw(absolute_yaw, dt));
     float filtered_pitch = static_cast<float>(UpdatePitch(absolute_pitch, dt));
-
+    
     return {filtered_yaw, filtered_pitch};
+  }
+
+  cv::Point2f AbsoluteAnglesToPixel(float absoluteYaw, float absolutePitch, float currentYaw, float currentPitch) const {
+    const double fx = cameraData.cameraMatrix.at<double>(0, 0);
+    const double fy = cameraData.cameraMatrix.at<double>(1, 1);
+    const double cx = cameraData.cameraMatrix.at<double>(0, 2);
+    const double cy = cameraData.cameraMatrix.at<double>(1, 2);
+
+    const double offset_yaw = static_cast<double>(absoluteYaw - currentYaw);
+    const double offset_pitch = static_cast<double>(absolutePitch - currentPitch);
+
+    const double rx = -std::tan(offset_yaw * PI / 180.0);
+    const double ry = std::tan(offset_pitch * PI / 180.0);
+
+    const float pred_x = static_cast<float>(cx + fx * rx);
+    const float pred_y = static_cast<float>(cy + fy * ry);
+    return {pred_x, pred_y};
   }
 
  private:

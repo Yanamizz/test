@@ -27,8 +27,12 @@ class ImageShow {
       int cy = static_cast<int>((box[1] + box[3]) * 0.5f);
       cv::circle(frame, {cx, cy}, 4, {0, 0, 255}, -1);
     }
-    cv::putText(frame, "FPS: " + std::to_string(fps), {10, 30}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {255, 0, 0}, 2);
+    cv::putText(frame, "FPS: " + std::to_string(fps), {10, 30}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255,0 }, 2);
     cv::imshow("Detection Result", frame);
+  }
+  static void ShowPred(cv::Mat &frame, double pred_cx ,double pred_cy) {
+          cv::circle(frame, {pred_cx, pred_cy}, 4, {0, 255, 0}, -1);
+
   }
 
   static void ShowAngles(cv::Mat &frame, float yaw, float pitch, float imu_yaw, float imu_pitch, float offset_yaw,

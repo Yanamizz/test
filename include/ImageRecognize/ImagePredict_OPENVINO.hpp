@@ -264,7 +264,7 @@ class ImagePredict {
 
   ImageRecognize::ImagePreprocess preprocessor_{cv::Size(640, 640)};
 
-  float score_thresh_ = 0.5f;
+  float score_thresh_ = 0.85f;
   float nms_iou_thresh_ = 0.5f;
 };
 #else
