@@ -28,6 +28,13 @@ class ImageShow {
       cv::circle(frame, {cx, cy}, 4, {0, 0, 255}, -1);
     }
     cv::putText(frame, "FPS: " + std::to_string(fps), {10, 30}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255,0 }, 2);
+
+    static bool window_initialized = false;
+    if (!window_initialized) {
+      cv::namedWindow("Detection Result", cv::WINDOW_NORMAL);
+      cv::resizeWindow("Detection Result", 640, 640);
+      window_initialized = true;
+    }
     cv::imshow("Detection Result", frame);
   }
   static void ShowPred(cv::Mat &frame, double pred_cx ,double pred_cy) {
