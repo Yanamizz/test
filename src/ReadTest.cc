@@ -9,7 +9,6 @@
 
 #include "SerialTask/SerialConfig.hpp"
 #include "SerialTask/SerialRead.hpp"
-#include "SerialTask/Common.hpp"
 
 namespace {
 std::atomic<bool> g_running{true};

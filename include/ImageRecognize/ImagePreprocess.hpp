@@ -11,9 +11,7 @@
 
 #include <opencv2/opencv.hpp>
 
-#include <algorithm>
 #include <array>
-#include <cstdint>
 #include <vector>
 
 namespace ImageRecognize {

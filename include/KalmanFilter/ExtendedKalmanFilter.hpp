@@ -94,6 +94,8 @@ class ExtendedKalmanFilter {
    */
   double getVelocity() const { return X.at<double>(1, 0); }
 
+  void setVelocity(double velocity) { X.at<double>(1, 0) = velocity; }
+
   /**
    * @brief 获取当前估计的角度
    * @return 角度（单位：度）

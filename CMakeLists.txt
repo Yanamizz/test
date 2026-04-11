@@ -28,10 +28,24 @@ include_directories(
     /usr/include
     /usr/include/opencv4
     ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/third_lib/serial/include
     ${PROJECT_SOURCE_DIR}/third_lib/kalman/include
     ${PROJECT_SOURCE_DIR}/third_lib/Galaxy_camera/inc
     ${EIGEN3_INCLUDE_DIR}
 )
+
+find_library(SERIAL_LIB serial)
+if(SERIAL_LIB)
+    message(STATUS "Using system serial library: ${SERIAL_LIB}")
+else()
+    if(EXISTS "${PROJECT_SOURCE_DIR}/third_lib/serial/CMakeLists.txt")
+        add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/serial EXCLUDE_FROM_ALL)
+        set(SERIAL_LIB serial)
+        message(STATUS "System serial library not found, fallback to bundled third_lib/serial")
+    else()
+        message(FATAL_ERROR "serial library not found. Please install libserial or provide third_lib/serial.")
+    endif()
+endif()
  
 # 设置可执行文件输出目录
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -41,11 +55,7 @@ link_directories(
     ${PROJECT_SOURCE_DIR}/third_lib/Galaxy_camera/lib/x86_64
 )
  
-## Add third-party subdirectories that provide libraries used by targets
-add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/kalman)
-if(EXISTS "${PROJECT_SOURCE_DIR}/third_lib/serial/CMakeLists.txt")
-    add_subdirectory(${PROJECT_SOURCE_DIR}/third_lib/serial)
-endif()
+# 仅编译 src 目录下源码；第三方库使用系统/预编译库链接
 
 # 递归检索指定目录下所有 .cc
 set(SRC_ROOT ${PROJECT_SOURCE_DIR}/src)
@@ -57,7 +67,7 @@ foreach(src ${SRCS})
     add_executable(${name_we} ${src})
     target_link_libraries(${name_we}
         ${OpenCV_LIBS}
-        serial  # 添加 serial 库
+        ${SERIAL_LIB}
     )
 
     if(name_we STREQUAL "ImagePredict")
@@ -77,5 +87,4 @@ foreach(src ${SRCS})
 endforeach()
  
 
-option(KALMAN_BUILD_EXAMPLES "Build the Kalman examples" OFF)  # 可选，关闭示例
 # Link moved into per-target loop above

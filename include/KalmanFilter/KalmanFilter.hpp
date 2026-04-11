@@ -35,6 +35,8 @@ class KalmanFilter {
 
   double getVelocity() const { return X.at<double>(1, 0); }  // 获取估算的角速度
 
+  void setVelocity(double velocity) { X.at<double>(1, 0) = velocity; }
+
   double getAngle() const { return X.at<double>(0, 0); }
 
   void reset(double initial_angle = 0.0, double initial_velocity = 0.0) {

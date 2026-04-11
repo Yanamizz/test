@@ -18,11 +18,11 @@
 
 namespace SerialTask {
 
-typedef struct {
+struct EulerAngles {
   float roll;   // 绕X轴旋转角度（单位：度）
   float pitch;  // 绕Y轴旋转角度（单位：度）
   float yaw;    // 绕Z轴旋转角度（单位：度）
-} EulerAngles;
+};
 
 inline bool ReadIMUFrame(serial::Serial& serial_port, GimbalImuFrame_SCM_t& out_frame);
 

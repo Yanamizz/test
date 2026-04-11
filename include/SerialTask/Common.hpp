@@ -32,4 +32,4 @@ typedef struct __attribute__((packed)) {
   uint8_t _EOF;  ///< 包尾 0xff
 } GimbalImuFrame_SCM_t;
 
-#define IMU_DATA_SEND_ID 0x03
+inline constexpr uint8_t IMU_DATA_SEND_ID = 0x03;

@@ -8,12 +8,9 @@
 #pragma once
 
 #include "Common.hpp"
-#include "SerialTask/SerialRead.hpp"
 #include <serial/serial.h>
-#include <thread>
-#include <chrono>
 
-#define RAD_TO_DEG 57.29577951308232  // 180 / PI
+inline constexpr float kDegToRad = 0.01745329251994329577f;
 
 namespace SerialTask {
 // 将度数归一化到 [-180, 180]
@@ -29,17 +26,8 @@ inline float NormalizeDegTo360(float d) {
   return d;
 }
 
-/**
- * @brief 发送目标侧欧拉角帧（Pitch, Yaw）到串口
- * @param serial_port 已配置好的串口对象
- * @param pitch_relative_angle 目标侧 Pitch 相对角度（单位：度）
- * @param yaw_relative_angle 目标侧 Yaw 相对角度（单位：度）
- * @param AimbotState 是否有目标：0x00 无目标，0x01 有目标
- */
-void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle,
-                     uint8_t AimbotState);
-
-// Inline overload defined below; remove duplicate non-inline definition.
+inline void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle,
+                            uint8_t AimbotState);
 
 // 重载：使用已知的当前角度发送，不再从串口读取（适用于接收线程在外部运行时）
 inline void SerialSend(serial::Serial& serial_port, float absolute_pitch, float absolute_yaw, uint8_t AimbotState) {
@@ -51,8 +39,8 @@ inline void SerialSend(serial::Serial& serial_port, float absolute_pitch, float 
 
   // 在转换为弧度前保存度值以便打印
 
-  pitch_relative_angle = pitch_relative_angle / RAD_TO_DEG;
-  yaw_relative_angle = yaw_relative_angle / RAD_TO_DEG;
+  pitch_relative_angle *= kDegToRad;
+  yaw_relative_angle *= kDegToRad;
 
   SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle, yaw_relative_angle, AimbotState);
 }
