@@ -3,28 +3,28 @@
  * @brief 跟踪效果评估工具（仅在识别到目标时启用）
  *
  * 算法依据：
- * 1. 过度振荡（OverOscillation）通常表现为误差频繁正负翻转、控制量变化幅度过大。
+ * 1. 过度振荡通常表现为误差频繁正负翻转、控制量变化幅度过大。
  *    因此本算法综合以下证据：
- *    - 误差零交叉率（error zero-crossing rate）
- *    - 控制信号速度与目标信号速度之比（control/target velocity ratio）
- *    - 误差信号速度与目标信号速度之比（error velocity ratio）
+ *    - 误差零交叉率
+ *    - 控制信号速度与目标信号速度之比
+ *    - 误差信号速度与目标信号速度之比
  *
- * 2. 过度滞后（OverLag）通常表现为控制信号相位落后、持续偏差较大。
+ * 2. 过度滞后通常表现为控制信号相位落后、持续偏差较大。
  *    因此本算法综合以下证据：
- *    - 互相关最优延迟帧数（best lag in frames）
- *    - 均方根误差 RMSE
- *    - 有符号偏置（signed bias）
+ *    - 互相关最优延迟帧数
+ *    - 均方根误差
+ *    - 有符号偏置
  *
- * 3. 最终判定通过两类分数（oscillation_score / lag_score）完成：
+ * 3. 最终判定通过两个分数（oscillation_score / lag_score）完成：
  *    - 两者都低于阈值：Good
  *    - 仅振荡分高：OverOscillation
  *    - 仅滞后分高：OverLag
  *    - 两者都高：Mixed
  *
  * 效果判断建议：
- * 1. 重点看 issue + 两个 score，而不只看单个指标。
- * 2. 若 oscillation_score 高且 lag_score 低：优先降增益/增阻尼/加平滑。
- * 3. 若 lag_score 高且 oscillation_score 低：优先提响应（减平滑、提前馈、提Q或降R）。
+ * 1. 重点看 issue 和 oscillation_score / lag_score，而不只看单个指标。
+ * 2. 若 oscillation_score 高且 lag_score 低：优先降增益、增阻尼或加平滑。
+ * 3. 若 lag_score 高且 oscillation_score 低：优先提响应（减平滑、提前馈、提高过程噪声参数或降低测量噪声参数）。
  * 4. 若 Mixed：先抑制高频振荡，再逐步提高响应，避免“又快又抖”。
  *
  * 输入与使用说明：
@@ -54,37 +54,39 @@ enum class TrackingIssueType {
 };
 
 struct TrackingEvalParams {
-  // Minimum points required to produce a reliable diagnosis.
-  std::size_t min_samples = 18;
-  // Max frame delay to search when estimating phase lag.
+  // min_samples：产生可靠判定所需的最少样本数。
+  std::size_t min_samples = 20;
+  // max_lag_frames：估计相位滞后时搜索的最大帧延迟。
   std::size_t max_lag_frames = 8;
 
-  // Ignore tiny errors around zero to avoid counting noise as oscillation.
-  float error_deadband = 0.05f;
+  // error_deadband：忽略零附近的小误差，避免把噪声计入振荡。
+  float error_deadband = 0.03f;
 
-  // Oscillation thresholds.
-  float oscillation_zcr_threshold = 0.32f;
-  float oscillation_gain_ratio_threshold = 1.50f;
-  float oscillation_error_velocity_ratio_threshold = 1.20f;
+  // oscillation_zcr_threshold / oscillation_gain_ratio_threshold /
+  // oscillation_error_velocity_ratio_threshold：振荡判定阈值。
+  float oscillation_zcr_threshold = 0.28f;
+  float oscillation_gain_ratio_threshold = 1.35f;
+  float oscillation_error_velocity_ratio_threshold = 1.05f;
 
-  // Lag thresholds.
-  float lag_delay_threshold_frames = 2.5f;
-  float lag_rmse_threshold = 0.80f;
-  float lag_bias_threshold = 0.35f;
+  // lag_delay_threshold_frames / lag_rmse_threshold / lag_bias_threshold：滞后判定阈值。
+  float lag_delay_threshold_frames = 2.0f;
+  float lag_rmse_threshold = 0.65f;
+  float lag_bias_threshold = 0.28f;
 
-  // Final decision threshold for each score.
-  float decision_threshold = 0.55f;
+  // decision_threshold：每个分数的最终判定阈值。
+  float decision_threshold = 0.50f;
 };
 
 struct TrackingEvalResult {
   bool valid = false;
   TrackingIssueType issue = TrackingIssueType::InsufficientData;
 
-  // Normalized scores in [0, 1].
+  // oscillation_score / lag_score：归一化分数，范围为 [0, 1]。
   float oscillation_score = 0.0f;
   float lag_score = 0.0f;
 
-  // Useful diagnostics for logging/plotting.
+  // rmse / best_lag_frames / best_lag_corr / error_zero_crossing_rate / control_to_target_velocity_ratio /
+  // error_velocity_ratio / signed_bias：适合用于日志记录和曲线绘制的诊断信息。
   float rmse = 0.0f;
   float best_lag_frames = 0.0f;
   float best_lag_corr = 0.0f;
@@ -101,7 +103,7 @@ inline float Clamp01(float x) {
   return x;
 }
 
-inline float MeanAbsDiff(const std::vector<float>& v) {
+inline float MeanAbsDiff(const std::vector<float> &v) {
   if (v.size() < 2) return 0.0f;
   float sum = 0.0f;
   for (std::size_t i = 1; i < v.size(); ++i) {
@@ -110,10 +112,7 @@ inline float MeanAbsDiff(const std::vector<float>& v) {
   return sum / static_cast<float>(v.size() - 1);
 }
 
-inline float PearsonCorr(const std::vector<float>& a,
-                         std::size_t a0,
-                         const std::vector<float>& b,
-                         std::size_t b0,
+inline float PearsonCorr(const std::vector<float> &a, std::size_t a0, const std::vector<float> &b, std::size_t b0,
                          std::size_t n) {
   if (n < 2) return 0.0f;
 
@@ -142,17 +141,17 @@ inline float PearsonCorr(const std::vector<float>& a,
   return num / den;
 }
 
-// Evaluate tracking quality using only samples where target is detected.
-// target_signal: reference trajectory (e.g. target angle / center).
-// control_signal: tracker output (e.g. predicted angle / command).
-inline TrackingEvalResult EvaluateTrackingQualityWhenDetected(const std::vector<float>& target_signal,
-                                                              const std::vector<float>& control_signal,
+// 仅使用“已检测到目标”的样本评估跟踪质量。
+// target_signal：参考轨迹（例如目标角度或中心点）。
+// control_signal：跟踪器输出（例如预测角度或控制指令）。
+inline TrackingEvalResult EvaluateTrackingQualityWhenDetected(const std::vector<float> &target_signal,
+                                                              const std::vector<float> &control_signal,
                                                               bool target_detected,
-                                                              const TrackingEvalParams& p = TrackingEvalParams{}) {
+                                                              const TrackingEvalParams &p = TrackingEvalParams{}) {
   TrackingEvalResult out;
 
   if (!target_detected) {
-    out.issue = TrackingIssueType::TargetMissing;
+    // target_detected=false 时直接返回 TargetMissing。
     out.note = "target missing";
     return out;
   }
@@ -181,7 +180,7 @@ inline TrackingEvalResult EvaluateTrackingQualityWhenDetected(const std::vector<
   out.rmse = std::sqrt(sum_sq / static_cast<float>(n));
   out.signed_bias = sum_err / (sum_abs + 1e-6f);
 
-  // Oscillation evidence 1: high error zero-crossing rate.
+  // 振荡证据 1：误差零交叉率较高。
   int crossings = 0;
   int valid_pairs = 0;
   for (std::size_t i = 1; i < n; ++i) {
@@ -193,28 +192,26 @@ inline TrackingEvalResult EvaluateTrackingQualityWhenDetected(const std::vector<
       ++crossings;
     }
   }
-  out.error_zero_crossing_rate = valid_pairs > 0 ? static_cast<float>(crossings) / static_cast<float>(valid_pairs) : 0.0f;
+  out.error_zero_crossing_rate =
+      valid_pairs > 0 ? static_cast<float>(crossings) / static_cast<float>(valid_pairs) : 0.0f;
 
-  // Oscillation evidence 2: command variation much larger than target variation.
+  // 振荡证据 2：控制量变化幅度明显大于目标变化幅度。
   const float target_vel = MeanAbsDiff(target);
   const float control_vel = MeanAbsDiff(control);
   const float err_vel = MeanAbsDiff(err);
   out.control_to_target_velocity_ratio = control_vel / (target_vel + 1e-6f);
   out.error_velocity_ratio = err_vel / (target_vel + 1e-6f);
 
-  const float osc_zcr =
-      Clamp01((out.error_zero_crossing_rate - p.oscillation_zcr_threshold) /
-              std::max(1e-6f, 0.5f - p.oscillation_zcr_threshold));
-  const float osc_gain =
-      Clamp01((out.control_to_target_velocity_ratio - p.oscillation_gain_ratio_threshold) /
-              std::max(1e-6f, 2.5f - p.oscillation_gain_ratio_threshold));
-  const float osc_errv =
-      Clamp01((out.error_velocity_ratio - p.oscillation_error_velocity_ratio_threshold) /
-              std::max(1e-6f, 2.5f - p.oscillation_error_velocity_ratio_threshold));
+  const float osc_zcr = Clamp01((out.error_zero_crossing_rate - p.oscillation_zcr_threshold) /
+                                std::max(1e-6f, 0.5f - p.oscillation_zcr_threshold));
+  const float osc_gain = Clamp01((out.control_to_target_velocity_ratio - p.oscillation_gain_ratio_threshold) /
+                                 std::max(1e-6f, 2.5f - p.oscillation_gain_ratio_threshold));
+  const float osc_errv = Clamp01((out.error_velocity_ratio - p.oscillation_error_velocity_ratio_threshold) /
+                                 std::max(1e-6f, 2.5f - p.oscillation_error_velocity_ratio_threshold));
 
   out.oscillation_score = 0.45f * osc_zcr + 0.35f * osc_gain + 0.20f * osc_errv;
 
-  // Lag evidence: cross-correlation peak appears at positive delay + persistent error.
+  // 滞后证据：互相关峰值出现在正延迟，同时误差持续存在。
   float best_corr = -2.0f;
   std::size_t best_lag = 0;
   const std::size_t lag_max = std::min(p.max_lag_frames, n - 2);
@@ -229,13 +226,11 @@ inline TrackingEvalResult EvaluateTrackingQualityWhenDetected(const std::vector<
   out.best_lag_frames = static_cast<float>(best_lag);
   out.best_lag_corr = best_corr;
 
-  const float lag_delay =
-      Clamp01((out.best_lag_frames - p.lag_delay_threshold_frames) /
-              std::max(1e-6f, static_cast<float>(p.max_lag_frames) - p.lag_delay_threshold_frames));
+  const float lag_delay = Clamp01((out.best_lag_frames - p.lag_delay_threshold_frames) /
+                                  std::max(1e-6f, static_cast<float>(p.max_lag_frames) - p.lag_delay_threshold_frames));
   const float lag_rmse = Clamp01(out.rmse / std::max(1e-6f, p.lag_rmse_threshold));
   const float lag_bias =
-      Clamp01((std::abs(out.signed_bias) - p.lag_bias_threshold) /
-              std::max(1e-6f, 1.0f - p.lag_bias_threshold));
+      Clamp01((std::abs(out.signed_bias) - p.lag_bias_threshold) / std::max(1e-6f, 1.0f - p.lag_bias_threshold));
   const float lag_corr_gate = Clamp01((best_corr - 0.25f) / 0.75f);
 
   out.lag_score = (0.45f * lag_delay + 0.35f * lag_rmse + 0.20f * lag_bias) * lag_corr_gate;

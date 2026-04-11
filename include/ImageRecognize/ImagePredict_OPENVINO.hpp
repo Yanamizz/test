@@ -81,11 +81,13 @@ class ImagePredict {
     int streams_num;
     float score_thresh;
     float nms_iou_thresh;
+    float max_ratio;
+    float min_ratio;
     int min_channel_dim;
     bool prefer_smaller_channel_dim_when_ambiguous;
   };
 
-  static const TunableParams& Params();
+  static const TunableParams &Params();
 
   void init(const std::string &model_path, const std::string &device_name) {
     if (model_path.empty()) {
@@ -138,8 +140,8 @@ class ImagePredict {
       const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
       const unsigned int infer_threads =
           std::max(1u, hw_threads > static_cast<unsigned int>(Params().hw_threads_reserved)
-                            ? (hw_threads - static_cast<unsigned int>(Params().hw_threads_reserved))
-                            : hw_threads);
+                           ? (hw_threads - static_cast<unsigned int>(Params().hw_threads_reserved))
+                           : hw_threads);
       // 低延迟优先：单流 + LATENCY hint，减少排队与吞吐导向调度带来的时延。
       compiled_model_ =
           core_->compile_model(model, device_name_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
@@ -257,6 +259,10 @@ class ImagePredict {
 
       if (score <= Params().score_thresh) continue;
 
+      if (w <= 0.0f || h <= 0.0f) continue;
+      const float box_ratio = w / h;
+      if (box_ratio < Params().min_ratio || box_ratio > Params().max_ratio) continue;
+
       float x1 = (cx - w * 0.5f) * scale_x;
       float y1 = (cy - h * 0.5f) * scale_y;
       float x2 = (cx + w * 0.5f) * scale_x;
@@ -328,13 +334,15 @@ class ImagePredict {
   ImageRecognize::ImagePreprocess preprocessor_{cv::Size(640, 640)};
 };
 
-inline const ImagePredict::TunableParams& ImagePredict::Params() {
+inline const ImagePredict::TunableParams &ImagePredict::Params() {
   // ===== 调参集中区（统一放在文件末尾）=====
   static const TunableParams p{
       2,     // hw_threads_reserved: 预留给系统/其他线程的CPU线程数
       1,     // streams_num: OpenVINO推理流数量（低延迟建议1）
       0.8f,  // score_thresh: 置信度阈值
       0.5f,  // nms_iou_thresh: NMS阈值
+      1.0f,  // max_ratio: 目标框最大长宽比（短边/长边）
+      0.2f,  // min_ratio: 目标框最小长宽比（短边/长边）
       5,     // min_channel_dim: 认为“通道维”的最小维度
       true   // prefer_smaller_channel_dim_when_ambiguous: 两维都>=min时是否默认较小维为通道维
   };

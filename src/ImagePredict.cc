@@ -21,6 +21,7 @@
 #include "Tools/CpuAffinity.hpp"
 #include "Tools/FpsCounter.hpp"
 #include "Tools/LaserAngleCalculate.hpp"
+#include "Tools/YawScanController.hpp"
 #include "Tools/SaveImage.hpp"
 #include "Tools/TrackingQualityEvaluator.hpp"
 #include "CameraTask/GetImage.hpp"
@@ -39,40 +40,10 @@ struct RuntimeParams {
   float minimum_angle_deg;
   float max_send_delta_deg;
 
-  float track_iou_min;
-  int track_lost_reset_frames;
-
-  float center_alpha_base;
-  float center_alpha_gain;
-  float center_alpha_min;
-  float center_alpha_max;
-
-  float pitch_center_alpha_base;
-  float pitch_center_alpha_gain;
-  float pitch_center_alpha_min;
-  float pitch_center_alpha_max;
-
   double dt_default_sec;
   double dt_max_sec;
 
-  float pitch_deadzone_deg;
-
-  int lock_frame_count_max;
-  float dynamic_limit_base;
-  float dynamic_limit_gain;
-
-  float max_step_early;
-  float max_step_late;
-  int max_step_switch_frames;
-
-  float pitch_dynamic_limit_base;
-  float pitch_dynamic_limit_gain;
-  float pitch_max_step_early;
-  float pitch_max_step_late;
   float pitch_abs_limit;
-
-  float yaw_comp_trigger_deg;
-  float yaw_comp_strength;
 
   bool enable_latency_profile;
   int latency_print_interval_frames;
@@ -102,7 +73,9 @@ static FrameItem g_frame_buffers[2];     // 双buffer
 static std::atomic<int> g_write_idx{0};  // 当前写入buffer索引
 static std::atomic<int> g_read_idx{-1};  // 当前可读buffer索引，-1表示无新帧
 
-static std::atomic<bool> has_detection{false};  // 是否有目标被检测到
+static std::atomic<bool> g_has_pending_send{false};  // 是否有待发送的控制命令
+static std::atomic<uint8_t> g_send_aimbot_state{0x00};
+static std::atomic<bool> g_send_is_scan{false};
 static std::atomic<float> g_send_abs_yaw{0.0f};
 static std::atomic<float> g_send_abs_pitch{0.0f};
 static std::atomic<float> g_send_offset_yaw{0.0f};
@@ -119,7 +92,7 @@ struct LatencyStats {
   std::uint64_t frames = 0;
   std::uint64_t infer_ns = 0;
   std::uint64_t imu_match_ns = 0;
-  std::uint64_t select_smooth_ns = 0;
+  std::uint64_t select_box_ns = 0;
   std::uint64_t angle_calc_ns = 0;
   std::uint64_t control_calc_ns = 0;
   std::uint64_t render_ns = 0;
@@ -141,10 +114,10 @@ static void PrintLatencyStats(const LatencyStats &s, const char *tag) {
   std::cout << std::fixed << std::setprecision(3);
   std::cout << "[Latency][" << tag << "] frames=" << s.frames << " avg_ms"
             << " infer=" << ns2ms(s.infer_ns) << " imuMatch=" << ns2ms(s.imu_match_ns)
-            << " selectSmooth=" << ns2ms(s.select_smooth_ns) << " angle=" << ns2ms(s.angle_calc_ns)
+            << " selectBox=" << ns2ms(s.select_box_ns) << " angle=" << ns2ms(s.angle_calc_ns)
             << " control=" << ns2ms(s.control_calc_ns) << " render=" << ns2ms(s.render_ns)
             << " loop=" << ns2ms(s.loop_ns) << " | tiny_us imuMatch=" << ns2us(s.imu_match_ns)
-            << " selectSmooth=" << ns2us(s.select_smooth_ns) << " control=" << ns2us(s.control_calc_ns) << std::endl;
+            << " selectBox=" << ns2us(s.select_box_ns) << " control=" << ns2us(s.control_calc_ns) << std::endl;
 }
 }  // namespace
 
@@ -154,26 +127,12 @@ static inline float NormalizeDeltaDeg(float delta) {
   return delta;
 }
 
-static inline float BoxIou(const std::array<float, 6> &a, const std::array<float, 6> &b) {
-  const float xx1 = std::max(a[0], b[0]);
-  const float yy1 = std::max(a[1], b[1]);
-  const float xx2 = std::min(a[2], b[2]);
-  const float yy2 = std::min(a[3], b[3]);
-  const float w = std::max(0.0f, xx2 - xx1);
-  const float h = std::max(0.0f, yy2 - yy1);
-  const float inter = w * h;
-  const float area_a = std::max(0.0f, a[2] - a[0]) * std::max(0.0f, a[3] - a[1]);
-  const float area_b = std::max(0.0f, b[2] - b[0]) * std::max(0.0f, b[3] - b[1]);
-  const float uni = area_a + area_b - inter;
-  return (uni <= 0.0f) ? 0.0f : (inter / uni);
-}
-
 static inline cv::Point2f BoxCenter(const std::array<float, 6> &box) {
   return {0.5f * (box[0] + box[2]), 0.5f * (box[1] + box[3])};
 }
 
 void CaptureThread(CameraTask::GalaxyCamera *camera);
-void ImagePredictThread(ImageRecognize::ImagePredict &predictor);
+void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanController &scan_controller);
 void IMUReadThread(serial::Serial &port);
 void IMUSendThread(serial::Serial &port);
 
@@ -224,7 +183,8 @@ int main() {
   }
 
   std::thread image_capture(CaptureThread, &camera);
-  std::thread image_predict(ImagePredictThread, std::ref(*predictor));
+  Tools::YawScanController scan_controller;
+  std::thread image_predict(ImagePredictThread, std::ref(*predictor), std::ref(scan_controller));
   std::thread imu_read;
   std::thread imu_send;
   if (serial_enabled) {
@@ -288,7 +248,7 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
   camera->close();
 }
 
-void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
+void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanController &scan_controller) {
   FPSCounter fps_counter;
   static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
   static Tools::LaserAngleCalculator laser_angle_calculator;
@@ -300,28 +260,14 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
   // static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
   std::chrono::steady_clock::time_point prev_frame_ts{};
   bool has_prev_frame_ts = false;
-
-  // 首次捕获目标时做软启动，抑制远距离目标首次追踪的大过冲。
-  bool target_locked_last_frame = false;
-  int lock_frame_count = 0;
-  float last_cmd_delta_yaw = 0.0f;
-  float last_cmd_delta_pitch = 0.0f;
-
-  std::array<float, 6> last_selected_box{};
-  bool has_last_selected_box = false;
-  cv::Point2f smoothed_center{};
-  bool has_smoothed_center = false;
-  float smoothed_pitch_center_y = 0.0f;
-  bool has_smoothed_pitch_center_y = false;
-  int miss_frame_count = 0;
   LatencyStats latency_total;
   LatencyStats latency_window;
   std::uint64_t ui_frame_counter = 0;
 
-  auto resetTrackingState = [&]() {
-    has_detection.store(false, std::memory_order_release);
-    target_locked_last_frame = false;
-    lock_frame_count = 0;
+  auto resetPendingSend = [&]() {
+    g_send_aimbot_state.store(0x00, std::memory_order_release);
+    g_send_is_scan.store(false, std::memory_order_release);
+    g_has_pending_send.store(false, std::memory_order_release);
   };
 
   while (g_running) {
@@ -387,69 +333,21 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
     if (!result.boxes.empty()) {
       const auto t_select_start = std::chrono::steady_clock::now();
       int selected_idx = 0;
-      if (has_last_selected_box) {
-        float best_iou = -1.0f;
-        int best_iou_idx = -1;
-        for (int i = 0; i < static_cast<int>(result.boxes.size()); ++i) {
-          if (static_cast<int>(result.boxes[i][5]) != static_cast<int>(last_selected_box[5])) continue;
-          const float iou = BoxIou(result.boxes[i], last_selected_box);
-          if (iou > best_iou) {
-            best_iou = iou;
-            best_iou_idx = i;
-          }
-        }
-
-        if (best_iou_idx >= 0 && best_iou >= Params().track_iou_min) {
-          selected_idx = best_iou_idx;
-        } else {
-          // 没有稳定匹配时回退到最高置信度框
-          selected_idx = 0;
-          for (int i = 1; i < static_cast<int>(result.boxes.size()); ++i) {
-            if (result.boxes[i][4] > result.boxes[selected_idx][4]) selected_idx = i;
-          }
-        }
-      } else {
-        // 首帧锁定最高置信度框
-        for (int i = 1; i < static_cast<int>(result.boxes.size()); ++i) {
-          if (result.boxes[i][4] > result.boxes[selected_idx][4]) selected_idx = i;
-        }
+      for (int i = 1; i < static_cast<int>(result.boxes.size()); ++i) {
+        if (result.boxes[i][4] > result.boxes[selected_idx][4]) selected_idx = i;
       }
 
       const auto &selected_box = result.boxes[selected_idx];
-      last_selected_box = selected_box;
-      has_last_selected_box = true;
-      miss_frame_count = 0;
-
       const cv::Point2f raw_center = BoxCenter(selected_box);
-      if (!has_smoothed_center) {
-        smoothed_center = raw_center;
-        has_smoothed_center = true;
-      } else {
-        const float center_motion = cv::norm(raw_center - smoothed_center);
-        const float alpha = std::clamp(Params().center_alpha_base + Params().center_alpha_gain * center_motion,
-                                       Params().center_alpha_min, Params().center_alpha_max);
-        smoothed_center = (1.0f - alpha) * smoothed_center + alpha * raw_center;
-      }
 
-      if (!has_smoothed_pitch_center_y) {
-        smoothed_pitch_center_y = raw_center.y;
-        has_smoothed_pitch_center_y = true;
-      } else {
-        const float pitch_motion = std::abs(raw_center.y - smoothed_pitch_center_y);
-        const float pitch_alpha =
-            std::clamp(Params().pitch_center_alpha_base + Params().pitch_center_alpha_gain * pitch_motion,
-                       Params().pitch_center_alpha_min, Params().pitch_center_alpha_max);
-        smoothed_pitch_center_y = (1.0f - pitch_alpha) * smoothed_pitch_center_y + pitch_alpha * raw_center.y;
-      }
-
-      float center_x = smoothed_center.x;
-      float center_y = smoothed_pitch_center_y;
+      float center_x = raw_center.x;
+      float center_y = raw_center.y;
       float width = selected_box[2] - selected_box[0];
       float height = selected_box[3] - selected_box[1];
       float distance = distance_calculator.CalculateDistance(height, width);
       const auto t_select_end = std::chrono::steady_clock::now();
-      latency_total.Add(latency_total.select_smooth_ns, t_select_start, t_select_end);
-      latency_window.Add(latency_window.select_smooth_ns, t_select_start, t_select_end);
+      latency_total.Add(latency_total.select_box_ns, t_select_start, t_select_end);
+      latency_window.Add(latency_window.select_box_ns, t_select_start, t_select_end);
 
       if (has_matched_imu) {
         double dt = Params().dt_default_sec;
@@ -481,48 +379,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
         const auto t_control_start = std::chrono::steady_clock::now();
         float delta_yaw_raw = NormalizeDeltaDeg(static_cast<float>(offset_angles.x + laser_yaw_angle));
         float delta_pitch_raw = NormalizeDeltaDeg(static_cast<float>(offset_angles.y + laser_pitch_angle));
-        if (std::abs(delta_pitch_raw) < Params().pitch_deadzone_deg) {
-          delta_pitch_raw = 0.0f;
-        }
-        if (std::abs(delta_pitch_raw) > Params().minimum_angle_deg ||
-            std::abs(delta_yaw_raw) > Params().minimum_angle_deg) {
-          // 新锁定目标时渐进放开限幅，避免第一拍打满导致过冲。
-          if (!target_locked_last_frame) {
-            lock_frame_count = 0;
-            last_cmd_delta_yaw = 0.0f;
-            last_cmd_delta_pitch = 0.0f;
-          }
-          target_locked_last_frame = true;
-          lock_frame_count = std::min(lock_frame_count + 1, Params().lock_frame_count_max);
-
-          const float dynamic_limit = std::min(
-              Params().max_send_delta_deg,
-              Params().dynamic_limit_base + Params().dynamic_limit_gain * static_cast<float>(lock_frame_count));
-          float delta_yaw = std::clamp(delta_yaw_raw, -dynamic_limit, dynamic_limit);
-          float delta_pitch = std::clamp(delta_pitch_raw, -dynamic_limit, dynamic_limit);
-
-          // 进一步限制单帧命令变化量，抑制远离中心时首次追踪抖动。
-          const float max_step =
-              (lock_frame_count < Params().max_step_switch_frames) ? Params().max_step_early : Params().max_step_late;
-          delta_yaw = std::clamp(delta_yaw, last_cmd_delta_yaw - max_step, last_cmd_delta_yaw + max_step);
-          delta_pitch = std::clamp(delta_pitch, last_cmd_delta_pitch - max_step, last_cmd_delta_pitch + max_step);
-
-          // pitch 单独再收紧一层，避免竖直方向的小噪声被放大成可见抖动。
-          const float pitch_dynamic_limit =
-              std::min(Params().max_send_delta_deg,
-                       Params().pitch_dynamic_limit_base +
-                           Params().pitch_dynamic_limit_gain * static_cast<float>(lock_frame_count));
-          const float pitch_max_step = (lock_frame_count < Params().max_step_switch_frames)
-                                           ? Params().pitch_max_step_early
-                                           : Params().pitch_max_step_late;
-          delta_pitch = std::clamp(delta_pitch, -pitch_dynamic_limit, pitch_dynamic_limit);
-          delta_pitch =
-              std::clamp(delta_pitch, last_cmd_delta_pitch - pitch_max_step, last_cmd_delta_pitch + pitch_max_step);
-          delta_pitch = std::clamp(delta_pitch, -Params().pitch_abs_limit, Params().pitch_abs_limit);
-
-          // 全局安全限幅
-          delta_yaw = std::clamp(delta_yaw, -Params().max_send_delta_deg, Params().max_send_delta_deg);
-          delta_pitch = std::clamp(delta_pitch, -Params().max_send_delta_deg, Params().max_send_delta_deg);
+        if (std::abs(delta_yaw_raw) > Params().minimum_angle_deg ||
+            std::abs(delta_pitch_raw) > Params().minimum_angle_deg) {
+          float delta_yaw = std::clamp(delta_yaw_raw, -Params().max_send_delta_deg, Params().max_send_delta_deg);
+          float delta_pitch = std::clamp(delta_pitch_raw, -Params().pitch_abs_limit, Params().pitch_abs_limit);
 
           const float cmd_delta_yaw = delta_yaw;
           const float cmd_delta_pitch = delta_pitch;
@@ -533,13 +393,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
           const float target_abs_yaw = matched_imu.yaw + delta_yaw_raw;
           const float target_abs_pitch = matched_imu.pitch + delta_pitch_raw;
 
-          last_cmd_delta_yaw = delta_yaw;
-          last_cmd_delta_pitch = delta_pitch;
-
           g_send_abs_yaw.store(send_abs_yaw, std::memory_order_release);
           g_send_abs_pitch.store(send_abs_pitch, std::memory_order_release);
           g_send_offset_yaw.store(cmd_delta_yaw, std::memory_order_release);
           g_send_offset_pitch.store(cmd_delta_pitch, std::memory_order_release);
+          g_send_aimbot_state.store(0x01, std::memory_order_release);
+          g_send_is_scan.store(false, std::memory_order_release);
 
           g_eval_target_yaw.push_back(target_abs_yaw);
           g_eval_control_yaw.push_back(send_abs_yaw);
@@ -547,26 +406,33 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor) {
           g_eval_control_pitch.push_back(send_abs_pitch);
           g_eval_has_detection = true;
 
-          has_detection.store(true, std::memory_order_release);
+          g_has_pending_send.store(true, std::memory_order_release);
           ImageRecognize::ImageShow::ShowAngles(frame, send_abs_yaw, send_abs_pitch, matched_imu.yaw, matched_imu.pitch,
                                                 cmd_delta_yaw, cmd_delta_pitch, distance);
         } else {
-          resetTrackingState();
+          resetPendingSend();
         }
+        scan_controller.Reset();
         const auto t_control_end = std::chrono::steady_clock::now();
         latency_total.Add(latency_total.control_calc_ns, t_control_start, t_control_end);
         latency_window.Add(latency_window.control_calc_ns, t_control_start, t_control_end);
       } else {
-        resetTrackingState();
+        resetPendingSend();
       }
     } else {
-      ++miss_frame_count;
-      if (miss_frame_count > Params().track_lost_reset_frames) {
-        has_last_selected_box = false;
-        has_smoothed_center = false;
-        has_smoothed_pitch_center_y = false;
+      if (has_matched_imu) {
+        const auto scan_command = scan_controller.BuildCommand(matched_imu.yaw, matched_imu.pitch);
+
+        g_send_abs_yaw.store(scan_command.absolute_yaw_deg, std::memory_order_release);
+        g_send_abs_pitch.store(scan_command.absolute_pitch_deg, std::memory_order_release);
+        g_send_offset_yaw.store(scan_command.offset_yaw_deg, std::memory_order_release);
+        g_send_offset_pitch.store(scan_command.offset_pitch_deg, std::memory_order_release);
+        g_send_aimbot_state.store(scan_command.aimbot_state, std::memory_order_release);
+        g_send_is_scan.store(true, std::memory_order_release);
+        g_has_pending_send.store(true, std::memory_order_release);
+      } else {
+        resetPendingSend();
       }
-      resetTrackingState();
     }
 
     // 可视化显示
@@ -650,24 +516,17 @@ void IMUReadThread(serial::Serial &port) {
 
 void IMUSendThread(serial::Serial &port) {
   while (g_running) {
-    if (has_detection.load(std::memory_order_acquire)) {
+    if (g_has_pending_send.load(std::memory_order_acquire)) {
       float pitch = g_send_abs_pitch.load(std::memory_order_acquire);
       float yaw = g_send_abs_yaw.load(std::memory_order_acquire);
       float offset_pitch = g_send_offset_pitch.load(std::memory_order_acquire);
       float offset_yaw = g_send_offset_yaw.load(std::memory_order_acquire);
-      std::cout << std::fixed << std::setprecision(2) << "°, Offset Yaw: " << offset_yaw
-                << "°, Offset Pitch: " << offset_pitch << "°" << std::endl;
-      if (std::abs(offset_yaw) > Params().yaw_comp_trigger_deg) {
-        if (offset_yaw > 0) {
-          yaw += Params().yaw_comp_strength *
-                 (1.0f - Params().minimum_angle_deg /
-                             std::abs(offset_yaw));  // 根据偏移量大小动态调整补偿力度，越接近中心越温和
-        } else {
-          yaw -= Params().yaw_comp_strength * (1.0f - Params().minimum_angle_deg / std::abs(offset_yaw));
-        }
-      }
-      SerialTask::SerialSend(port, pitch, yaw, 0x01);
-      has_detection.store(false, std::memory_order_release);
+      const uint8_t aimbot_state = g_send_aimbot_state.load(std::memory_order_acquire);
+      const char *mode_text = g_send_is_scan.load(std::memory_order_acquire) ? "Scan" : "Track";
+      std::cout << std::fixed << std::setprecision(2) << "[" << mode_text << "] Yaw: " << yaw << "°, Pitch: " << pitch
+                << "°, Offset Yaw: " << offset_yaw << "°, Offset Pitch: " << offset_pitch << "°" << std::endl;
+      SerialTask::SerialSend(port, pitch, yaw, aimbot_state);
+      g_has_pending_send.store(false, std::memory_order_release);
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(Params().imu_send_idle_sleep_ms));
     }
@@ -690,43 +549,13 @@ const RuntimeParams &Params() {
       0.008f,  // minimum_angle_deg: 最小发送角度阈值（度）
       5.0f,    // max_send_delta_deg: 单帧允许最大发送角差（度）
 
-      0.05f,  // track_iou_min: 目标关联最小IOU阈值
-      6,      // track_lost_reset_frames: 连续丢失多少帧后重置跟踪状态
-
-      0.18f,   // center_alpha_base: 中心点平滑基础alpha
-      0.004f,  // center_alpha_gain: 中心点平滑随运动增强系数
-      0.18f,   // center_alpha_min: 中心点平滑alpha下限
-      0.65f,   // center_alpha_max: 中心点平滑alpha上限
-
-      0.08f,    // pitch_center_alpha_base: pitch中心y平滑基础alpha
-      0.0025f,  // pitch_center_alpha_gain: pitch中心y平滑随运动增强系数
-      0.08f,    // pitch_center_alpha_min: pitch中心y平滑alpha下限
-      0.32f,    // pitch_center_alpha_max: pitch中心y平滑alpha上限
-
       0.05,  // dt_default_sec: 默认帧间隔（秒）
       0.2,   // dt_max_sec: dt异常上限，超出则回退默认值
 
-      0.04f,  // pitch_deadzone_deg: pitch死区（度）
+      3.0f,  // pitch_abs_limit: pitch绝对限幅（度）
 
-      30,     // lock_frame_count_max: 锁定计数最大值
-      1.2f,   // dynamic_limit_base: 动态限幅基础值
-      0.45f,  // dynamic_limit_gain: 动态限幅随锁定帧增长系数
-
-      0.5f,  // max_step_early: 锁定初期单帧最大步进
-      0.9f,  // max_step_late: 锁定后期单帧最大步进
-      10,    // max_step_switch_frames: 初期/后期切换帧数
-
-      0.9f,   // pitch_dynamic_limit_base: pitch动态限幅基础值
-      0.2f,   // pitch_dynamic_limit_gain: pitch动态限幅增长系数
-      0.25f,  // pitch_max_step_early: pitch初期单帧步进
-      0.45f,  // pitch_max_step_late: pitch后期单帧步进
-      3.0f,   // pitch_abs_limit: pitch绝对限幅（度）
-
-      0.6f,  // yaw_comp_trigger_deg: yaw补偿触发阈值（度）
-      3.0f,  // yaw_comp_strength: yaw补偿力度
-
-      true,  // enable_latency_profile: 是否启用阶段打点统计
-      120,   // latency_print_interval_frames: 每多少帧打印一次窗口统计
+      false,  // enable_latency_profile: 是否启用阶段打点统计
+      120,    // latency_print_interval_frames: 每多少帧打印一次窗口统计
 
       true,  // enable_display: 是否显示图像窗口
       2,     // display_every_n_frames: 每N帧显示1帧（2可明显降低render延迟）
