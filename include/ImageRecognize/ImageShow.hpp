@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <opencv2/opencv.hpp>
 #include <string>
 #include "OutputDataProcess.hpp"
@@ -45,7 +46,7 @@ class ImageShow {
     static bool window_initialized = false;
     if (!window_initialized) {
       cv::namedWindow("Detection Result", cv::WINDOW_NORMAL);
-      cv::resizeWindow("Detection Result", 640, 640);
+      cv::resizeWindow("Detection Result", kWindowSide, kWindowSide);
       window_initialized = true;
     }
     cv::imshow("Detection Result", frame);
@@ -63,7 +64,7 @@ class ImageShow {
     (void)imu_pitch;
     std::string text = " Offset_Yaw: " + std::to_string(offset_yaw) + " Offset_Pitch: " + std::to_string(offset_pitch) +
                        " Distance: " + std::to_string(distance);
-    std::cout << text << std::endl;
+    // std::cout << text << std::endl;
   }
 
   /**
@@ -73,5 +74,24 @@ class ImageShow {
     char key = static_cast<char>(cv::waitKey(1));
     return (key == 'q' || key == 27);
   }
+
+ private:
+  static constexpr int kWindowSide = 640;  // 检测窗口默认边长（像素）
 };
+
+inline void DrawTrackedBox(cv::Mat &frame, const std::array<float, 6> &box) {
+  const cv::Point pt1{static_cast<int>(box[0]), static_cast<int>(box[1])};
+  const cv::Point pt2{static_cast<int>(box[2]), static_cast<int>(box[3])};
+  cv::rectangle(frame, pt1, pt2, {0, 255, 255}, 3);
+
+  const cv::Point center{static_cast<int>((box[0] + box[2]) * 0.5f), static_cast<int>((box[1] + box[3]) * 0.5f)};
+  cv::circle(frame, center, 4, {0, 255, 255}, -1);
+
+  const std::string label = std::string("Track ") + cv::format("%.2f", box[4]);
+  cv::putText(frame, label, {pt1.x, pt1.y - 6}, cv::FONT_HERSHEY_SIMPLEX, 0.5, {0, 255, 255}, 1);
+}
+
+inline cv::Point2f BoxCenter(const std::array<float, 6> &box) {
+  return {0.5f * (box[0] + box[2]), 0.5f * (box[1] + box[3])};
+}
 }  // namespace ImageRecognize

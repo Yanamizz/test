@@ -20,8 +20,8 @@ namespace ImageRecognize {
  * @brief 预处理结果的容器，包含平铺的数据和对应的形状信息。
  */
 struct PreprocessResult {
-  std::vector<float> data;                       ///< 预处理后的平铺数据，按 CHW 顺序存储
-  std::array<int64_t, 4> shape{1, 3, 640, 640};  ///< 图像形状：{batch, channel, height, width}
+  std::vector<float> data;         ///< 预处理后的平铺数据，按 CHW 顺序存储
+  std::array<int64_t, 4> shape{};  ///< 图像形状：{batch, channel, height, width}
 };
 
 /**
@@ -29,7 +29,7 @@ struct PreprocessResult {
  */
 class ImagePreprocess {
  public:
-  ImagePreprocess() = default;
+  ImagePreprocess() : inputSize_(DefaultInputSize()) {}
 
   /**
    * @brief 通过指定输入尺寸构造。
@@ -62,16 +62,23 @@ class ImagePreprocess {
     const int channels_ = 3;
     const int height_ = floatImage_.rows;
     const int width_ = floatImage_.cols;
+    const int plane_size_ = height_ * width_;
 
-    std::size_t count = 0;
     result.data.resize(static_cast<size_t>(channels_ * height_ * width_));
-    // 将 HWC 展平成 CHW
-    for (int c = 0; c < channels_; ++c) {
-      for (int h = 0; h < height_; ++h) {
-        for (int w = 0; w < width_; ++w) {
-          result.data[count] = floatImage_.at<cv::Vec3f>(h, w)[c];
-          count++;
-        }
+    float *output = result.data.data();
+
+    // 低延迟优先：避免并行调度开销，直接按行顺序写入 CHW 缓冲区。
+    for (int h = 0; h < height_; ++h) {
+      const cv::Vec3f *src_row = floatImage_.ptr<cv::Vec3f>(h);
+      float *dst_r = output + 0 * plane_size_ + h * width_;
+      float *dst_g = output + 1 * plane_size_ + h * width_;
+      float *dst_b = output + 2 * plane_size_ + h * width_;
+
+      for (int w = 0; w < width_; ++w) {
+        const cv::Vec3f &pixel = src_row[w];
+        dst_r[w] = pixel[0];
+        dst_g[w] = pixel[1];
+        dst_b[w] = pixel[2];
       }
     }
 
@@ -79,7 +86,14 @@ class ImagePreprocess {
   }
 
  private:
-  cv::Size inputSize_{640, 640};  ///< 模型期望的输入尺寸
+  static cv::Size DefaultInputSize();
+
+  cv::Size inputSize_;  ///< 模型期望的输入尺寸
 };
+
+inline cv::Size ImagePreprocess::DefaultInputSize() {
+  // ===== 手动配置区（统一放在文件末尾）=====
+  return {640, 640};  // 模型默认输入尺寸
+}
 
 }  // namespace ImageRecognize

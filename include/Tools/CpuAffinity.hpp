@@ -51,8 +51,7 @@ inline std::vector<int> detectBigCoresByFreq(int cpu_count) {
   freqs.reserve(cpu_count);
   for (int cpu = 0; cpu < cpu_count; ++cpu) {
     long freq = -1;
-    const std::string path =
-        "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/cpufreq/cpuinfo_max_freq";
+    const std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/cpufreq/cpuinfo_max_freq";
     if (readLongFile(path, freq)) {
       freqs.emplace_back(freq, cpu);
     }
@@ -105,6 +104,23 @@ inline bool BindCurrentThreadToBigCores() {
   const bool ok = BindCurrentThreadToCores(cores);
   if (!ok) {
     std::cerr << "[CpuAffinity] Failed to bind current thread to big cores." << std::endl;
+  }
+  return ok;
+}
+
+inline bool BindCurrentThreadToAllCores() {
+  const int cpu_count = static_cast<int>(sysconf(_SC_NPROCESSORS_CONF));
+  if (cpu_count <= 0) return false;
+
+  std::vector<int> cores;
+  cores.reserve(static_cast<std::size_t>(cpu_count));
+  for (int cpu = 0; cpu < cpu_count; ++cpu) {
+    cores.push_back(cpu);
+  }
+
+  const bool ok = BindCurrentThreadToCores(cores);
+  if (!ok) {
+    std::cerr << "[CpuAffinity] Failed to bind current thread to all cores." << std::endl;
   }
   return ok;
 }

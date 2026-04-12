@@ -72,11 +72,11 @@ class LaserAngleCalculator {
   static const TunableParams &Params() {
     // ===== 调参集中区（统一放在文件末尾）=====
     static const TunableParams p{
-        0.0f,    // laser_distance_x_m: 激光器到相机中心x偏移（米）
-        0.066f,  // laser_distance_y_m: 激光器到相机中心y偏移（米）
-        0.2f,    // min_valid_distance_m: 距离下限（米），防止近距数值异常
-        -0.24f,  // fixed_yaw_compensation_deg: 固定yaw补偿角（度）
-        -0.90f   // fixed_pitch_compensation_deg: 固定pitch补偿角（度）
+        0.0f,     // laser_distance_x_m: 激光器到相机中心x偏移（米）
+        0.066f,   // laser_distance_y_m: 激光器到相机中心y偏移（米）
+        0.2f,     // min_valid_distance_m: 距离下限（米），防止近距数值异常
+        -0.085f,  // fixed_yaw_compensation_deg: 固定yaw补偿角（度）
+        -1.077f   // fixed_pitch_compensation_deg: 固定pitch补偿角（度）
     };
     return p;
   }

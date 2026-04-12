@@ -24,7 +24,7 @@ struct EulerAngles {
   float yaw;    // 绕Z轴旋转角度（单位：度）
 };
 
-inline bool ReadIMUFrame(serial::Serial& serial_port, GimbalImuFrame_SCM_t& out_frame);
+inline bool ReadIMUFrame(serial::Serial &serial_port, GimbalImuFrame_SCM_t &out_frame);
 
 /**
  * @brief 从串口读取字节流，解析 GimbalImuFrame_SCM_t 数据，并将四元数转换为欧拉角
@@ -32,7 +32,7 @@ inline bool ReadIMUFrame(serial::Serial& serial_port, GimbalImuFrame_SCM_t& out_
  * @param serial_port 已配置好的串口对象
  * @param angles 输出的欧拉角结构体（Roll, Pitch, Yaw）
  */
-inline bool ReadIMUData(serial::Serial& serial_port, EulerAngles& angles) {
+inline bool ReadIMUData(serial::Serial &serial_port, EulerAngles &angles) {
   // 现在 ReadIMUData 重用 ReadIMUFrame：先解析出最新帧再转换为欧拉角
   GimbalImuFrame_SCM_t latest_frame;
   if (!ReadIMUFrame(serial_port, latest_frame)) return false;
@@ -54,7 +54,7 @@ inline bool ReadIMUData(serial::Serial& serial_port, EulerAngles& angles) {
  * @param serial_port 已打开的串口
  * @param out_frame 输出的最新帧（若找到返回 true）
  */
-inline bool ReadIMUFrame(serial::Serial& serial_port, GimbalImuFrame_SCM_t& out_frame) {
+inline bool ReadIMUFrame(serial::Serial &serial_port, GimbalImuFrame_SCM_t &out_frame) {
   constexpr size_t kFrameSize = sizeof(GimbalImuFrame_SCM_t);
   constexpr size_t kIdOffset = 1;
   constexpr size_t kTimeStampOffset = 2;
