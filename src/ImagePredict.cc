@@ -22,7 +22,7 @@
 #include "Tools/CpuAffinity.hpp"
 #include "Tools/FpsCounter.hpp"
 #include "Tools/LaserAngleCalculate.hpp"
-#include "Tools/YawScanController.hpp"
+#include "Tools/ScanController.hpp"
 #include "Tools/SaveImage.hpp"
 #include "CameraTask/GetImage.hpp"
 
@@ -51,7 +51,6 @@ struct RuntimeParams {
 
   bool enable_display;
   bool enable_scan_mode;
-  std::string scan_axis;
   double scan_send_hz;
   int display_every_n_frames;
   int gui_poll_every_n_frames;
@@ -130,26 +129,12 @@ static SerialTask::EulerAngles InterpolateEulerAngles(const SerialTask::EulerAng
   return result;
 }
 
-static Tools::ScanAxis ParseScanAxis(const std::string &scan_axis) {
-  std::string normalized;
-  normalized.reserve(scan_axis.size());
-  for (char c : scan_axis) {
-    if (c >= 'A' && c <= 'Z') {
-      normalized.push_back(static_cast<char>(c - 'A' + 'a'));
-    } else {
-      normalized.push_back(c);
-    }
-  }
-
-  if (normalized == "yaw") return Tools::ScanAxis::Yaw;
-  return Tools::ScanAxis::Pitch;
-}
 }  // namespace
 
 void CaptureThread(CameraTask::GalaxyCamera *camera);
-void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanController &scan_controller);
+void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::ScanController &scan_controller);
 void IMUReadThread(serial::Serial &port);
-void IMUSendThread(serial::Serial &port, Tools::YawScanController &scan_controller);
+void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller);
 
 int main() {
   CameraTask::GalaxyCamera camera;
@@ -187,7 +172,7 @@ int main() {
   }
 
   std::thread image_capture(CaptureThread, &camera);
-  Tools::YawScanController scan_controller;
+  Tools::ScanController scan_controller;
   std::thread image_predict(ImagePredictThread, std::ref(*predictor), std::ref(scan_controller));
   std::thread imu_read;
   std::thread imu_send;
@@ -234,7 +219,7 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
   camera->close();
 }
 
-void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanController &scan_controller) {
+void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::ScanController &scan_controller) {
   Tools::BindCurrentThreadToBigCores();
   FPSCounter fps_counter;
   static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
@@ -454,7 +439,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanC
     }
 
     // 无目标时，每隔若干帧保存图像到本次运行目录
-    // no_target_saver.Update(frame, detected_target);
+    // no_target_saver.Update(frame, track_result.has_box);
 
     // 处理 GUI 事件并允许按键退出
     if (do_gui_poll && ImageRecognize::ImageShow::WaitForExit()) {
@@ -515,7 +500,7 @@ void IMUReadThread(serial::Serial &port) {
   if (port.isOpen()) port.close();
 }
 
-void IMUSendThread(serial::Serial &port, Tools::YawScanController &scan_controller) {
+void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller) {
   using Clock = std::chrono::steady_clock;
   const double scan_send_hz = std::max(1.0, Params().scan_send_hz);
   const auto scan_send_interval =
@@ -569,7 +554,7 @@ void IMUSendThread(serial::Serial &port, Tools::YawScanController &scan_controll
         continue;
       }
 
-      Tools::YawScanCommand scan_command{};
+      Tools::ScanCommand scan_command{};
       {
         std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
         scan_command = scan_controller.BuildCommand(latest_imu.yaw, latest_imu.pitch);
@@ -628,12 +613,11 @@ const RuntimeParams &Params() {
       false,  // enable_latency_profile: 是否启用阶段打点统计
       120,    // latency_print_interval_frames: 每多少帧打印一次窗口统计
 
-      true,     // enable_display: 低延迟模式默认关闭显示，避免 GUI 额外开销
-      true,     // enable_scan_mode: 调试跟踪振荡时可关闭 scan，仅保留 track 下发
-      "pitch",  // scan_axis: 扫描轴向，可填 yaw 或 pitch
-      100.0,    // scan_send_hz: 扫描模式下的发送频率（Hz）
-      2,        // display_every_n_frames: 每N帧显示1帧（2可明显降低render延迟）
-      1         // gui_poll_every_n_frames: 每N帧轮询一次按键退出
+      true,   // enable_display: 低延迟模式默认关闭显示，避免 GUI 额外开销
+      false,  // enable_scan_mode: 调试跟踪振荡时可关闭 scan，仅保留 track 下发
+      100.0,  // scan_send_hz: 扫描模式下的发送频率（Hz）
+      2,      // display_every_n_frames: 每N帧显示1帧（2可明显降低render延迟）
+      1       // gui_poll_every_n_frames: 每N帧轮询一次按键退出
   };
   return p;
 }

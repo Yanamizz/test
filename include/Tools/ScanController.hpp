@@ -22,7 +22,7 @@ inline const char *ToString(ScanAxis axis) {
   }
 }
 
-struct YawScanCommand {
+struct ScanCommand {
   float absolute_yaw_deg = 0.0f;
   float absolute_pitch_deg = 0.0f;
   float offset_yaw_deg = 0.0f;
@@ -30,7 +30,7 @@ struct YawScanCommand {
   uint8_t aimbot_state = 0x01;
 };
 
-class YawScanController {
+class ScanController {
  public:
   struct Config {
     ScanAxis axis;
@@ -43,16 +43,16 @@ class YawScanController {
     Config();
   };
 
-  YawScanController() { Reset(); }
+  ScanController() { Reset(); }
 
-  explicit YawScanController(const Config &config) : config_(config) { Reset(); }
+  explicit ScanController(const Config &config) : config_(config) { Reset(); }
 
   void Reset() {
     current_scan_deg_ = ActiveMinDeg_();
     scan_forward_ = true;
   }
 
-  YawScanCommand BuildCommand(float imu_yaw_deg, float imu_pitch_deg) {
+  ScanCommand BuildCommand(float imu_yaw_deg, float imu_pitch_deg) {
     const float scan_min_deg = ActiveMinDeg_();
     const float scan_max_deg = ActiveMaxDeg_();
     const float scan_step_deg = config_.step_deg;
@@ -75,7 +75,7 @@ class YawScanController {
       }
     }
 
-    YawScanCommand command{};
+    ScanCommand command{};
     if (config_.axis == ScanAxis::Yaw) {
       command.absolute_yaw_deg = scan_deg;
       command.absolute_pitch_deg = imu_pitch_deg;
@@ -111,12 +111,12 @@ class YawScanController {
   bool scan_forward_ = true;
 };
 
-inline YawScanController::Config::Config()
-    : axis(ScanAxis::Pitch),   // 扫描默认轴向：Pitch
+inline ScanController::Config::Config()
+    : axis(ScanAxis::Yaw),     // 扫描默认轴向：Pitch
       min_pitch_deg(-268.0f),  // pitch 扫描起始下限（度）
       max_pitch_deg(-247.0f),  // pitch 扫描起始上限（度）
       min_yaw_deg(36.0f),      // yaw 扫描起始下限（度）
       max_yaw_deg(57.0f),      // yaw 扫描起始上限（度）
-      step_deg(0.1f) {}        // 每次扫描的偏移步长（度）
+      step_deg(0.05f) {}       // 每次扫描的偏移步长（度）
 
 }  // namespace Tools

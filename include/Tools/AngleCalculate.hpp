@@ -237,10 +237,10 @@ inline const AngleCalculator::TuningParams &AngleCalculator::Params() {
       0.05,  // default_dt_sec: 未提供帧间隔时使用的默认 dt（秒）
       5.0,   // max_offset_deg: 单帧像素解算得到的最大角度偏移限幅（度）
 
-      10.0,  // yaw_filter_q: yaw 过程噪声 Q，调大以提升跟随性
-      0.01,  // yaw_filter_r: yaw 测量噪声 R，调小以减少滞后
-      0.01,  // pitch_filter_q: pitch 过程噪声 Q，调小以增强稳定性
-      100.0  // pitch_filter_r: pitch 测量噪声 R，调大以抑制抖动
+      100.0,  // yaw_filter_q: yaw 过程噪声 Q，调大以提升跟随性
+      0.001,  // yaw_filter_r: yaw 测量噪声 R，调小以减少滞后
+      10.0,   // pitch_filter_q: pitch 过程噪声 Q，调小以增强稳定性
+      0.1     // pitch_filter_r: pitch 测量噪声 R，调大以抑制抖动
   };
   return p;
 }
