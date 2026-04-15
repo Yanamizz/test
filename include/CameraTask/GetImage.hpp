@@ -24,14 +24,7 @@ class GalaxyCamera {
   GalaxyCamera(const GalaxyCamera &) = delete;
   GalaxyCamera &operator=(const GalaxyCamera &) = delete;
 
-  // User-configurable settings (set before open/start)
-  bool enable_invert = false;             ///< Whether to flip image vertically and horizontally
-  bool enable_auto_white_balance = true;  // q/< Use one-time auto white balance on start
-  bool enable_auto_exposure = false;      ///< Use one-time auto exposure on start
-  bool enable_auto_gain = false;          ///< Use one-time auto gain on start
-  double white_balance_red = 1.75;        ///< Red balance ratio, used when auto white balance is off
-  double exposure_time_us = 4000.0;       ///< Exposure time (microseconds), used when auto exposure is off
-  double gain_db = 8;                     ///< Gain value (dB), used when auto gain is off
+  // 手动参数统一放到文件末尾，这里只保留操作接口
   // 手动设置接口（优先使用这些 setter）
   void setWhiteBalanceAuto(bool enable) { enable_auto_white_balance = enable; }
   void setWhiteBalanceChannel(const std::string &channel_name) { wb_channel_name_ = channel_name; }
@@ -392,18 +385,21 @@ class GalaxyCamera {
   int64_t color_filter_ = GX_COLOR_FILTER_NONE;
   int consecutive_timeouts_ = 0;  ///< 连续超时帧计数，用于触发自动重启
 
-  // 相机内参与畸变系数（用于去畸变）
+ public:
+  // ===== 手动配置区（统一放在文件末尾）=====
   cv::Mat camera_matrix_ =
       (cv::Mat_<double>(3, 3) << 1576.303044, 0.0, 952.451125, 0.0, 1578.069737, 599.901423, 0.0, 0.0, 1.0);
   cv::Mat dist_coeffs_ = (cv::Mat_<double>(1, 5) << -0.275212, 0.210437, -0.000083, 0.000589, 0.0);
-  bool enable_undistort_ = false;  // 默认关闭去畸变以降低延迟
-  // -------- 手动默认设置 (可直接在此处修改) --------
-  // 白平衡：优先使用通道名（wb_channel_name_），若置空则使用索引(wb_channel_index_)
-  std::string wb_channel_name_ = "Red";  // 可改为 "Green"/"Blue" 或置空使用索引
-  int wb_channel_index_ = 0;             // 通道索引，若使用索引则修改此值
-  // 曝光与增益的默认手动值（已对外暴露为 public 成员）
-  // white_balance_red, exposure_time_us, gain_db 已在 public 区定义，可直接修改
-  // -----------------------------------------------
+  bool enable_invert = false;             // 是否翻转图像
+  bool enable_auto_white_balance = true;  // 启动时是否执行一次自动白平衡
+  bool enable_auto_exposure = false;      // 启动时是否执行一次自动曝光
+  bool enable_auto_gain = false;          // 启动时是否执行一次自动增益
+  double white_balance_red = 1.75;        // 手动白平衡红通道比例
+  double exposure_time_us = 3000.0;       // 手动曝光时间（微秒）
+  double gain_db = 5.0;                   // 手动增益（dB）
+  bool enable_undistort_ = false;         // 是否启用去畸变（默认关闭以降低延迟）
+  std::string wb_channel_name_ = "Red";   // 白平衡通道名，可改为 "Green" / "Blue"
+  int wb_channel_index_ = 0;              // 白平衡通道索引，通道名为空时使用
 };
 
 }  // namespace CameraTask

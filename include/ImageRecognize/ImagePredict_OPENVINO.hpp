@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -136,21 +137,96 @@ class ImagePredict {
     // 预处理器只初始化一次，避免每帧重复构造
     preprocessor_ = ImageRecognize::ImagePreprocess(cv::Size(width_, height_));
 
+    const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned int infer_threads =
+        std::max(1u, hw_threads > static_cast<unsigned int>(Params().hw_threads_reserved)
+                         ? (hw_threads - static_cast<unsigned int>(Params().hw_threads_reserved))
+                         : hw_threads);
+
+    std::vector<std::string> available_devices;
     try {
-      const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
-      const unsigned int infer_threads =
-          std::max(1u, hw_threads > static_cast<unsigned int>(Params().hw_threads_reserved)
-                           ? (hw_threads - static_cast<unsigned int>(Params().hw_threads_reserved))
-                           : hw_threads);
-      // 低延迟优先：单流 + LATENCY hint，减少排队与吞吐导向调度带来的时延。
-      compiled_model_ =
-          core_->compile_model(model, device_name_, ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
-                               ov::streams::num(Params().streams_num), ov::inference_num_threads(infer_threads));
+      available_devices = core_->get_available_devices();
     } catch (const std::exception &e) {
-      std::cerr << "[Warning] Failed to apply low-latency OpenVINO properties on device '" << device_name_
-                << "': " << e.what() << ". Fallback to default compile_model." << std::endl;
-      compiled_model_ = core_->compile_model(model, device_name_);
+      std::cerr << "[OpenVINO] Failed to query available devices: " << e.what() << std::endl;
     }
+
+    if (available_devices.empty()) {
+      std::cerr << "[OpenVINO] available devices: <none>" << std::endl;
+    } else {
+      std::cerr << "[OpenVINO] available devices:";
+      for (const auto &device : available_devices) {
+        std::cerr << ' ' << device;
+      }
+      std::cerr << std::endl;
+    }
+
+    auto has_device_prefix = [&](const std::string &prefix) {
+      return std::any_of(available_devices.begin(), available_devices.end(),
+                         [&](const std::string &device) { return device.rfind(prefix, 0) == 0; });
+    };
+
+    const bool gpu_available = has_device_prefix("GPU");
+    const bool cpu_available = has_device_prefix("CPU") || available_devices.empty();
+
+    auto compile_with_latency_hint = [&](const std::string &target_device) -> std::optional<ov::CompiledModel> {
+      try {
+        return core_->compile_model(model, target_device,
+                                    ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
+                                    ov::streams::num(Params().streams_num), ov::inference_num_threads(infer_threads));
+      } catch (const std::exception &e) {
+        std::cerr << "[OpenVINO] device '" << target_device << "' with low-latency properties failed: " << e.what()
+                  << std::endl;
+        return std::nullopt;
+      }
+    };
+
+    auto compile_plain = [&](const std::string &target_device) -> std::optional<ov::CompiledModel> {
+      try {
+        return core_->compile_model(model, target_device);
+      } catch (const std::exception &e) {
+        std::cerr << "[OpenVINO] device '" << target_device << "' plain compile failed: " << e.what() << std::endl;
+        return std::nullopt;
+      }
+    };
+
+    std::vector<std::string> candidate_devices;
+    if (device_name_ == "GPU") {
+      if (gpu_available) {
+        candidate_devices = {"GPU", "AUTO", "CPU"};
+      } else {
+        std::cerr << "[OpenVINO] GPU not detected by OpenVINO, falling back to AUTO/CPU." << std::endl;
+        candidate_devices = {"AUTO", "CPU"};
+      }
+    } else if (device_name_ == "AUTO") {
+      candidate_devices =
+          gpu_available ? std::vector<std::string>{"AUTO", "GPU", "CPU"} : std::vector<std::string>{"AUTO", "CPU"};
+    } else {
+      candidate_devices = {device_name_, "AUTO", "CPU"};
+      if (!cpu_available) {
+        candidate_devices.push_back("CPU");
+      }
+    }
+
+    std::optional<ov::CompiledModel> compiled_model_opt;
+    std::string selected_device;
+    for (const auto &candidate_device : candidate_devices) {
+      compiled_model_opt = compile_with_latency_hint(candidate_device);
+      if (!compiled_model_opt) {
+        compiled_model_opt = compile_plain(candidate_device);
+      }
+      if (compiled_model_opt) {
+        selected_device = candidate_device;
+        break;
+      }
+    }
+
+    if (!compiled_model_opt) {
+      throw std::runtime_error("Failed to compile OpenVINO model on GPU/AUTO/CPU fallback chain.");
+    }
+
+    compiled_model_ = std::move(*compiled_model_opt);
+    device_name_ = selected_device;
+    std::cerr << "[OpenVINO] compiled on device: " << device_name_ << std::endl;
     infer_request_ = compiled_model_.create_infer_request();
 
     if (compiled_model_.inputs().size() != 1 || compiled_model_.outputs().size() != 1) {
@@ -318,8 +394,10 @@ class ImagePredict {
   }
 
  private:
-  int width_ = 640;   ///< 从模型自动读取的输入宽
-  int height_ = 640;  ///< 从模型自动读取的输入高
+  static constexpr int kDefaultInputSide = 640;
+
+  int width_ = kDefaultInputSide;   ///< 从模型自动读取的输入宽
+  int height_ = kDefaultInputSide;  ///< 从模型自动读取的输入高
 
   std::unique_ptr<ov::Core> core_;
   ov::CompiledModel compiled_model_;
@@ -331,20 +409,20 @@ class ImagePredict {
   std::string input_name_;
   std::string output_name_;
 
-  ImageRecognize::ImagePreprocess preprocessor_{cv::Size(640, 640)};
+  ImageRecognize::ImagePreprocess preprocessor_{};
 };
 
 inline const ImagePredict::TunableParams &ImagePredict::Params() {
   // ===== 调参集中区（统一放在文件末尾）=====
   static const TunableParams p{
-      2,     // hw_threads_reserved: 预留给系统/其他线程的CPU线程数
-      1,     // streams_num: OpenVINO推理流数量（低延迟建议1）
-      0.8f,  // score_thresh: 置信度阈值
-      0.5f,  // nms_iou_thresh: NMS阈值
-      1.0f,  // max_ratio: 目标框最大长宽比（短边/长边）
-      0.2f,  // min_ratio: 目标框最小长宽比（短边/长边）
-      5,     // min_channel_dim: 认为“通道维”的最小维度
-      true   // prefer_smaller_channel_dim_when_ambiguous: 两维都>=min时是否默认较小维为通道维
+      2,      // hw_threads_reserved: 预留给系统/其他线程的CPU线程数
+      1,      // streams_num: OpenVINO推理流数量（低延迟建议1）
+      0.85f,  // score_thresh: 置信度阈值
+      0.1f,   // nms_iou_thresh: NMS阈值
+      1.0f,   // max_ratio: 目标框最大长宽比（短边/长边）
+      0.5f,   // min_ratio: 目标框最小长宽比（短边/长边）
+      5,      // min_channel_dim: 认为“通道维”的最小维度
+      true    // prefer_smaller_channel_dim_when_ambiguous: 两维都>=min时是否默认较小维为通道维
   };
   return p;
 }

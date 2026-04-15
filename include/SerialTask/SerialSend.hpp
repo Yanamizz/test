@@ -26,11 +26,11 @@ inline float NormalizeDegTo360(float d) {
   return d;
 }
 
-inline void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle,
+inline void SendAimbotFrame(serial::Serial &serial_port, float pitch_relative_angle, float yaw_relative_angle,
                             uint8_t AimbotState);
 
 // 重载：使用已知的当前角度发送，不再从串口读取（适用于接收线程在外部运行时）
-inline void SerialSend(serial::Serial& serial_port, float absolute_pitch, float absolute_yaw, uint8_t AimbotState) {
+inline void SerialSend(serial::Serial &serial_port, float absolute_pitch, float absolute_yaw, uint8_t AimbotState) {
   float pitch_relative_angle = (absolute_pitch);
   float yaw_relative_angle = (absolute_yaw);
 
@@ -45,7 +45,7 @@ inline void SerialSend(serial::Serial& serial_port, float absolute_pitch, float 
   SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle, yaw_relative_angle, AimbotState);
 }
 
-inline void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_angle, float yaw_relative_angle,
+inline void SendAimbotFrame(serial::Serial &serial_port, float pitch_relative_angle, float yaw_relative_angle,
                             uint8_t AimbotState) {
   AimbotFrame_SCM_t aimbot_frame;
   aimbot_frame._SOF = 0x55;                // 包头
@@ -56,8 +56,8 @@ inline void SendAimbotFrame(serial::Serial& serial_port, float pitch_relative_an
   aimbot_frame.YawRelativeAngle = yaw_relative_angle;
   aimbot_frame.SystemTimer = 0.0f;  ///< 时间戳
   aimbot_frame._EOF = 0xFF;         // 包尾
-
-  serial_port.write(reinterpret_cast<uint8_t*>(&aimbot_frame), sizeof(AimbotFrame_SCM_t));
+  std ::cout << "send_yaw" << yaw_relative_angle << "send_pitch" << pitch_relative_angle << std::endl;
+  serial_port.write(reinterpret_cast<uint8_t *>(&aimbot_frame), sizeof(AimbotFrame_SCM_t));
 }
 
 }  // namespace SerialTask

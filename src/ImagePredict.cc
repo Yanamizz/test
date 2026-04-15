@@ -14,6 +14,7 @@
 #include <cstdint>
 
 #include "ImageRecognize/ImageShow.hpp"
+#include "ImageRecognize/TargetAssociation.hpp"
 #include "ImageRecognize/ImagePredict_OPENVINO.hpp"  // 切换到 OpenVINO 时，注释上一行并启用这一行
 #include "SerialTask/SerialRead.hpp"
 #include "SerialTask/SerialSend.hpp"
@@ -23,12 +24,12 @@
 #include "Tools/LaserAngleCalculate.hpp"
 #include "Tools/YawScanController.hpp"
 #include "Tools/SaveImage.hpp"
-#include "Tools/TrackingQualityEvaluator.hpp"
 #include "CameraTask/GetImage.hpp"
 
 namespace {
 struct RuntimeParams {
   std::string model_path;
+  std::string openvino_device_name;
   std::string angle_filter_type;
 
   int capture_timeout_ms;
@@ -49,6 +50,9 @@ struct RuntimeParams {
   int latency_print_interval_frames;
 
   bool enable_display;
+  bool enable_scan_mode;
+  std::string scan_axis;
+  double scan_send_hz;
   int display_every_n_frames;
   int gui_poll_every_n_frames;
 };
@@ -80,12 +84,9 @@ static std::atomic<float> g_send_abs_yaw{0.0f};
 static std::atomic<float> g_send_abs_pitch{0.0f};
 static std::atomic<float> g_send_offset_yaw{0.0f};
 static std::atomic<float> g_send_offset_pitch{0.0f};
-
-static std::vector<float> g_eval_target_yaw;
-static std::vector<float> g_eval_control_yaw;
-static std::vector<float> g_eval_target_pitch;
-static std::vector<float> g_eval_control_pitch;
-static bool g_eval_has_detection = false;
+static std::mutex g_control_mode_mutex;
+static std::mutex g_scan_controller_mutex;
+static bool g_target_visible = false;
 
 namespace {
 struct LatencyStats {
@@ -119,55 +120,58 @@ static void PrintLatencyStats(const LatencyStats &s, const char *tag) {
             << " loop=" << ns2ms(s.loop_ns) << " | tiny_us imuMatch=" << ns2us(s.imu_match_ns)
             << " selectBox=" << ns2us(s.select_box_ns) << " control=" << ns2us(s.control_calc_ns) << std::endl;
 }
+
+static SerialTask::EulerAngles InterpolateEulerAngles(const SerialTask::EulerAngles &lower,
+                                                      const SerialTask::EulerAngles &upper, float alpha) {
+  SerialTask::EulerAngles result{};
+  result.roll = Tools::InterpolateAngleDeg(lower.roll, upper.roll, alpha);
+  result.pitch = Tools::InterpolateAngleDeg(lower.pitch, upper.pitch, alpha);
+  result.yaw = Tools::InterpolateAngleDeg(lower.yaw, upper.yaw, alpha);
+  return result;
+}
+
+static Tools::ScanAxis ParseScanAxis(const std::string &scan_axis) {
+  std::string normalized;
+  normalized.reserve(scan_axis.size());
+  for (char c : scan_axis) {
+    if (c >= 'A' && c <= 'Z') {
+      normalized.push_back(static_cast<char>(c - 'A' + 'a'));
+    } else {
+      normalized.push_back(c);
+    }
+  }
+
+  if (normalized == "yaw") return Tools::ScanAxis::Yaw;
+  return Tools::ScanAxis::Pitch;
+}
 }  // namespace
-
-static inline float NormalizeDeltaDeg(float delta) {
-  while (delta > 180.0f) delta -= 360.0f;
-  while (delta < -180.0f) delta += 360.0f;
-  return delta;
-}
-
-static inline cv::Point2f BoxCenter(const std::array<float, 6> &box) {
-  return {0.5f * (box[0] + box[2]), 0.5f * (box[1] + box[3])};
-}
 
 void CaptureThread(CameraTask::GalaxyCamera *camera);
 void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanController &scan_controller);
 void IMUReadThread(serial::Serial &port);
-void IMUSendThread(serial::Serial &port);
-
-static const char *TrackingIssueToString(Tools::TrackingIssueType issue) {
-  switch (issue) {
-    case Tools::TrackingIssueType::Good:
-      return "Good";
-    case Tools::TrackingIssueType::OverOscillation:
-      return "OverOscillation";
-    case Tools::TrackingIssueType::OverLag:
-      return "OverLag";
-    case Tools::TrackingIssueType::Mixed:
-      return "Mixed";
-    case Tools::TrackingIssueType::TargetMissing:
-      return "TargetMissing";
-    case Tools::TrackingIssueType::InsufficientData:
-      return "InsufficientData";
-    default:
-      return "Unknown";
-  }
-}
+void IMUSendThread(serial::Serial &port, Tools::YawScanController &scan_controller);
 
 int main() {
-  Tools::BindCurrentThreadToBigCores();
   CameraTask::GalaxyCamera camera;
   serial::Serial port;
   bool serial_enabled = false;
   std::unique_ptr<ImageRecognize::ImagePredict> predictor;
+
+  cv::setUseOptimized(true);
+  cv::setNumThreads(1);
+
+  Tools::BindCurrentThreadToBigCores();
+
   try {
-    predictor = std::make_unique<ImageRecognize::ImagePredict>(Params().model_path);
+    predictor = std::make_unique<ImageRecognize::ImagePredict>(Params().model_path, Params().openvino_device_name);
   } catch (const std::exception &e) {
     std::cerr << "Failed to initialize OpenVINO model: " << e.what() << std::endl;
     std::cerr << "Configured model_path: " << Params().model_path << std::endl;
+    std::cerr << "Configured device_name: " << Params().openvino_device_name << std::endl;
     return -2;
   }
+
+  Tools::BindCurrentThreadToAllCores();
 
   if (!port.isOpen()) {
     SerialTask::DefaultConfig(port);
@@ -189,33 +193,15 @@ int main() {
   std::thread imu_send;
   if (serial_enabled) {
     imu_read = std::thread(IMUReadThread, std::ref(port));
-    imu_send = std::thread(IMUSendThread, std::ref(port));
+    imu_send = std::thread(IMUSendThread, std::ref(port), std::ref(scan_controller));
   } else {
-    std::cout << "[IMU] serial disabled, running detection/display only." << std::endl;
+    std::cout << "[IMU] 串口已禁用，仅运行检测/显示。" << std::endl;
   }
 
   if (image_capture.joinable()) image_capture.join();
   if (image_predict.joinable()) image_predict.join();
   if (imu_read.joinable()) imu_read.join();
   if (imu_send.joinable()) imu_send.join();
-
-  {
-    Tools::TrackingEvalParams eval_params;
-    const auto yaw_eval = Tools::EvaluateTrackingQualityWhenDetected(g_eval_target_yaw, g_eval_control_yaw,
-                                                                     g_eval_has_detection, eval_params);
-    const auto pitch_eval = Tools::EvaluateTrackingQualityWhenDetected(g_eval_target_pitch, g_eval_control_pitch,
-                                                                       g_eval_has_detection, eval_params);
-
-    std::cout << "[TrackingEval][Yaw] issue=" << TrackingIssueToString(yaw_eval.issue)
-              << " osc=" << yaw_eval.oscillation_score << " lag=" << yaw_eval.lag_score << " rmse=" << yaw_eval.rmse
-              << " bestLag=" << yaw_eval.best_lag_frames << " corr=" << yaw_eval.best_lag_corr
-              << " note=" << yaw_eval.note << std::endl;
-
-    std::cout << "[TrackingEval][Pitch] issue=" << TrackingIssueToString(pitch_eval.issue)
-              << " osc=" << pitch_eval.oscillation_score << " lag=" << pitch_eval.lag_score
-              << " rmse=" << pitch_eval.rmse << " bestLag=" << pitch_eval.best_lag_frames
-              << " corr=" << pitch_eval.best_lag_corr << " note=" << pitch_eval.note << std::endl;
-  }
 
   return 0;
 }
@@ -249,13 +235,17 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
 }
 
 void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanController &scan_controller) {
+  Tools::BindCurrentThreadToBigCores();
   FPSCounter fps_counter;
   static Tools::AngleCalculator angle_calculator;  // 持久化 AngleCalculator，避免每次调用时重置 lastTime
   static Tools::LaserAngleCalculator laser_angle_calculator;
   static Tools::DistanceCalculator distance_calculator;
+  static ImageRecognize::CrossFrameTargetTracker target_tracker;
   static const Tools::FilterType filter_type = Tools::AngleCalculator::ParseFilterType(Params().angle_filter_type);
 
-  std::cout << "[AngleFilter] using type: " << Tools::ToString(filter_type) << std::endl;
+  std::cout << "[角度滤波] 类型: " << Tools::ToString(filter_type) << std::endl;
+  std::cout << "[扫描模式] 启用: " << (Params().enable_scan_mode ? "true" : "false") << std::endl;
+  std::cout << "[扫描模式] 发送频率: " << Params().scan_send_hz << " Hz" << std::endl;
 
   // static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
   std::chrono::steady_clock::time_point prev_frame_ts{};
@@ -303,22 +293,30 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanC
       {
         std::lock_guard<std::mutex> lk(g_imu_mutex);
         if (!g_imu_buffer.empty()) {
-          // 寻找与 frame_ts 时间差最小的 IMU 条目
-          auto best_it = g_imu_buffer.begin();
-          auto best_diff = std::chrono::steady_clock::duration::max();
-          for (auto it = g_imu_buffer.begin(); it != g_imu_buffer.end(); ++it) {
-            auto diff = (it->first > frame_ts) ? (it->first - frame_ts) : (frame_ts - it->first);
-            if (diff < best_diff) {
-              best_diff = diff;
-              best_it = it;
+          auto upper_it = std::lower_bound(g_imu_buffer.begin(), g_imu_buffer.end(), frame_ts,
+                                           [](const auto &entry, const auto &ts) { return entry.first < ts; });
+
+          if (g_imu_buffer.size() == 1 || upper_it == g_imu_buffer.begin()) {
+            matched_imu = g_imu_buffer.front().second;
+            has_matched_imu = true;
+          } else if (upper_it == g_imu_buffer.end()) {
+            matched_imu = g_imu_buffer.back().second;
+            has_matched_imu = true;
+          } else {
+            auto lower_it = std::prev(upper_it);
+            const auto span_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(upper_it->first - lower_it->first).count();
+            if (span_ns > 0) {
+              const auto elapsed_ns =
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(frame_ts - lower_it->first).count();
+              float alpha = static_cast<float>(elapsed_ns) / static_cast<float>(span_ns);
+              matched_imu = InterpolateEulerAngles(lower_it->second, upper_it->second, alpha);
+              has_matched_imu = true;
+            } else {
+              matched_imu = upper_it->second;
+              has_matched_imu = true;
             }
           }
-
-          matched_imu = best_it->second;
-          has_matched_imu = true;
-
-          // 删除缓冲区中时间点 t 及之前的 IMU 条目，避免重复使用已匹配的数据
-          g_imu_buffer.erase(g_imu_buffer.begin(), std::next(best_it));
         }
       }
       const auto t_imu_match_end = std::chrono::steady_clock::now();
@@ -329,23 +327,28 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanC
     }
 
     cv::Point2d offset_angles;
-    [[maybe_unused]] const bool detected_target = !result.boxes.empty();
-    if (!result.boxes.empty()) {
-      const auto t_select_start = std::chrono::steady_clock::now();
-      int selected_idx = 0;
-      for (int i = 1; i < static_cast<int>(result.boxes.size()); ++i) {
-        if (result.boxes[i][4] > result.boxes[selected_idx][4]) selected_idx = i;
-      }
+    std::array<float, 6> tracked_box{};
+    bool has_tracked_box = false;
+    const auto t_select_start = std::chrono::steady_clock::now();
+    const auto track_result = target_tracker.Update(result.boxes);
+    const auto t_select_end = std::chrono::steady_clock::now();
+    const bool track_alive = track_result.has_box || target_tracker.HasRecentLock();
+    {
+      std::lock_guard<std::mutex> lk(g_control_mode_mutex);
+      g_target_visible = track_alive;
+    }
 
-      const auto &selected_box = result.boxes[selected_idx];
-      const cv::Point2f raw_center = BoxCenter(selected_box);
+    if (track_result.has_box) {
+      tracked_box = track_result.box;
+      has_tracked_box = true;
+
+      const cv::Point2f raw_center = ImageRecognize::BoxCenter(tracked_box);
 
       float center_x = raw_center.x;
       float center_y = raw_center.y;
-      float width = selected_box[2] - selected_box[0];
-      float height = selected_box[3] - selected_box[1];
+      float width = tracked_box[2] - tracked_box[0];
+      float height = tracked_box[3] - tracked_box[1];
       float distance = distance_calculator.CalculateDistance(height, width);
-      const auto t_select_end = std::chrono::steady_clock::now();
       latency_total.Add(latency_total.select_box_ns, t_select_start, t_select_end);
       latency_window.Add(latency_window.select_box_ns, t_select_start, t_select_end);
 
@@ -370,15 +373,15 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanC
         ImageRecognize::ImageShow::ShowPred(frame, pred_point.x, pred_point.y);
 
         // 必须用“最短角差”，否则跨越 ±180° 时会出现 300° 级突变
-        offset_angles.x = NormalizeDeltaDeg(filtered_yaw - matched_imu.yaw);
-        offset_angles.y = NormalizeDeltaDeg(filtered_pitch - matched_imu.pitch);
+        offset_angles.x = Tools::NormalizeDeltaDeg(filtered_yaw - matched_imu.yaw);
+        offset_angles.y = Tools::NormalizeDeltaDeg(filtered_pitch - matched_imu.pitch);
 
         auto [laser_yaw_angle, laser_pitch_angle] =
             laser_angle_calculator.CalculateLaserAngles(distance, offset_angles.x);
 
         const auto t_control_start = std::chrono::steady_clock::now();
-        float delta_yaw_raw = NormalizeDeltaDeg(static_cast<float>(offset_angles.x + laser_yaw_angle));
-        float delta_pitch_raw = NormalizeDeltaDeg(static_cast<float>(offset_angles.y + laser_pitch_angle));
+        float delta_yaw_raw = Tools::NormalizeDeltaDeg(static_cast<float>(offset_angles.x + laser_yaw_angle));
+        float delta_pitch_raw = Tools::NormalizeDeltaDeg(static_cast<float>(offset_angles.y + laser_pitch_angle));
         if (std::abs(delta_yaw_raw) > Params().minimum_angle_deg ||
             std::abs(delta_pitch_raw) > Params().minimum_angle_deg) {
           float delta_yaw = std::clamp(delta_yaw_raw, -Params().max_send_delta_deg, Params().max_send_delta_deg);
@@ -390,9 +393,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanC
           const float send_abs_yaw = matched_imu.yaw + cmd_delta_yaw;
           const float send_abs_pitch = matched_imu.pitch + cmd_delta_pitch;
 
-          const float target_abs_yaw = matched_imu.yaw + delta_yaw_raw;
-          const float target_abs_pitch = matched_imu.pitch + delta_pitch_raw;
-
           g_send_abs_yaw.store(send_abs_yaw, std::memory_order_release);
           g_send_abs_pitch.store(send_abs_pitch, std::memory_order_release);
           g_send_offset_yaw.store(cmd_delta_yaw, std::memory_order_release);
@@ -400,19 +400,17 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanC
           g_send_aimbot_state.store(0x01, std::memory_order_release);
           g_send_is_scan.store(false, std::memory_order_release);
 
-          g_eval_target_yaw.push_back(target_abs_yaw);
-          g_eval_control_yaw.push_back(send_abs_yaw);
-          g_eval_target_pitch.push_back(target_abs_pitch);
-          g_eval_control_pitch.push_back(send_abs_pitch);
-          g_eval_has_detection = true;
-
           g_has_pending_send.store(true, std::memory_order_release);
           ImageRecognize::ImageShow::ShowAngles(frame, send_abs_yaw, send_abs_pitch, matched_imu.yaw, matched_imu.pitch,
                                                 cmd_delta_yaw, cmd_delta_pitch, distance);
         } else {
           resetPendingSend();
         }
-        scan_controller.Reset();
+
+        {
+          std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
+          scan_controller.Reset();
+        }
         const auto t_control_end = std::chrono::steady_clock::now();
         latency_total.Add(latency_total.control_calc_ns, t_control_start, t_control_end);
         latency_window.Add(latency_window.control_calc_ns, t_control_start, t_control_end);
@@ -420,14 +418,14 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanC
         resetPendingSend();
       }
     } else {
-      if (has_matched_imu) {
-        const auto scan_command = scan_controller.BuildCommand(matched_imu.yaw, matched_imu.pitch);
+      bool target_visible = false;
+      {
+        std::lock_guard<std::mutex> lk(g_control_mode_mutex);
+        target_visible = g_target_visible;
+      }
 
-        g_send_abs_yaw.store(scan_command.absolute_yaw_deg, std::memory_order_release);
-        g_send_abs_pitch.store(scan_command.absolute_pitch_deg, std::memory_order_release);
-        g_send_offset_yaw.store(scan_command.offset_yaw_deg, std::memory_order_release);
-        g_send_offset_pitch.store(scan_command.offset_pitch_deg, std::memory_order_release);
-        g_send_aimbot_state.store(scan_command.aimbot_state, std::memory_order_release);
+      if (Params().enable_scan_mode && has_matched_imu && !target_visible) {
+        g_send_aimbot_state.store(0x01, std::memory_order_release);
         g_send_is_scan.store(true, std::memory_order_release);
         g_has_pending_send.store(true, std::memory_order_release);
       } else {
@@ -450,6 +448,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::YawScanC
 
     if (do_display) {
       ImageRecognize::ImageShow::ShowNow(frame, result, fps);
+      if (has_tracked_box) {
+        ImageRecognize::DrawTrackedBox(frame, tracked_box);
+      }
     }
 
     // 无目标时，每隔若干帧保存图像到本次运行目录
@@ -514,17 +515,86 @@ void IMUReadThread(serial::Serial &port) {
   if (port.isOpen()) port.close();
 }
 
-void IMUSendThread(serial::Serial &port) {
+void IMUSendThread(serial::Serial &port, Tools::YawScanController &scan_controller) {
+  using Clock = std::chrono::steady_clock;
+  const double scan_send_hz = std::max(1.0, Params().scan_send_hz);
+  const auto scan_send_interval =
+      std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / scan_send_hz));
+
+  auto next_scan_send_time = Clock::now();
+  bool last_scan_mode = false;
+
   while (g_running) {
+    const bool scan_mode = g_send_is_scan.load(std::memory_order_acquire);
+
+    bool target_visible = false;
+    {
+      std::lock_guard<std::mutex> lk(g_control_mode_mutex);
+      target_visible = g_target_visible;
+    }
+
+    if (scan_mode) {
+      if (target_visible) {
+        g_send_is_scan.store(false, std::memory_order_release);
+        g_has_pending_send.store(false, std::memory_order_release);
+        last_scan_mode = false;
+        next_scan_send_time = Clock::now();
+        std::this_thread::sleep_for(std::chrono::milliseconds(Params().imu_send_idle_sleep_ms));
+        continue;
+      }
+
+      const auto now = Clock::now();
+      if (!last_scan_mode) {
+        next_scan_send_time = now;
+        last_scan_mode = true;
+      }
+
+      if (now < next_scan_send_time) {
+        std::this_thread::sleep_for(next_scan_send_time - now);
+        continue;
+      }
+
+      SerialTask::EulerAngles latest_imu{};
+      bool has_latest_imu = false;
+      {
+        std::lock_guard<std::mutex> lk(g_imu_mutex);
+        if (!g_imu_buffer.empty()) {
+          latest_imu = g_imu_buffer.back().second;
+          has_latest_imu = true;
+        }
+      }
+
+      if (!has_latest_imu) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(Params().imu_send_idle_sleep_ms));
+        continue;
+      }
+
+      Tools::YawScanCommand scan_command{};
+      {
+        std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
+        scan_command = scan_controller.BuildCommand(latest_imu.yaw, latest_imu.pitch);
+      }
+
+      g_send_abs_yaw.store(scan_command.absolute_yaw_deg, std::memory_order_release);
+      g_send_abs_pitch.store(scan_command.absolute_pitch_deg, std::memory_order_release);
+      g_send_offset_yaw.store(scan_command.offset_yaw_deg, std::memory_order_release);
+      g_send_offset_pitch.store(scan_command.offset_pitch_deg, std::memory_order_release);
+      g_send_aimbot_state.store(scan_command.aimbot_state, std::memory_order_release);
+      g_has_pending_send.store(true, std::memory_order_release);
+
+      SerialTask::SerialSend(port, scan_command.absolute_pitch_deg, scan_command.absolute_yaw_deg,
+                             scan_command.aimbot_state);
+      next_scan_send_time = now + scan_send_interval;
+      continue;
+    }
+
+    last_scan_mode = false;
     if (g_has_pending_send.load(std::memory_order_acquire)) {
       float pitch = g_send_abs_pitch.load(std::memory_order_acquire);
       float yaw = g_send_abs_yaw.load(std::memory_order_acquire);
-      float offset_pitch = g_send_offset_pitch.load(std::memory_order_acquire);
-      float offset_yaw = g_send_offset_yaw.load(std::memory_order_acquire);
       const uint8_t aimbot_state = g_send_aimbot_state.load(std::memory_order_acquire);
-      const char *mode_text = g_send_is_scan.load(std::memory_order_acquire) ? "Scan" : "Track";
-      std::cout << std::fixed << std::setprecision(2) << "[" << mode_text << "] Yaw: " << yaw << "°, Pitch: " << pitch
-                << "°, Offset Yaw: " << offset_yaw << "°, Offset Pitch: " << offset_pitch << "°" << std::endl;
+      // std::cout << std::fixed << std::setprecision(2) << "[" << mode_text << "] , offset_yaw: " << offset_yaw
+      // << "°, offset_pitch: " << offset_pitch << "°" << std::endl;
       SerialTask::SerialSend(port, pitch, yaw, aimbot_state);
       g_has_pending_send.store(false, std::memory_order_release);
     } else {
@@ -537,8 +607,9 @@ namespace {
 const RuntimeParams &Params() {
   // ===== 调参集中区（统一放在文件末尾）=====
   static const RuntimeParams p{
-      "/home/nuc/antidrone/src/model/antidrone_v8n.onnx",  // model_path: 模型路径
-      "CKF",                                               // angle_filter_type: 角度滤波类型（KF/EKF/UKF/CKF）
+      "/home/nuc/antidrone/src/model/antidrone_v8n.xml",  // model_path: 模型路径
+      "GPU",                                              // openvino_device_name: 低延迟优先，优先使用核显推理
+      "CKF",                                              // angle_filter_type: 角度滤波类型（KF/EKF/UKF/CKF）
 
       1000,  // capture_timeout_ms: 相机取帧超时（毫秒）
       5,     // capture_empty_sleep_ms: 空帧时休眠（毫秒）
@@ -557,9 +628,12 @@ const RuntimeParams &Params() {
       false,  // enable_latency_profile: 是否启用阶段打点统计
       120,    // latency_print_interval_frames: 每多少帧打印一次窗口统计
 
-      true,  // enable_display: 是否显示图像窗口
-      2,     // display_every_n_frames: 每N帧显示1帧（2可明显降低render延迟）
-      1      // gui_poll_every_n_frames: 每N帧轮询一次按键退出
+      true,     // enable_display: 低延迟模式默认关闭显示，避免 GUI 额外开销
+      true,     // enable_scan_mode: 调试跟踪振荡时可关闭 scan，仅保留 track 下发
+      "pitch",  // scan_axis: 扫描轴向，可填 yaw 或 pitch
+      100.0,    // scan_send_hz: 扫描模式下的发送频率（Hz）
+      2,        // display_every_n_frames: 每N帧显示1帧（2可明显降低render延迟）
+      1         // gui_poll_every_n_frames: 每N帧轮询一次按键退出
   };
   return p;
 }
