@@ -15,6 +15,7 @@
 
 #include "ImageRecognize/ImageShow.hpp"
 #include "ImageRecognize/TargetAssociation.hpp"
+#include "ImageRecognize/TargetMotionPredictor.hpp"
 #include "ImageRecognize/ImagePredict_OPENVINO.hpp"  // 切换到 OpenVINO 时，注释上一行并启用这一行
 #include "SerialTask/SerialRead.hpp"
 #include "SerialTask/SerialSend.hpp"
@@ -226,6 +227,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::ScanCont
   static Tools::LaserAngleCalculator laser_angle_calculator;
   static Tools::DistanceCalculator distance_calculator;
   static ImageRecognize::CrossFrameTargetTracker target_tracker;
+  static ImageRecognize::TargetMotionPredictor target_motion_predictor;
   static const Tools::FilterType filter_type = Tools::AngleCalculator::ParseFilterType(Params().angle_filter_type);
 
   std::cout << "[角度滤波] 类型: " << Tools::ToString(filter_type) << std::endl;
@@ -266,12 +268,22 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::ScanCont
     ImageRecognize::PredictResult result;
     SerialTask::EulerAngles matched_imu{};
     bool has_matched_imu = false;
+    double frame_dt = 0.0;
+    bool has_realtime_frame_dt = false;
     try {
       const auto t_infer_start = std::chrono::steady_clock::now();
       result = predictor.run(frame);
       const auto t_infer_end = std::chrono::steady_clock::now();
       latency_total.Add(latency_total.infer_ns, t_infer_start, t_infer_end);
       latency_window.Add(latency_window.infer_ns, t_infer_start, t_infer_end);
+
+      if (has_prev_frame_ts) {
+        frame_dt = std::chrono::duration<double>(frame_ts - prev_frame_ts).count();
+        has_realtime_frame_dt = true;
+      }
+      prev_frame_ts = frame_ts;
+      has_prev_frame_ts = true;
+      if (!has_realtime_frame_dt || frame_dt <= 0.0 || frame_dt > Params().dt_max_sec) frame_dt = 0.0;
 
       // 关联最近一次 IMU 状态并记录延迟
       const auto t_imu_match_start = std::chrono::steady_clock::now();
@@ -324,38 +336,51 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::ScanCont
     }
 
     if (track_result.has_box) {
-      tracked_box = track_result.box;
+      const auto motion_prediction =
+          target_motion_predictor.ObserveAndPredict(track_result.box, frame_dt, frame.size());
+      tracked_box = motion_prediction.valid ? motion_prediction.box : track_result.box;
       has_tracked_box = true;
+      latency_total.Add(latency_total.select_box_ns, t_select_start, t_select_end);
+      latency_window.Add(latency_window.select_box_ns, t_select_start, t_select_end);
+    } else if (track_alive && target_motion_predictor.HasState()) {
+      const auto motion_prediction = target_motion_predictor.Predict(frame_dt, frame.size());
+      if (motion_prediction.valid) {
+        tracked_box = motion_prediction.box;
+        has_tracked_box = true;
+      }
+    } else {
+      target_motion_predictor.Reset();
+    }
 
-      const cv::Point2f raw_center = ImageRecognize::BoxCenter(tracked_box);
+    if (has_tracked_box) {
+      if (track_result.has_box) {
+        const cv::Point2f detection_center = ImageRecognize::BoxCenter(track_result.box);
+        ImageRecognize::ImageShow::ShowDetectionCenter(frame, detection_center.x, detection_center.y);
+      }
 
-      float center_x = raw_center.x;
-      float center_y = raw_center.y;
+      const cv::Point2f tracked_center = ImageRecognize::BoxCenter(tracked_box);
+      ImageRecognize::ImageShow::ShowPred(frame, tracked_center.x, tracked_center.y);
+
+      float center_x = tracked_center.x;
+      float center_y = tracked_center.y;
       float width = tracked_box[2] - tracked_box[0];
       float height = tracked_box[3] - tracked_box[1];
       float distance = distance_calculator.CalculateDistance(height, width);
-      latency_total.Add(latency_total.select_box_ns, t_select_start, t_select_end);
-      latency_window.Add(latency_window.select_box_ns, t_select_start, t_select_end);
 
       if (has_matched_imu) {
-        double dt = Params().dt_default_sec;
-        if (has_prev_frame_ts) {
-          dt = std::chrono::duration<double>(frame_ts - prev_frame_ts).count();
-        }
-        prev_frame_ts = frame_ts;
-        has_prev_frame_ts = true;
-        if (dt <= 0.0 || dt > Params().dt_max_sec) dt = Params().dt_default_sec;
-
         const auto t_angle_start = std::chrono::steady_clock::now();
-        auto [filtered_yaw, filtered_pitch] = angle_calculator.CalculateAbsoluteAngles(
-            center_x, center_y, matched_imu.yaw, matched_imu.pitch, filter_type, dt);
+        std::pair<float, float> filtered_angles;
+        if (has_realtime_frame_dt) {
+          filtered_angles = angle_calculator.CalculateAbsoluteAngles(center_x, center_y, matched_imu.yaw,
+                                                                     matched_imu.pitch, filter_type, frame_dt);
+        } else {
+          filtered_angles = angle_calculator.CalculateAbsoluteAngles(center_x, center_y, matched_imu.yaw,
+                                                                     matched_imu.pitch, filter_type);
+        }
+        const auto [filtered_yaw, filtered_pitch] = filtered_angles;
         const auto t_angle_end = std::chrono::steady_clock::now();
         latency_total.Add(latency_total.angle_calc_ns, t_angle_start, t_angle_end);
         latency_window.Add(latency_window.angle_calc_ns, t_angle_start, t_angle_end);
-
-        cv::Point2f pred_point =
-            angle_calculator.AbsoluteAnglesToPixel(filtered_yaw, filtered_pitch, matched_imu.yaw, matched_imu.pitch);
-        ImageRecognize::ImageShow::ShowPred(frame, pred_point.x, pred_point.y);
 
         // 必须用“最短角差”，否则跨越 ±180° 时会出现 300° 级突变
         offset_angles.x = Tools::NormalizeDeltaDeg(filtered_yaw - matched_imu.yaw);
@@ -602,13 +627,13 @@ const RuntimeParams &Params() {
       1,     // imu_send_idle_sleep_ms: 无目标发送线程休眠（毫秒）
       1000,  // imu_buffer_max_age_ms: IMU缓冲保留时间（毫秒）
 
-      0.008f,  // minimum_angle_deg: 最小发送角度阈值（度）
-      5.0f,    // max_send_delta_deg: 单帧允许最大发送角差（度）
+      0.004f,  // minimum_angle_deg: 最小发送角度阈值（度）
+      10.0f,   // max_send_delta_deg: 单帧允许最大发送角差（度）
 
       0.05,  // dt_default_sec: 默认帧间隔（秒）
       0.2,   // dt_max_sec: dt异常上限，超出则回退默认值
 
-      3.0f,  // pitch_abs_limit: pitch绝对限幅（度）
+      10.0f,  // pitch_abs_limit: pitch绝对限幅（度）
 
       false,  // enable_latency_profile: 是否启用阶段打点统计
       120,    // latency_print_interval_frames: 每多少帧打印一次窗口统计

@@ -51,8 +51,13 @@ class ImageShow {
     }
     cv::imshow("Detection Result", frame);
   }
+
+  static void ShowDetectionCenter(cv::Mat &frame, double cx, double cy) {
+    DrawCenterMarker(frame, cx, cy, {0, 165, 255}, "DET");
+  }
+
   static void ShowPred(cv::Mat &frame, double pred_cx, double pred_cy) {
-    cv::circle(frame, {static_cast<int>(pred_cx), static_cast<int>(pred_cy)}, 4, {0, 255, 0}, -1);
+    DrawCenterMarker(frame, pred_cx, pred_cy, {0, 255, 0}, "PRED");
   }
 
   static void ShowAngles(cv::Mat &frame, float yaw, float pitch, float imu_yaw, float imu_pitch, float offset_yaw,
@@ -76,6 +81,12 @@ class ImageShow {
   }
 
  private:
+  static void DrawCenterMarker(cv::Mat &frame, double cx, double cy, const cv::Scalar &color, const char *label) {
+    const cv::Point center{static_cast<int>(cx), static_cast<int>(cy)};
+    cv::circle(frame, center, 5, color, -1);
+    cv::putText(frame, label, {center.x + 6, center.y - 6}, cv::FONT_HERSHEY_SIMPLEX, 0.45, color, 1);
+  }
+
   static constexpr int kWindowSide = 640;  // 检测窗口默认边长（像素）
 };
 
