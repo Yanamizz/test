@@ -49,3 +49,6 @@ __pycache__/
 # 通用临时文件（可选）
 *.log
 *.tmp
+
+.cache/
+.build/

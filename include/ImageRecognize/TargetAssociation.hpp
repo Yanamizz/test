@@ -207,8 +207,8 @@ class CrossFrameTargetTracker {
 };
 
 inline CrossFrameTargetTrackerParams::CrossFrameTargetTrackerParams()
-    : iou_weight(0.84f),                   // 历史框关联的 IoU 权重，略提高以减少换框
-      center_weight(0.28f),                // 历史框关联的中心点权重，略降低以保留几何连续性
+    : iou_weight(0.75f),                   // 历史框关联的 IoU 权重，略提高以减少换框
+      center_weight(0.2f),                 // 历史框关联的中心点权重，略降低以保留几何连续性
       confidence_weight(0.04f),            // 历史框关联的置信度权重，进一步降低高置信新框抢占概率
       sticky_iou_weight(0.84f),            // 粘连模式下的 IoU 权重，优先维持上一帧目标
       sticky_center_weight(0.16f),         // 粘连模式下的中心点权重

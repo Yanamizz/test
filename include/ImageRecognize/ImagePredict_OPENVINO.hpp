@@ -5,7 +5,8 @@
  * @details
  * - 复用 `ImagePreprocess` 执行图像预处理（NCHW float）。
  * - 使用 OpenVINO `ov::Core` + `CompiledModel` + `InferRequest` 执行推理。
- * - 在本文件内完成与 `OutputDataProcess` 等价的后处理，返回同一 `PredictResult`。
+ * - 在本文件内完成与 `OutputDataProcess` 等价的后处理，返回同一
+ * `PredictResult`。
  */
 
 #pragma once
@@ -38,17 +39,22 @@ namespace ImageRecognize {
 
 #if IMAGE_RECOGNIZE_HAS_OPENVINO
 class ImagePredict {
- public:
+public:
   ImagePredict() = default;
 
   // 与 ONNX 版本保持同名构造：默认使用 AUTO 设备（可自动选 GPU/CPU）
-  explicit ImagePredict(const std::string &model_path) { init(model_path, "AUTO"); }
+  explicit ImagePredict(const std::string &model_path) {
+    init(model_path, "AUTO");
+  }
 
   // 可选构造：允许显式指定设备，如 "CPU" / "GPU" / "AUTO"
-  ImagePredict(const std::string &model_path, const std::string &device_name) { init(model_path, device_name); }
+  ImagePredict(const std::string &model_path, const std::string &device_name) {
+    init(model_path, device_name);
+  }
 
   // 与 ONNX 版本保持一致：传图 + 模型路径（每次临时加载）
-  PredictResult run(const cv::Mat &origin_image_, std::string model_path_) const {
+  PredictResult run(const cv::Mat &origin_image_,
+                    std::string model_path_) const {
     ImagePredict tmp_predictor(model_path_, device_name_);
     return tmp_predictor.run(origin_image_);
   }
@@ -56,19 +62,23 @@ class ImagePredict {
   // 复用已加载模型进行推理（推荐实时场景）
   PredictResult run(const cv::Mat &origin_image_) {
     if (!initialized_) {
-      throw std::runtime_error("OpenVINO session not initialized. Use ImagePredict(model_path) constructor.");
+      throw std::runtime_error("OpenVINO session not initialized. Use "
+                               "ImagePredict(model_path) constructor.");
     }
 
     auto pre_image_ = preprocessor_.run(origin_image_);
 
-    ov::Tensor input_tensor(ov::element::f32, {1, 3, static_cast<size_t>(height_), static_cast<size_t>(width_)},
-                            pre_image_.data.data());
+    ov::Tensor input_tensor(
+        ov::element::f32,
+        {1, 3, static_cast<size_t>(height_), static_cast<size_t>(width_)},
+        pre_image_.data.data());
     infer_request_.set_tensor(input_name_, input_tensor);
     infer_request_.infer();
 
     ov::Tensor output_tensor;
     if (output_name_.empty()) {
-      std::cerr << "[Warning] output_name_ is empty, fallback to index 0." << std::endl;
+      std::cerr << "[Warning] output_name_ is empty, fallback to index 0."
+                << std::endl;
       output_tensor = infer_request_.get_output_tensor(0);
     } else {
       output_tensor = infer_request_.get_tensor(output_name_);
@@ -76,7 +86,7 @@ class ImagePredict {
     return postprocess_(output_tensor, origin_image_.size());
   }
 
- private:
+private:
   struct TunableParams {
     int hw_threads_reserved;
     int streams_num;
@@ -104,25 +114,30 @@ class ImagePredict {
     core_ = std::make_unique<ov::Core>();
     std::shared_ptr<ov::Model> model;
 
-    const bool is_ir_xml = abs_input_path.has_extension() && abs_input_path.extension() == ".xml";
+    const bool is_ir_xml =
+        abs_input_path.has_extension() && abs_input_path.extension() == ".xml";
     if (is_ir_xml) {
       fs::path bin_path = abs_input_path;
       bin_path.replace_extension(".bin");
 
       if (!fs::exists(abs_input_path)) {
-        throw std::runtime_error("OpenVINO XML model not found: " + abs_input_path.string());
+        throw std::runtime_error("OpenVINO XML model not found: " +
+                                 abs_input_path.string());
       }
       if (!fs::exists(bin_path)) {
-        throw std::runtime_error("OpenVINO BIN weights not found: " + bin_path.string());
+        throw std::runtime_error("OpenVINO BIN weights not found: " +
+                                 bin_path.string());
       }
       if (fs::file_size(bin_path) == 0) {
-        throw std::runtime_error("OpenVINO BIN weights file is empty: " + bin_path.string());
+        throw std::runtime_error("OpenVINO BIN weights file is empty: " +
+                                 bin_path.string());
       }
 
       model = core_->read_model(abs_input_path.string(), bin_path.string());
     } else {
       if (!fs::exists(abs_input_path)) {
-        throw std::runtime_error("Model file not found: " + abs_input_path.string());
+        throw std::runtime_error("Model file not found: " +
+                                 abs_input_path.string());
       }
       model = core_->read_model(abs_input_path.string());
     }
@@ -130,24 +145,29 @@ class ImagePredict {
     // 从模型自动读取输入 H/W（shape = [1,3,H,W]），动态维度则保持默认 640
     const auto &pshape = model->input().get_partial_shape();
     if (pshape.rank().is_static() && pshape.rank().get_length() == 4) {
-      if (pshape[2].is_static()) height_ = static_cast<int>(pshape[2].get_length());
-      if (pshape[3].is_static()) width_ = static_cast<int>(pshape[3].get_length());
+      if (pshape[2].is_static())
+        height_ = static_cast<int>(pshape[2].get_length());
+      if (pshape[3].is_static())
+        width_ = static_cast<int>(pshape[3].get_length());
     }
 
     // 预处理器只初始化一次，避免每帧重复构造
     preprocessor_ = ImageRecognize::ImagePreprocess(cv::Size(width_, height_));
 
-    const unsigned int hw_threads = std::max(1u, std::thread::hardware_concurrency());
-    const unsigned int infer_threads =
-        std::max(1u, hw_threads > static_cast<unsigned int>(Params().hw_threads_reserved)
-                         ? (hw_threads - static_cast<unsigned int>(Params().hw_threads_reserved))
-                         : hw_threads);
+    const unsigned int hw_threads =
+        std::max(1u, std::thread::hardware_concurrency());
+    const unsigned int infer_threads = std::max(
+        1u, hw_threads > static_cast<unsigned int>(Params().hw_threads_reserved)
+                ? (hw_threads -
+                   static_cast<unsigned int>(Params().hw_threads_reserved))
+                : hw_threads);
 
     std::vector<std::string> available_devices;
     try {
       available_devices = core_->get_available_devices();
     } catch (const std::exception &e) {
-      std::cerr << "[OpenVINO] Failed to query available devices: " << e.what() << std::endl;
+      std::cerr << "[OpenVINO] Failed to query available devices: " << e.what()
+                << std::endl;
     }
 
     if (available_devices.empty()) {
@@ -162,29 +182,38 @@ class ImagePredict {
 
     auto has_device_prefix = [&](const std::string &prefix) {
       return std::any_of(available_devices.begin(), available_devices.end(),
-                         [&](const std::string &device) { return device.rfind(prefix, 0) == 0; });
+                         [&](const std::string &device) {
+                           return device.rfind(prefix, 0) == 0;
+                         });
     };
 
     const bool gpu_available = has_device_prefix("GPU");
-    const bool cpu_available = has_device_prefix("CPU") || available_devices.empty();
+    const bool cpu_available =
+        has_device_prefix("CPU") || available_devices.empty();
 
-    auto compile_with_latency_hint = [&](const std::string &target_device) -> std::optional<ov::CompiledModel> {
+    auto compile_with_latency_hint = [&](const std::string &target_device)
+        -> std::optional<ov::CompiledModel> {
       try {
-        return core_->compile_model(model, target_device,
-                                    ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
-                                    ov::streams::num(Params().streams_num), ov::inference_num_threads(infer_threads));
+        return core_->compile_model(
+            model, target_device,
+            ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
+            ov::streams::num(Params().streams_num),
+            ov::inference_num_threads(infer_threads));
       } catch (const std::exception &e) {
-        std::cerr << "[OpenVINO] device '" << target_device << "' with low-latency properties failed: " << e.what()
+        std::cerr << "[OpenVINO] device '" << target_device
+                  << "' with low-latency properties failed: " << e.what()
                   << std::endl;
         return std::nullopt;
       }
     };
 
-    auto compile_plain = [&](const std::string &target_device) -> std::optional<ov::CompiledModel> {
+    auto compile_plain = [&](const std::string &target_device)
+        -> std::optional<ov::CompiledModel> {
       try {
         return core_->compile_model(model, target_device);
       } catch (const std::exception &e) {
-        std::cerr << "[OpenVINO] device '" << target_device << "' plain compile failed: " << e.what() << std::endl;
+        std::cerr << "[OpenVINO] device '" << target_device
+                  << "' plain compile failed: " << e.what() << std::endl;
         return std::nullopt;
       }
     };
@@ -194,12 +223,15 @@ class ImagePredict {
       if (gpu_available) {
         candidate_devices = {"GPU", "AUTO", "CPU"};
       } else {
-        std::cerr << "[OpenVINO] GPU not detected by OpenVINO, falling back to AUTO/CPU." << std::endl;
+        std::cerr << "[OpenVINO] GPU not detected by OpenVINO, falling back to "
+                     "AUTO/CPU."
+                  << std::endl;
         candidate_devices = {"AUTO", "CPU"};
       }
     } else if (device_name_ == "AUTO") {
-      candidate_devices =
-          gpu_available ? std::vector<std::string>{"AUTO", "GPU", "CPU"} : std::vector<std::string>{"AUTO", "CPU"};
+      candidate_devices = gpu_available
+                              ? std::vector<std::string>{"AUTO", "GPU", "CPU"}
+                              : std::vector<std::string>{"AUTO", "CPU"};
     } else {
       candidate_devices = {device_name_, "AUTO", "CPU"};
       if (!cpu_available) {
@@ -221,7 +253,8 @@ class ImagePredict {
     }
 
     if (!compiled_model_opt) {
-      throw std::runtime_error("Failed to compile OpenVINO model on GPU/AUTO/CPU fallback chain.");
+      throw std::runtime_error(
+          "Failed to compile OpenVINO model on GPU/AUTO/CPU fallback chain.");
     }
 
     compiled_model_ = std::move(*compiled_model_opt);
@@ -229,25 +262,31 @@ class ImagePredict {
     std::cerr << "[OpenVINO] compiled on device: " << device_name_ << std::endl;
     infer_request_ = compiled_model_.create_infer_request();
 
-    if (compiled_model_.inputs().size() != 1 || compiled_model_.outputs().size() != 1) {
-      throw std::runtime_error("Model must have exactly one input and one output");
+    if (compiled_model_.inputs().size() != 1 ||
+        compiled_model_.outputs().size() != 1) {
+      throw std::runtime_error(
+          "Model must have exactly one input and one output");
     }
 
     input_name_ = compiled_model_.input().get_any_name();
     output_name_ = compiled_model_.output().get_any_name();
     if (output_name_.empty()) {
-      std::cerr << "[Warning] Model output has no name, will use index fallback." << std::endl;
+      std::cerr
+          << "[Warning] Model output has no name, will use index fallback."
+          << std::endl;
     }
     initialized_ = true;
   }
 
   // 后处理：兼容单类/多类输出，支持 [1,C,N] 与 [1,N,C]
-  PredictResult postprocess_(const ov::Tensor &output_tensor_, const cv::Size &original_image_size_) const {
+  PredictResult postprocess_(const ov::Tensor &output_tensor_,
+                             const cv::Size &original_image_size_) const {
     PredictResult result_{};
 
     const auto &shape = output_tensor_.get_shape();
     if (shape.size() != 3) {
-      throw std::runtime_error("Unexpected output rank. Expect 3D tensor like [1,5,N] or [1,N,5].");
+      throw std::runtime_error(
+          "Unexpected output rank. Expect 3D tensor like [1,5,N] or [1,N,5].");
     }
 
     const float *data = output_tensor_.data<const float>();
@@ -262,11 +301,14 @@ class ImagePredict {
     const int dim1 = static_cast<int>(shape[1]);
     const int dim2 = static_cast<int>(shape[2]);
     if (dim1 < Params().min_channel_dim && dim2 < Params().min_channel_dim) {
-      throw std::runtime_error("Unexpected output shape. Need channel dim >= 5.");
+      throw std::runtime_error(
+          "Unexpected output shape. Need channel dim >= 5.");
     }
     if (dim1 >= Params().min_channel_dim && dim2 >= Params().min_channel_dim) {
       // 常见检测输出中，通道维通常小于候选框数
-      channel_first = Params().prefer_smaller_channel_dim_when_ambiguous ? (dim1 <= dim2) : (dim1 > dim2);
+      channel_first = Params().prefer_smaller_channel_dim_when_ambiguous
+                          ? (dim1 <= dim2)
+                          : (dim1 > dim2);
     } else {
       channel_first = (dim1 >= Params().min_channel_dim);
     }
@@ -285,8 +327,12 @@ class ImagePredict {
       return data[det_idx * channel_count + ch_idx];
     };
 
-    const float scale_x = static_cast<float>(original_image_size_.width) / static_cast<float>(width_);
-    const float scale_y = static_cast<float>(original_image_size_.height) / static_cast<float>(height_);
+    const float scale_x = static_cast<float>(original_image_size_.width) /
+                          static_cast<float>(width_);
+    const float scale_y = static_cast<float>(original_image_size_.height) /
+                          static_cast<float>(height_);
+
+    int n = 0;
 
     for (int i = 0; i < num_detections; ++i) {
       const float cx = fetch(i, 0);
@@ -333,25 +379,34 @@ class ImagePredict {
         }
       }
 
-      if (score <= Params().score_thresh) continue;
+      // std::cout << "score = " << score << std::endl;
+      if (score <= Params().score_thresh)
+        continue;
 
-      if (w <= 0.0f || h <= 0.0f) continue;
+      n++;
+
+      if (w <= 0.0f || h <= 0.0f)
+        continue;
       const float box_ratio = w / h;
-      if (box_ratio < Params().min_ratio || box_ratio > Params().max_ratio) continue;
+      if (box_ratio < Params().min_ratio || box_ratio > Params().max_ratio)
+        continue;
 
       float x1 = (cx - w * 0.5f) * scale_x;
       float y1 = (cy - h * 0.5f) * scale_y;
       float x2 = (cx + w * 0.5f) * scale_x;
       float y2 = (cy + h * 0.5f) * scale_y;
 
-      result_.boxes.push_back({x1, y1, x2, y2, score, static_cast<float>(class_id)});
+      result_.boxes.push_back(
+          {x1, y1, x2, y2, score, static_cast<float>(class_id)});
     }
 
+    std::cout << "num = " << n << std::endl;
     result_.boxes = nms_(result_.boxes, Params().nms_iou_thresh);
     return result_;
   }
 
-  static float iou_(const std::array<float, 6> &a, const std::array<float, 6> &b) {
+  static float iou_(const std::array<float, 6> &a,
+                    const std::array<float, 6> &b) {
     const float xx1 = std::max(a[0], b[0]);
     const float yy1 = std::max(a[1], b[1]);
     const float xx2 = std::min(a[2], b[2]);
@@ -359,18 +414,23 @@ class ImagePredict {
     const float w = std::max(0.0f, xx2 - xx1);
     const float h = std::max(0.0f, yy2 - yy1);
     const float inter = w * h;
-    const float area_a = std::max(0.0f, a[2] - a[0]) * std::max(0.0f, a[3] - a[1]);
-    const float area_b = std::max(0.0f, b[2] - b[0]) * std::max(0.0f, b[3] - b[1]);
+    const float area_a =
+        std::max(0.0f, a[2] - a[0]) * std::max(0.0f, a[3] - a[1]);
+    const float area_b =
+        std::max(0.0f, b[2] - b[0]) * std::max(0.0f, b[3] - b[1]);
     const float uni = area_a + area_b - inter;
     return (uni <= 0.0f) ? 0.0f : (inter / uni);
   }
 
-  static std::vector<std::array<float, 6>> nms_(const std::vector<std::array<float, 6>> &boxes, float iou_thresh) {
-    if (boxes.empty()) return {};
+  static std::vector<std::array<float, 6>>
+  nms_(const std::vector<std::array<float, 6>> &boxes, float iou_thresh) {
+    if (boxes.empty())
+      return {};
 
     std::vector<int> order(boxes.size());
     std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&](int a, int b) { return boxes[a][4] > boxes[b][4]; });
+    std::sort(order.begin(), order.end(),
+              [&](int a, int b) { return boxes[a][4] > boxes[b][4]; });
 
     std::vector<char> removed(boxes.size(), 0);
     std::vector<std::array<float, 6>> keep;
@@ -378,26 +438,30 @@ class ImagePredict {
 
     for (size_t oi = 0; oi < order.size(); ++oi) {
       const int i = order[oi];
-      if (removed[i]) continue;
+      if (removed[i])
+        continue;
 
       keep.push_back(boxes[i]);
 
       for (size_t oj = oi + 1; oj < order.size(); ++oj) {
         const int j = order[oj];
-        if (removed[j]) continue;
-        if (static_cast<int>(boxes[i][5]) != static_cast<int>(boxes[j][5])) continue;
-        if (iou_(boxes[i], boxes[j]) > iou_thresh) removed[j] = 1;
+        if (removed[j])
+          continue;
+        if (static_cast<int>(boxes[i][5]) != static_cast<int>(boxes[j][5]))
+          continue;
+        if (iou_(boxes[i], boxes[j]) > iou_thresh)
+          removed[j] = 1;
       }
     }
 
     return keep;
   }
 
- private:
+private:
   static constexpr int kDefaultInputSide = 640;
 
-  int width_ = kDefaultInputSide;   ///< 从模型自动读取的输入宽
-  int height_ = kDefaultInputSide;  ///< 从模型自动读取的输入高
+  int width_ = kDefaultInputSide;  ///< 从模型自动读取的输入宽
+  int height_ = kDefaultInputSide; ///< 从模型自动读取的输入高
 
   std::unique_ptr<ov::Core> core_;
   ov::CompiledModel compiled_model_;
@@ -415,25 +479,28 @@ class ImagePredict {
 inline const ImagePredict::TunableParams &ImagePredict::Params() {
   // ===== 调参集中区（统一放在文件末尾）=====
   static const TunableParams p{
-      2,      // hw_threads_reserved: 预留给系统/其他线程的CPU线程数
-      1,      // streams_num: OpenVINO推理流数量（低延迟建议1）
-      0.85f,  // score_thresh: 置信度阈值
-      0.1f,   // nms_iou_thresh: NMS阈值
-      1.0f,   // max_ratio: 目标框最大长宽比（短边/长边）
-      0.5f,   // min_ratio: 目标框最小长宽比（短边/长边）
-      5,      // min_channel_dim: 认为“通道维”的最小维度
-      true    // prefer_smaller_channel_dim_when_ambiguous: 两维都>=min时是否默认较小维为通道维
+      2,    // hw_threads_reserved: 预留给系统/其他线程的CPU线程数
+      1,    // streams_num: OpenVINO推理流数量（低延迟建议1）
+      0.5f, // score_thresh: 置信度阈值
+      0.5f, // nms_iou_thresh: NMS阈值
+      1.0f, // max_ratio: 目标框最大长宽比（短边/长边）
+      0.3f, // min_ratio: 目标框最小长宽比（短边/长边）
+      5,    // min_channel_dim: 认为“通道维”的最小维度
+      true  // prefer_smaller_channel_dim_when_ambiguous:
+            // 两维都>=min时是否默认较小维为通道维
   };
   return p;
 }
 #else
 class ImagePredict {
- public:
+public:
   ImagePredict() = default;
 
   explicit ImagePredict(const std::string &) { throwNotAvailable_(); }
 
-  ImagePredict(const std::string &, const std::string &) { throwNotAvailable_(); }
+  ImagePredict(const std::string &, const std::string &) {
+    throwNotAvailable_();
+  }
 
   PredictResult run(const cv::Mat &, std::string) const {
     throwNotAvailable_();
@@ -445,13 +512,14 @@ class ImagePredict {
     return {};
   }
 
- private:
+private:
   [[noreturn]] static void throwNotAvailable_() {
     throw std::runtime_error(
-        "OpenVINO headers not found. Please install OpenVINO and configure include/library paths before using "
+        "OpenVINO headers not found. Please install OpenVINO and configure "
+        "include/library paths before using "
         "ImagePredict_OPENVINO.hpp");
   }
 };
 #endif
 
-}  // namespace ImageRecognize
+} // namespace ImageRecognize

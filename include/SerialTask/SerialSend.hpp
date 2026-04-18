@@ -56,7 +56,6 @@ inline void SendAimbotFrame(serial::Serial &serial_port, float pitch_relative_an
   aimbot_frame.YawRelativeAngle = yaw_relative_angle;
   aimbot_frame.SystemTimer = 0.0f;  ///< 时间戳
   aimbot_frame._EOF = 0xFF;         // 包尾
-  std ::cout << "send_yaw" << yaw_relative_angle << "send_pitch" << pitch_relative_angle << std::endl;
   serial_port.write(reinterpret_cast<uint8_t *>(&aimbot_frame), sizeof(AimbotFrame_SCM_t));
 }
 

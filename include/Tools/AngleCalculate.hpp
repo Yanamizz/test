@@ -1,12 +1,15 @@
 #pragma once
 #include <cmath>
 #include <chrono>
+#include <string>
+#include <utility>
 #include <opencv2/opencv.hpp>
 #include <vector>
 
 #include "KalmanFilter/KalmanFilter.hpp"
 #include "KalmanFilter/CubatureKalmanFilter.hpp"
 #include "KalmanFilter/ExtendedKalmanFilter.hpp"
+#include "KalmanFilter/OneEuroFilter.hpp"
 #include "KalmanFilter/UnscentedKalmanFilter.hpp"
 #include "Tools/CameraData.hpp"
 
@@ -15,14 +18,18 @@ inline constexpr double kPi = 3.1415926;
 namespace Tools {
 
 enum class FilterType {
+  NONE,
   KF,
   EKF,
   UKF,
   CKF,
+  ONE_EURO,
 };
 
 inline const char *ToString(FilterType type) {
   switch (type) {
+    case FilterType::NONE:
+      return "NONE";
     case FilterType::KF:
       return "KF";
     case FilterType::EKF:
@@ -31,6 +38,8 @@ inline const char *ToString(FilterType type) {
       return "UKF";
     case FilterType::CKF:
       return "CKF";
+    case FilterType::ONE_EURO:
+      return "ONE_EURO";
     default:
       return "UNKNOWN";
   }
@@ -56,6 +65,9 @@ class AngleCalculator {
     std::string s;
     s.reserve(type.size());
     for (char c : type) {
+      if (c == '_' || c == '-' || c == ' ') {
+        continue;
+      }
       if (c >= 'a' && c <= 'z') {
         s.push_back(static_cast<char>(c - 'a' + 'A'));
       } else {
@@ -63,10 +75,16 @@ class AngleCalculator {
       }
     }
 
+    if (s == "NONE" || s == "RAW" || s == "NOFILTER" || s == "OFF" || s == "DISABLE") {
+      return FilterType::NONE;
+    }
     if (s == "KF") return FilterType::KF;
     if (s == "EKF") return FilterType::EKF;
     if (s == "UKF") return FilterType::UKF;
     if (s == "CKF") return FilterType::CKF;
+    if (s == "ONEEURO" || s == "ONEEUROFILTER" || s == "1EURO" || s == "1EUROFILTER") {
+      return FilterType::ONE_EURO;
+    }
     return Params().default_filter_type;
   }
 
@@ -122,10 +140,10 @@ class AngleCalculator {
       return {static_cast<float>(absolute_yaw), static_cast<float>(absolute_pitch)};
     }
 
-    float filtered_yaw =
-        static_cast<float>(UpdateAngleByType(filter_type, absolute_yaw, dt, kf_yaw, ekf_yaw, ukf_yaw, ckf_yaw));
+    float filtered_yaw = static_cast<float>(
+        UpdateAngleByType(filter_type, absolute_yaw, dt, kf_yaw, ekf_yaw, ukf_yaw, ckf_yaw, oneeuro_yaw));
     float filtered_pitch = static_cast<float>(
-        UpdateAngleByType(filter_type, absolute_pitch, dt, kf_pitch, ekf_pitch, ukf_pitch, ckf_pitch));
+        UpdateAngleByType(filter_type, absolute_pitch, dt, kf_pitch, ekf_pitch, ukf_pitch, ckf_pitch, oneeuro_pitch));
 
     return {filtered_yaw, filtered_pitch};
   }
@@ -166,23 +184,38 @@ class AngleCalculator {
   }
 
   void ApplyTunableFilterGains() {
-    kf_yaw = KalmanFilter{Params().yaw_filter_q, Params().yaw_filter_r};
-    kf_pitch = KalmanFilter{Params().pitch_filter_q, Params().pitch_filter_r};
+    const auto &params = Params();
 
-    ekf_yaw = ExtendedKalmanFilter{Params().yaw_filter_q, Params().yaw_filter_r};
-    ekf_pitch = ExtendedKalmanFilter{Params().pitch_filter_q, Params().pitch_filter_r};
+    kf_yaw = KalmanFilter{params.yaw_filter_q, params.yaw_filter_r};
+    kf_pitch = KalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
 
-    ukf_yaw = UnscentedKalmanFilter{Params().yaw_filter_q, Params().yaw_filter_r};
-    ukf_pitch = UnscentedKalmanFilter{Params().pitch_filter_q, Params().pitch_filter_r};
+    ekf_yaw = ExtendedKalmanFilter{params.yaw_filter_q, params.yaw_filter_r};
+    ekf_pitch = ExtendedKalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
 
-    ckf_yaw = CubatureKalmanFilter{Params().yaw_filter_q, Params().yaw_filter_r};
-    ckf_pitch = CubatureKalmanFilter{Params().pitch_filter_q, Params().pitch_filter_r};
+    ukf_yaw = UnscentedKalmanFilter{params.yaw_filter_q, params.yaw_filter_r};
+    ukf_pitch = UnscentedKalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
+
+    ckf_yaw = CubatureKalmanFilter{params.yaw_filter_q, params.yaw_filter_r};
+    ckf_pitch = CubatureKalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
+
+    oneeuro_yaw.reset();
+    oneeuro_pitch.reset();
+    oneeuro_yaw.setFrequency(params.oneeuro_freq_hz);
+    oneeuro_pitch.setFrequency(params.oneeuro_freq_hz);
+    oneeuro_yaw.setMinCutoff(params.oneeuro_min_cutoff_hz);
+    oneeuro_pitch.setMinCutoff(params.oneeuro_min_cutoff_hz);
+    oneeuro_yaw.setBeta(params.oneeuro_beta);
+    oneeuro_pitch.setBeta(params.oneeuro_beta);
+    oneeuro_yaw.setDerivativeCutoff(params.oneeuro_d_cutoff_hz);
+    oneeuro_pitch.setDerivativeCutoff(params.oneeuro_d_cutoff_hz);
   }
 
-  template <typename KF, typename EKF, typename UKF, typename CKF>
+  template <typename KF, typename EKF, typename UKF, typename CKF, typename OneEuro>
   static double UpdateAngleByType(FilterType filter_type, double measurement, double dt, KF &kf, EKF &ekf, UKF &ukf,
-                                  CKF &ckf) {
+                                  CKF &ckf, OneEuro &oneeuro) {
     switch (filter_type) {
+      case FilterType::NONE:
+        return measurement;
       case FilterType::KF:
         return kf.update(measurement, dt);
       case FilterType::EKF:
@@ -191,6 +224,8 @@ class AngleCalculator {
         return ukf.update(measurement, dt);
       case FilterType::CKF:
         return ckf.update(measurement, dt);
+      case FilterType::ONE_EURO:
+        return oneeuro.filter(measurement, dt);
       default:
         return ukf.update(measurement, dt);
     }
@@ -206,6 +241,11 @@ class AngleCalculator {
     double yaw_filter_r;
     double pitch_filter_q;
     double pitch_filter_r;
+
+    double oneeuro_freq_hz;
+    double oneeuro_min_cutoff_hz;
+    double oneeuro_beta;
+    double oneeuro_d_cutoff_hz;
   };
 
   static const TuningParams &Params();
@@ -222,6 +262,9 @@ class AngleCalculator {
   CubatureKalmanFilter ckf_yaw{1.0, 0.05};
   CubatureKalmanFilter ckf_pitch{0.05, 0.75};
 
+  OneEuroFilter oneeuro_yaw;
+  OneEuroFilter oneeuro_pitch;
+
   bool filter_initialized = false;
 
   std::chrono::steady_clock::time_point last_time;
@@ -234,13 +277,18 @@ inline const AngleCalculator::TuningParams &AngleCalculator::Params() {
   static const TuningParams p{
       FilterType::CKF,  // default_filter_type: 字符串解析失败时使用的默认滤波器类型
 
-      0.05,  // default_dt_sec: 未提供帧间隔时使用的默认 dt（秒）
+      0.03,  // default_dt_sec: 未提供帧间隔时使用的默认 dt（秒）
       5.0,   // max_offset_deg: 单帧像素解算得到的最大角度偏移限幅（度）
 
-      100.0,  // yaw_filter_q: yaw 过程噪声 Q，调大以提升跟随性
-      0.001,  // yaw_filter_r: yaw 测量噪声 R，调小以减少滞后
-      10.0,   // pitch_filter_q: pitch 过程噪声 Q，调小以增强稳定性
-      0.1     // pitch_filter_r: pitch 测量噪声 R，调大以抑制抖动
+      10.0,  // yaw_filter_q: yaw 过程噪声 Q，调大以提升跟随性
+      0.01,  // yaw_filter_r: yaw 测量噪声 R，调小以减少滞后
+      0.1,   // pitch_filter_q: pitch 过程噪声 Q，调小以增强稳定性
+      1.0,   // pitch_filter_r: pitch 测量噪声 R，调大以抑制抖动
+
+      120.0,  // oneeuro_freq_hz: OneEuro 采样频率（Hz），通常作为 dt 异常时的回退值
+      2.0,    // oneeuro_min_cutoff_hz: 基础截止频率，越小越稳、越大越跟手
+      5.0,    // oneeuro_beta: 速度自适应强度，越大在快速变化时越放行
+      2.0     // oneeuro_d_cutoff_hz: 导数估计截止频率，越大越灵敏、越小越平滑
   };
   return p;
 }

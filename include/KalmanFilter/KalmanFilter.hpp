@@ -1,52 +1,72 @@
 #pragma once
 
-#include <chrono>
-#include <opencv2/opencv.hpp>
+#include "KalmanFilter/AngleKalmanModels.hpp"
+#include "kalman/ExtendedKalmanFilter.hpp"
 
 namespace Tools {
 
 class KalmanFilter {
  public:
-  KalmanFilter(double q = 0.01, double r = 0.1) {
-    Q = q;                                 // 过程噪声：相信预测模型的程度
-    R = r;                                 // 测量噪声：相信识别框的程度（增大此值可减少震荡）
-    X = (cv::Mat_<double>(2, 1) << 0, 0);  // 初始状态 [角度, 角速度]
-    P = cv::Mat::eye(2, 2, CV_64F);        // 初始协方差
+  KalmanFilter(double q = 0.01, double r = 0.1)
+      : q_(SanitizePositive_(q, kDefaultProcessNoise)),
+        r_(SanitizePositive_(r, kDefaultMeasurementNoise)),
+        system_model_(q_, kalman_detail::kDefaultAngleDtSec),
+        measurement_model_(r_) {
+    Reset_(0.0, 0.0);
   }
 
-  // 输入观测值（绝对角度）和时间间隔 dt
   double update(double measurement, double dt) {
-    // 1. 预测 (Predict)
-    cv::Mat F = (cv::Mat_<double>(2, 2) << 1, dt, 0, 1);  // 状态转移矩阵
-    X = F * X;
-    P = F * P * F.t() + Q * cv::Mat::eye(2, 2, CV_64F);
+    system_model_.setDt(dt);
 
-    // 2. 更新 (Update)
-    cv::Mat H = (cv::Mat_<double>(1, 2) << 1, 0);  // 观测矩阵：我们只能观测到角度
-    cv::Mat S = H * P * H.t() + R;
-    cv::Mat K = P * H.t() * S.inv();  // 卡尔曼增益
+    kalman_detail::AngleMeasurement z;
+    z(0) = measurement;
 
-    cv::Mat Z = (cv::Mat_<double>(1, 1) << measurement);
-    X = X + K * (Z - H * X);
-    P = (cv::Mat::eye(2, 2, CV_64F) - K * H) * P;
+    filter_.predict(system_model_);
+    filter_.update(measurement_model_, z);
 
-    return X.at<double>(0, 0);  // 返回滤波后的角度
+    return filter_.getState()(0);
   }
 
-  double getVelocity() const { return X.at<double>(1, 0); }  // 获取估算的角速度
+  double getVelocity() const { return filter_.getState()(1); }
 
-  void setVelocity(double velocity) { X.at<double>(1, 0) = velocity; }
-
-  double getAngle() const { return X.at<double>(0, 0); }
-
-  void reset(double initial_angle = 0.0, double initial_velocity = 0.0) {
-    X = (cv::Mat_<double>(2, 1) << initial_angle, initial_velocity);
-    P = cv::Mat::eye(2, 2, CV_64F);
+  void setVelocity(double velocity) {
+    kalman_detail::AngleState state = filter_.getState();
+    state(1) = velocity;
+    filter_.init(state);
   }
+
+  double getAngle() const { return filter_.getState()(0); }
+
+  void reset(double initial_angle = 0.0, double initial_velocity = 0.0) { Reset_(initial_angle, initial_velocity); }
 
  private:
-  cv::Mat X, P;
-  double Q, R;
+  static double SanitizePositive_(double value, double fallback) { return value > 0.0 ? value : fallback; }
+
+  void Reset_(double initial_angle, double initial_velocity) {
+    filter_ = Filter{};
+    ApplyNoise_();
+
+    kalman_detail::AngleState state;
+    state(0) = initial_angle;
+    state(1) = initial_velocity;
+    filter_.init(state);
+  }
+
+  void ApplyNoise_() {
+    system_model_.setProcessNoise(q_);
+    measurement_model_.setMeasurementNoise(r_);
+  }
+
+  static constexpr double kDefaultProcessNoise = 0.01;
+  static constexpr double kDefaultMeasurementNoise = 0.1;
+
+  using Filter = Kalman::ExtendedKalmanFilter<kalman_detail::AngleState>;
+
+  double q_;
+  double r_;
+  Filter filter_;
+  kalman_detail::AngleSystemModel system_model_;
+  kalman_detail::AngleMeasurementModel measurement_model_;
 };
 
 }  // namespace Tools

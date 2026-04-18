@@ -30,6 +30,7 @@ class TargetMotionPredictor {
   bool HasState() const { return initialized_; }
 
   MotionPredictionResult ObserveAndPredict(const std::array<float, 6> &box, double dt, const cv::Size &frame_size) {
+    const auto &params = Params();
     const cv::Point2f observed_center = BoxCenter_(box);
     const cv::Size2f observed_size = BoxSize_(box);
     const float safe_dt = SafeDt_(dt);
@@ -45,13 +46,13 @@ class TargetMotionPredictor {
     }
 
     const double elapsed =
-        std::max(elapsed_since_observation_sec_ + static_cast<double>(safe_dt), static_cast<double>(kMinDtSec));
+        std::max(elapsed_since_observation_sec_ + static_cast<double>(safe_dt), static_cast<double>(params.min_dt_sec));
     const cv::Point2f measured_velocity{(observed_center.x - observed_center_.x) / static_cast<float>(elapsed),
                                         (observed_center.y - observed_center_.y) / static_cast<float>(elapsed)};
     smoothed_velocity_.x =
-        kVelocitySmoothing * smoothed_velocity_.x + (1.0f - kVelocitySmoothing) * measured_velocity.x;
+        params.velocity_smoothing * smoothed_velocity_.x + (1.0f - params.velocity_smoothing) * measured_velocity.x;
     smoothed_velocity_.y =
-        kVelocitySmoothing * smoothed_velocity_.y + (1.0f - kVelocitySmoothing) * measured_velocity.y;
+        params.velocity_smoothing * smoothed_velocity_.y + (1.0f - params.velocity_smoothing) * measured_velocity.y;
 
     observed_center_ = observed_center;
     observed_size_ = observed_size;
@@ -76,10 +77,14 @@ class TargetMotionPredictor {
   }
 
  private:
-  static constexpr float kVelocitySmoothing = 0.60f;
-  static constexpr float kPredictionHorizonScale = 1.0f;
-  static constexpr float kMaxPredictionHorizonSec = 0.05f;
-  static constexpr float kMinDtSec = 1e-3f;
+  struct TuningParams {
+    float velocity_smoothing;
+    float prediction_horizon_scale;
+    float max_prediction_horizon_sec;
+    float min_dt_sec;
+  };
+
+  static const TuningParams &Params();
 
   static cv::Point2f BoxCenter_(const std::array<float, 6> &box) {
     return {0.5f * (box[0] + box[2]), 0.5f * (box[1] + box[3])};
@@ -89,7 +94,7 @@ class TargetMotionPredictor {
     return {std::max(1.0f, box[2] - box[0]), std::max(1.0f, box[3] - box[1])};
   }
 
-  static float SafeDt_(double dt) { return static_cast<float>(std::max(dt, static_cast<double>(kMinDtSec))); }
+  static float SafeDt_(double dt) { return static_cast<float>(std::max(dt, static_cast<double>(Params().min_dt_sec))); }
 
   MotionPredictionResult MakePrediction_(const std::array<float, 6> &base_box, const cv::Point2f &base_center,
                                          const cv::Size2f &size, double dt, const cv::Size &frame_size,
@@ -101,8 +106,9 @@ class TargetMotionPredictor {
 
     cv::Point2f center = base_center;
     if (use_velocity) {
+      const auto &params = Params();
       const float safe_dt = SafeDt_(dt);
-      const float horizon = std::min(safe_dt * kPredictionHorizonScale, kMaxPredictionHorizonSec);
+      const float horizon = std::min(safe_dt * params.prediction_horizon_scale, params.max_prediction_horizon_sec);
       center.x += smoothed_velocity_.x * horizon;
       center.y += smoothed_velocity_.y * horizon;
     }
@@ -154,5 +160,16 @@ class TargetMotionPredictor {
   std::array<float, 6> estimated_box_{};
   double elapsed_since_observation_sec_ = 0.0;
 };
+
+inline const TargetMotionPredictor::TuningParams &TargetMotionPredictor::Params() {
+  // ===== 调参集中区（统一放在文件末尾）=====
+  static const TuningParams p{
+      0.40f,  // velocity_smoothing: 速度平滑系数，越大越稳、越小越跟手
+      1.0f,   // prediction_horizon_scale: 预测视界倍率，越大越提前、越小越保守
+      0.03f,  // max_prediction_horizon_sec: 最长预测视界，避免过度外推
+      0.02f   // min_dt_sec: dt 下限，防止除零和瞬时速度尖峰
+  };
+  return p;
+}
 
 }  // namespace ImageRecognize
