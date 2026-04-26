@@ -74,14 +74,16 @@ foreach(src ${SRCS})
         target_link_libraries(${name_we}
             gxiapi
         )
+    endif()
 
+    if(name_we STREQUAL "ImagePredict" OR name_we STREQUAL "OpenvinoTest")
         if(OpenVINO_FOUND)
             target_link_libraries(${name_we}
                 openvino::runtime
             )
-            message(STATUS "ImagePredict: OpenVINO enabled via ${OpenVINO_DIR}")
+            message(STATUS "${name_we}: OpenVINO enabled via ${OpenVINO_DIR}")
         else()
-            message(WARNING "ImagePredict: OpenVINO package not found. It will compile fallback path that throws at runtime.")
+            message(WARNING "${name_we}: OpenVINO package not found. It will compile fallback path that throws at runtime.")
         endif()
     endif()
 endforeach()

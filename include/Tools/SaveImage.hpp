@@ -18,18 +18,18 @@ class SaveImageOnNoTarget {
     PrepareRunFolder();
   }
 
-  // 每帧调用一次：当 detected=false 时按间隔保存图像
-  void Update(const cv::Mat &frame, bool detected) {
+  // 每帧调用一次：当 should_save=true 时按间隔保存图像
+  void Update(const cv::Mat &frame, bool should_save) {
     if (frame.empty()) return;
     if (run_folder_.empty()) return;
 
-    if (detected) {
-      no_target_frame_count_ = 0;
+    if (!should_save) {
+      triggered_frame_count_ = 0;
       return;
     }
 
-    ++no_target_frame_count_;
-    if (no_target_frame_count_ % save_interval_frames_ != 0) return;
+    ++triggered_frame_count_;
+    if (triggered_frame_count_ % save_interval_frames_ != 0) return;
 
     const std::string filename = BuildImageName();
     const std::filesystem::path file_path = run_folder_ / filename;
@@ -47,7 +47,7 @@ class SaveImageOnNoTarget {
 
  private:
   int save_interval_frames_;
-  int no_target_frame_count_ = 0;
+  int triggered_frame_count_ = 0;
   int saved_index_ = 1;
   std::filesystem::path base_dir_;
   std::filesystem::path run_folder_;

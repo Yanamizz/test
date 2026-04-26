@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -28,10 +29,17 @@
 #include "Tools/ScanController.hpp"
 
 namespace {
+enum class TargetCampMode {
+  RedAndPurple,
+  BlueAndPurple,
+  All,
+};
+
 struct RuntimeParams {
   std::string model_path;
   std::string openvino_device_name;
   std::string angle_filter_type;
+  std::string target_camp_mode;
 
   int capture_timeout_ms;
   int capture_empty_sleep_ms;
@@ -53,12 +61,21 @@ struct RuntimeParams {
   bool enable_display;
   bool enable_motion_prediction;
   bool enable_scan_mode;
+  int scan_origin_hold_ms;
+  double max_infer_fps;
   double scan_send_hz;
   int display_every_n_frames;
   int gui_poll_every_n_frames;
 };
 
 const RuntimeParams &Params();
+
+TargetCampMode ParseTargetCampMode(const std::string &mode);
+const char *ToString(TargetCampMode mode);
+bool ShouldTrackClassId(int class_id, TargetCampMode mode);
+std::vector<std::array<float, 6>>
+FilterTrackBoxes(const std::vector<std::array<float, 6>> &boxes,
+                 TargetCampMode mode);
 } // namespace
 
 std::atomic<bool> g_running(true); // 全局运行标志
@@ -265,17 +282,20 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   static ImageRecognize::TargetMotionPredictor target_motion_predictor;
   static const Tools::FilterType filter_type =
       Tools::AngleCalculator::ParseFilterType(Params().angle_filter_type);
+  static const TargetCampMode target_camp_mode =
+      ParseTargetCampMode(Params().target_camp_mode);
   const bool enable_motion_prediction = Params().enable_motion_prediction;
 
   std::cout << "[角度滤波] 类型: " << Tools::ToString(filter_type) << std::endl;
   std::cout << "[运动预测] 启用: "
             << (enable_motion_prediction ? "true" : "false") << std::endl;
+  std::cout << "[跟踪阵营] 模式: " << ToString(target_camp_mode) << std::endl;
   std::cout << "[扫描模式] 启用: "
             << (Params().enable_scan_mode ? "true" : "false") << std::endl;
   std::cout << "[扫描模式] 发送频率: " << Params().scan_send_hz << " Hz"
             << std::endl;
 
-  static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
+  // static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
   std::chrono::steady_clock::time_point prev_frame_ts{};
   bool has_prev_frame_ts = false;
   LatencyStats latency_total;
@@ -284,6 +304,20 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   const auto scan_trigger_delay = std::chrono::milliseconds(500);
   std::chrono::steady_clock::time_point target_lost_since{};
   bool target_lost_since_initialized = false;
+  bool infer_inflight = false;
+  bool has_last_submitted_frame_ts = false;
+  cv::Mat inflight_frame;
+  cv::Mat inflight_raw_frame;
+  std::chrono::steady_clock::time_point inflight_frame_ts{};
+  std::chrono::steady_clock::time_point inflight_infer_start{};
+  const double max_infer_fps = Params().max_infer_fps;
+  const auto infer_submit_interval =
+      max_infer_fps > 0.0
+          ? std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(1.0 / max_infer_fps))
+          : std::chrono::steady_clock::duration::zero();
+  std::chrono::steady_clock::time_point next_infer_submit_time =
+      std::chrono::steady_clock::now();
 
   auto resetPendingSend = [&]() {
     g_send_aimbot_state.store(0x00, std::memory_order_release);
@@ -291,39 +325,110 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     g_has_pending_send.store(false, std::memory_order_release);
   };
 
-  while (g_running) {
-    const auto t_loop_start = std::chrono::steady_clock::now();
-    cv::Mat frame;
-    std::chrono::steady_clock::time_point frame_ts{};
-    // 等待最新帧（双buffer无锁读取）
-    {
-      std::unique_lock<std::mutex> lk(g_frame_mutex);
-      g_frame_cv.wait(lk, [] {
-        return g_read_idx.load(std::memory_order_acquire) >= 0 || !g_running;
-      });
-      if (!g_running)
-        break;
-
-      int read_idx = g_read_idx.load(std::memory_order_acquire);
-      if (read_idx >= 0) {
-        frame = g_frame_buffers[read_idx].frame; // 直接引用，无clone
-        frame_ts = g_frame_buffers[read_idx].ts;
+  auto snapshotLatestFrame =
+      [&](cv::Mat *frame, cv::Mat *raw_frame,
+          std::chrono::steady_clock::time_point *frame_ts) -> bool {
+    std::unique_lock<std::mutex> lk(g_frame_mutex);
+    const auto has_new_frame = [&]() {
+      if (g_read_idx.load(std::memory_order_acquire) < 0) {
+        return false;
       }
+      const int read_idx = g_read_idx.load(std::memory_order_acquire);
+      if (read_idx < 0) {
+        return false;
+      }
+      if (!has_last_submitted_frame_ts) {
+        return true;
+      }
+      return g_frame_buffers[read_idx].ts != inflight_frame_ts;
+    };
+
+    g_frame_cv.wait(lk, [&]() { return !g_running || has_new_frame(); });
+    if (!g_running) {
+      return false;
     }
 
-    if (frame.empty())
+    const int read_idx = g_read_idx.load(std::memory_order_acquire);
+    if (read_idx < 0) {
+      return false;
+    }
+
+    *frame = g_frame_buffers[read_idx].frame;
+    *frame_ts = g_frame_buffers[read_idx].ts;
+    if (frame->empty()) {
+      return false;
+    }
+    *raw_frame = frame->clone();
+    return true;
+  };
+
+  while (g_running) {
+    if (!infer_inflight) {
+      if (infer_submit_interval !=
+          std::chrono::steady_clock::duration::zero()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_infer_submit_time) {
+          std::this_thread::sleep_until(next_infer_submit_time);
+          if (!g_running) {
+            break;
+          }
+        }
+      }
+
+      cv::Mat next_frame;
+      cv::Mat next_raw_frame;
+      std::chrono::steady_clock::time_point next_frame_ts{};
+      if (!snapshotLatestFrame(&next_frame, &next_raw_frame, &next_frame_ts)) {
+        continue;
+      }
+
+      try {
+        inflight_infer_start = std::chrono::steady_clock::now();
+        predictor.startAsync(next_frame);
+        inflight_frame = std::move(next_frame);
+        inflight_raw_frame = std::move(next_raw_frame);
+        inflight_frame_ts = next_frame_ts;
+        infer_inflight = true;
+        has_last_submitted_frame_ts = true;
+        if (infer_submit_interval !=
+            std::chrono::steady_clock::duration::zero()) {
+          next_infer_submit_time =
+              std::chrono::steady_clock::now() + infer_submit_interval;
+        }
+      } catch (const std::exception &e) {
+        std::cerr << "ImagePredictThread async submit exception: " << e.what()
+                  << std::endl;
+      }
       continue;
+    }
+
+    while (g_running && !predictor.isAsyncReady()) {
+      std::unique_lock<std::mutex> lk(g_frame_mutex);
+      g_frame_cv.wait_for(lk, std::chrono::milliseconds(1),
+                          [] { return !g_running; });
+    }
+    if (!g_running) {
+      break;
+    }
+
+    const auto t_loop_start = std::chrono::steady_clock::now();
+    cv::Mat frame = inflight_frame.clone();
+    cv::Mat raw_frame = inflight_raw_frame;
+    const auto frame_ts = inflight_frame_ts;
+
     ImageRecognize::PredictResult result;
     SerialTask::EulerAngles matched_imu{};
     bool has_matched_imu = false;
     double frame_dt = 0.0;
     bool has_realtime_frame_dt = false;
     try {
-      const auto t_infer_start = std::chrono::steady_clock::now();
-      result = predictor.run(frame);
+      result = predictor.getAsyncResult();
       const auto t_infer_end = std::chrono::steady_clock::now();
-      latency_total.Add(latency_total.infer_ns, t_infer_start, t_infer_end);
-      latency_window.Add(latency_window.infer_ns, t_infer_start, t_infer_end);
+      infer_inflight = false;
+      latency_total.Add(latency_total.infer_ns, inflight_infer_start,
+                        t_infer_end);
+      latency_window.Add(latency_window.infer_ns, inflight_infer_start,
+                         t_infer_end);
 
       if (has_prev_frame_ts) {
         frame_dt =
@@ -382,14 +487,16 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       latency_window.Add(latency_window.imu_match_ns, t_imu_match_start,
                          t_imu_match_end);
     } catch (const std::exception &e) {
+      infer_inflight = false;
       std::cerr << "ImagePredictThread exception: " << e.what() << std::endl;
     }
 
     cv::Point2d offset_angles;
     std::array<float, 6> tracked_box{};
     bool has_tracked_box = false;
+    const auto track_boxes = FilterTrackBoxes(result.boxes, target_camp_mode);
     const auto t_select_start = std::chrono::steady_clock::now();
-    const auto track_result = target_tracker.Update(result.boxes);
+    const auto track_result = target_tracker.Update(track_boxes);
     const auto t_select_end = std::chrono::steady_clock::now();
     const bool track_alive =
         track_result.has_box || target_tracker.HasRecentLock();
@@ -583,8 +690,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       }
     }
 
-    // 无目标时，每隔若干帧保存图像到本次运行目录
-    no_target_saver.Update(frame, track_result.has_box);
+    // 当检测框数量不是 1 个时，按间隔保存画框前原图
+    // no_target_saver.Update(raw_frame, result.boxes.size() != 1);
 
     // 处理 GUI 事件并允许按键退出
     if (do_gui_poll && ImageRecognize::ImageShow::WaitForExit()) {
@@ -659,9 +766,13 @@ void IMUSendThread(serial::Serial &port,
   const double scan_send_hz = std::max(1.0, Params().scan_send_hz);
   const auto scan_send_interval = std::chrono::duration_cast<Clock::duration>(
       std::chrono::duration<double>(1.0 / scan_send_hz));
+  const auto scan_origin_hold_duration =
+      std::chrono::milliseconds(std::max(0, Params().scan_origin_hold_ms));
 
   auto next_scan_send_time = Clock::now();
   bool last_scan_mode = false;
+  bool scan_waiting_at_origin = false;
+  Clock::time_point scan_origin_deadline = Clock::now();
 
   while (g_running) {
     const bool scan_mode = g_send_is_scan.load(std::memory_order_acquire);
@@ -677,6 +788,7 @@ void IMUSendThread(serial::Serial &port,
         g_send_is_scan.store(false, std::memory_order_release);
         g_has_pending_send.store(false, std::memory_order_release);
         last_scan_mode = false;
+        scan_waiting_at_origin = false;
         next_scan_send_time = Clock::now();
         std::this_thread::sleep_for(
             std::chrono::milliseconds(Params().imu_send_idle_sleep_ms));
@@ -687,6 +799,12 @@ void IMUSendThread(serial::Serial &port,
       if (!last_scan_mode) {
         next_scan_send_time = now;
         last_scan_mode = true;
+        scan_waiting_at_origin = true;
+        scan_origin_deadline = now + scan_origin_hold_duration;
+        {
+          std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
+          scan_controller.Reset();
+        }
       }
 
       if (now < next_scan_send_time) {
@@ -713,8 +831,13 @@ void IMUSendThread(serial::Serial &port,
       Tools::ScanCommand scan_command{};
       {
         std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
-        scan_command =
-            scan_controller.BuildCommand(latest_imu.yaw, latest_imu.pitch);
+        if (scan_waiting_at_origin) {
+          scan_command = scan_controller.BuildOriginCommand(latest_imu.yaw,
+                                                            latest_imu.pitch);
+        } else {
+          scan_command =
+              scan_controller.BuildCommand(latest_imu.yaw, latest_imu.pitch);
+        }
       }
 
       g_send_abs_yaw.store(scan_command.absolute_yaw_deg,
@@ -732,19 +855,28 @@ void IMUSendThread(serial::Serial &port,
       SerialTask::SerialSend(port, scan_command.absolute_pitch_deg,
                              scan_command.absolute_yaw_deg,
                              scan_command.aimbot_state);
+      if (scan_waiting_at_origin && now >= scan_origin_deadline) {
+        scan_waiting_at_origin = false;
+        {
+          std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
+          scan_controller.Reset();
+        }
+      }
       next_scan_send_time = now + scan_send_interval;
       continue;
     }
 
     last_scan_mode = false;
+    scan_waiting_at_origin = false;
     if (g_has_pending_send.load(std::memory_order_acquire)) {
       float pitch = g_send_abs_pitch.load(std::memory_order_acquire);
       float yaw = g_send_abs_yaw.load(std::memory_order_acquire);
+      float offset_yaw = g_send_offset_yaw.load(std::memory_order_acquire);
+      float offset_pitch = g_send_offset_pitch.load(std::memory_order_acquire);
       const uint8_t aimbot_state =
           g_send_aimbot_state.load(std::memory_order_acquire);
-      // std::cout << std::fixed << std::setprecision(2) << "[" << mode_text <<
-      // "] , offset_yaw: " << offset_yaw
-      // << "°, offset_pitch: " << offset_pitch << "°" << std::endl;
+      std::cout << std::fixed << " offset_yaw: " << offset_yaw
+                << "°, offset_pitch: " << offset_pitch << "°" << std::endl;
       SerialTask::SerialSend(port, pitch, yaw, aimbot_state);
       g_has_pending_send.store(false, std::memory_order_release);
     } else {
@@ -755,13 +887,76 @@ void IMUSendThread(serial::Serial &port,
 }
 
 namespace {
+TargetCampMode ParseTargetCampMode(const std::string &mode) {
+  std::string normalized = mode;
+  std::transform(
+      normalized.begin(), normalized.end(), normalized.begin(),
+      [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+  if (normalized == "RED" || normalized == "RED_AND_PURPLE") {
+    return TargetCampMode::RedAndPurple;
+  }
+  if (normalized == "BLUE" || normalized == "BLUE_AND_PURPLE") {
+    return TargetCampMode::BlueAndPurple;
+  }
+  if (normalized == "ALL") {
+    return TargetCampMode::All;
+  }
+  return TargetCampMode::RedAndPurple;
+}
+
+const char *ToString(TargetCampMode mode) {
+  switch (mode) {
+  case TargetCampMode::RedAndPurple:
+    return "RED_AND_PURPLE";
+  case TargetCampMode::BlueAndPurple:
+    return "BLUE_AND_PURPLE";
+  case TargetCampMode::All:
+    return "ALL";
+  default:
+    return "UNKNOWN";
+  }
+}
+
+bool ShouldTrackClassId(int class_id, TargetCampMode mode) {
+  if (class_id == 2) {
+    return true;
+  }
+
+  switch (mode) {
+  case TargetCampMode::RedAndPurple:
+    return class_id == 0;
+  case TargetCampMode::BlueAndPurple:
+    return class_id == 1;
+  case TargetCampMode::All:
+    return class_id == 0 || class_id == 1 || class_id == 2;
+  default:
+    return false;
+  }
+}
+
+std::vector<std::array<float, 6>>
+FilterTrackBoxes(const std::vector<std::array<float, 6>> &boxes,
+                 TargetCampMode mode) {
+  std::vector<std::array<float, 6>> filtered;
+  filtered.reserve(boxes.size());
+  for (const auto &box : boxes) {
+    const int class_id = static_cast<int>(box[5]);
+    if (ShouldTrackClassId(class_id, mode)) {
+      filtered.push_back(box);
+    }
+  }
+  return filtered;
+}
+
 const RuntimeParams &Params() {
   // ===== 调参集中区（统一放在文件末尾）=====
   static const RuntimeParams p{
-      "/home/nuc/antidrone/src/model/antidrone_v8n.xml", // model_path: 模型路径
+      "/home/nuc/antidrone/src/model/antidrone_26n.xml", // model_path:
+                                                         // 模型路径
       "CPU", // openvino_device_name: 低延迟优先，优先使用核显推理
       "ONE_EURO", // angle_filter_type:
                   // 角度滤波类型（NONE/KF/EKF/UKF/CKF/ONE_EURO）
+      "RED",      // target_camp_mode: RED/BLUE/ALL；purple 始终允许跟踪
 
       1000, // capture_timeout_ms: 相机取帧超时（毫秒）
       5,    // capture_empty_sleep_ms: 空帧时休眠（毫秒）
@@ -780,9 +975,12 @@ const RuntimeParams &Params() {
       false, // enable_latency_profile: 是否启用阶段打点统计
       100, // latency_print_interval_frames: 每多少帧打印一次窗口统计
 
-      true, // enable_display: 是否启用显示窗口（关闭后 render 只保留极小开销）
+      false, // enable_display: 是否启用显示窗口（关闭后 render 只保留极小开销）
       false, // enable_motion_prediction: 测试时关闭运动预测，直接用检测框
       true, // enable_scan_mode: 调试跟踪振荡时可关闭 scan，仅保留 track 下发
+
+      1000, // scan_origin_hold_ms: 扫描模式下保持原点的时间（毫秒）
+      80.0, // max_infer_fps: 推理线程最大提交帧率，<=0 表示不限制
       100.0, // scan_send_hz: 扫描模式下的发送频率（Hz）
       2, // display_every_n_frames: 每N帧显示1帧（2可明显降低render延迟）
       1 // gui_poll_every_n_frames: 每N帧轮询一次按键退出

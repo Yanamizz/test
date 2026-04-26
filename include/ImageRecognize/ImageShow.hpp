@@ -29,16 +29,18 @@ class ImageShow {
   static void ShowNow(cv::Mat &frame, const ImageRecognize::DataProcessResult &result, double fps) {
     // 绘制结果
     for (const auto &box : result.boxes) {
-      cv::rectangle(frame, {static_cast<int>(box[0]), static_cast<int>(box[1])},
-                    {static_cast<int>(box[2]), static_cast<int>(box[3])}, {0, 255, 0}, 2);
+      const cv::Point pt1{static_cast<int>(box[0]), static_cast<int>(box[1])};
+      const cv::Point pt2{static_cast<int>(box[2]), static_cast<int>(box[3])};
+
+      cv::rectangle(frame, pt1, pt2, {0, 255, 0}, 2);
       const int class_id = static_cast<int>(box[5]);
       const std::string label = std::string(ClassName(class_id)) + " " + cv::format("%.2f", box[4]);
-      cv::putText(frame, label, {static_cast<int>(box[0]), static_cast<int>(box[1]) - 6}, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+      cv::putText(frame, label, {pt1.x, pt1.y - 6}, cv::FONT_HERSHEY_SIMPLEX, 0.5,
                   {0, 255, 0}, 1);
 
       // 计算并绘制中心点：((x1+x2)/2, (y1+y2)/2)
-      int cx = static_cast<int>((box[0] + box[2]) * 0.5f);
-      int cy = static_cast<int>((box[1] + box[3]) * 0.5f);
+      int cx = static_cast<int>((pt1.x + pt2.x) * 0.5f);
+      int cy = static_cast<int>((pt1.y + pt2.y) * 0.5f);
       cv::circle(frame, {cx, cy}, 4, {0, 0, 255}, -1);
     }
     cv::putText(frame, "FPS: " + std::to_string(fps), {10, 30}, cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 0}, 2);
@@ -46,7 +48,7 @@ class ImageShow {
     static bool window_initialized = false;
     if (!window_initialized) {
       cv::namedWindow("Detection Result", cv::WINDOW_NORMAL);
-      cv::resizeWindow("Detection Result", kWindowSide, kWindowSide);
+      cv::resizeWindow("Detection Result", kWindowWidth, kWindowHeight);
       window_initialized = true;
     }
     cv::imshow("Detection Result", frame);
@@ -81,13 +83,14 @@ class ImageShow {
   }
 
  private:
-  static void DrawCenterMarker(cv::Mat &frame, double cx, double cy, const cv::Scalar &color, const char *label) {
+ static void DrawCenterMarker(cv::Mat &frame, double cx, double cy, const cv::Scalar &color, const char *label) {
     const cv::Point center{static_cast<int>(cx), static_cast<int>(cy)};
     cv::circle(frame, center, 5, color, -1);
     cv::putText(frame, label, {center.x + 6, center.y - 6}, cv::FONT_HERSHEY_SIMPLEX, 0.45, color, 1);
   }
 
-  static constexpr int kWindowSide = 640;  // 检测窗口默认边长（像素）
+  static constexpr int kWindowWidth = 960;
+  static constexpr int kWindowHeight = 600;
 };
 
 inline void DrawTrackedBox(cv::Mat &frame, const std::array<float, 6> &box) {

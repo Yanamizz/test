@@ -6,7 +6,7 @@
  * - 复用 `ImagePreprocess` 执行图像预处理（NCHW float）。
  * - 使用 OpenVINO `ov::Core` + `CompiledModel` + `InferRequest` 执行推理。
  * - 在本文件内完成与 `OutputDataProcess` 等价的后处理，返回同一
- * `PredictResult`。
+ *   `PredictResult`。
  */
 
 #pragma once
@@ -18,10 +18,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -42,118 +45,206 @@ class ImagePredict {
 public:
   ImagePredict() = default;
 
-  // 与 ONNX 版本保持同名构造：默认使用 AUTO 设备（可自动选 GPU/CPU）
   explicit ImagePredict(const std::string &model_path) {
-    init(model_path, "AUTO");
+    init_(model_path, "AUTO");
   }
 
-  // 可选构造：允许显式指定设备，如 "CPU" / "GPU" / "AUTO"
   ImagePredict(const std::string &model_path, const std::string &device_name) {
-    init(model_path, device_name);
+    init_(model_path, device_name);
   }
 
-  // 与 ONNX 版本保持一致：传图 + 模型路径（每次临时加载）
   PredictResult run(const cv::Mat &origin_image_,
                     std::string model_path_) const {
     ImagePredict tmp_predictor(model_path_, device_name_);
     return tmp_predictor.run(origin_image_);
   }
 
-  // 复用已加载模型进行推理（推荐实时场景）
   PredictResult run(const cv::Mat &origin_image_) {
     if (!initialized_) {
       throw std::runtime_error("OpenVINO session not initialized. Use "
                                "ImagePredict(model_path) constructor.");
     }
 
-    auto pre_image_ = preprocessor_.run(origin_image_);
-
+    const auto preprocessed = preprocessor_.run(origin_image_);
     ov::Tensor input_tensor(
         ov::element::f32,
         {1, 3, static_cast<size_t>(height_), static_cast<size_t>(width_)},
-        pre_image_.data.data());
-    infer_request_.set_tensor(input_name_, input_tensor);
+        const_cast<float *>(preprocessed.data.data()));
+    infer_request_.set_input_tensor(input_tensor);
     infer_request_.infer();
 
-    ov::Tensor output_tensor;
-    if (output_name_.empty()) {
-      std::cerr << "[Warning] output_name_ is empty, fallback to index 0."
-                << std::endl;
-      output_tensor = infer_request_.get_output_tensor(0);
-    } else {
-      output_tensor = infer_request_.get_tensor(output_name_);
+    const ov::Tensor output_tensor = infer_request_.get_output_tensor(0);
+    return postprocess_(output_tensor, origin_image_.size(), preprocessed);
+  }
+
+  void startAsync(const cv::Mat &origin_image_) {
+    if (!initialized_) {
+      throw std::runtime_error("OpenVINO session not initialized. Use "
+                               "ImagePredict(model_path) constructor.");
     }
-    return postprocess_(output_tensor, origin_image_.size());
+    if (async_inflight_) {
+      throw std::runtime_error("Async inference already in flight.");
+    }
+
+    async_preprocessed_ = preprocessor_.run(origin_image_);
+    async_original_size_ = origin_image_.size();
+    ov::Tensor input_tensor(
+        ov::element::f32,
+        {1, 3, static_cast<size_t>(height_), static_cast<size_t>(width_)},
+        async_preprocessed_.data.data());
+    infer_request_.set_input_tensor(input_tensor);
+    infer_request_.start_async();
+    async_inflight_ = true;
+  }
+
+  bool isAsyncReady() {
+    if (!async_inflight_) {
+      return false;
+    }
+    return infer_request_.wait_for(std::chrono::milliseconds(0));
+  }
+
+  PredictResult getAsyncResult() {
+    if (!async_inflight_) {
+      throw std::runtime_error("No async inference result is pending.");
+    }
+    infer_request_.wait();
+    const ov::Tensor output_tensor = infer_request_.get_output_tensor(0);
+    async_inflight_ = false;
+    return postprocess_(output_tensor, async_original_size_,
+                        async_preprocessed_);
   }
 
 private:
+  enum class OutputLayoutKind {
+    Unknown,
+    YoloRawCxCyWhCls,
+    NmsBoxes,
+  };
+
   struct TunableParams {
     int hw_threads_reserved;
     int streams_num;
     float score_thresh;
-    float nms_iou_thresh;
-    float max_ratio;
-    float min_ratio;
     int min_channel_dim;
-    bool prefer_smaller_channel_dim_when_ambiguous;
+    float merge_iou_thresh;
+    float suppress_iou_thresh;
+    std::size_t max_output_boxes;
   };
+
+  struct OutputSpec {
+    OutputLayoutKind layout = OutputLayoutKind::Unknown;
+    bool channel_first = false;
+    std::size_t rank = 0;
+    std::vector<std::int64_t> dims;
+  };
+
+  static constexpr int kDefaultInputSide = 640;
 
   static const TunableParams &Params();
 
-  void init(const std::string &model_path, const std::string &device_name) {
+  void init_(const std::string &model_path, const std::string &device_name) {
     if (model_path.empty()) {
       throw std::runtime_error("Model path is empty.");
     }
 
     namespace fs = std::filesystem;
-    fs::path input_path(model_path);
-    fs::path abs_input_path = fs::absolute(input_path);
+    const fs::path abs_input_path = fs::absolute(fs::path(model_path));
     model_path_ = abs_input_path.string();
     device_name_ = device_name.empty() ? std::string("AUTO") : device_name;
-
     core_ = std::make_unique<ov::Core>();
-    std::shared_ptr<ov::Model> model;
+
+    auto model = loadModel_(abs_input_path);
+    validateModelIo_(*model);
+    resolveInputSpec_(*model);
+    preprocessor_ = ImageRecognize::ImagePreprocess(cv::Size(width_, height_));
+    compiled_model_ = compileModel_(model);
+    createInferRequest_();
+    resolveOutputSpec_(*model);
+
+    std::cerr << "[OpenVINO] model=" << model_path_
+              << " device=" << device_name_ << " input=" << width_ << "x"
+              << height_ << " output=" << describeOutputSpec_(output_spec_)
+              << std::endl;
+    initialized_ = true;
+  }
+
+  std::shared_ptr<ov::Model>
+  loadModel_(const std::filesystem::path &model_path) {
+    namespace fs = std::filesystem;
+    if (!fs::exists(model_path)) {
+      throw std::runtime_error("Model file not found: " + model_path.string());
+    }
 
     const bool is_ir_xml =
-        abs_input_path.has_extension() && abs_input_path.extension() == ".xml";
-    if (is_ir_xml) {
-      fs::path bin_path = abs_input_path;
-      bin_path.replace_extension(".bin");
+        model_path.has_extension() && model_path.extension() == ".xml";
+    if (!is_ir_xml) {
+      return core_->read_model(model_path.string());
+    }
 
-      if (!fs::exists(abs_input_path)) {
-        throw std::runtime_error("OpenVINO XML model not found: " +
-                                 abs_input_path.string());
-      }
-      if (!fs::exists(bin_path)) {
-        throw std::runtime_error("OpenVINO BIN weights not found: " +
-                                 bin_path.string());
-      }
-      if (fs::file_size(bin_path) == 0) {
-        throw std::runtime_error("OpenVINO BIN weights file is empty: " +
-                                 bin_path.string());
-      }
+    fs::path bin_path = model_path;
+    bin_path.replace_extension(".bin");
+    if (!fs::exists(bin_path)) {
+      throw std::runtime_error("OpenVINO BIN weights not found: " +
+                               bin_path.string());
+    }
+    if (fs::file_size(bin_path) == 0) {
+      throw std::runtime_error("OpenVINO BIN weights file is empty: " +
+                               bin_path.string());
+    }
+    return core_->read_model(model_path.string(), bin_path.string());
+  }
 
-      model = core_->read_model(abs_input_path.string(), bin_path.string());
+  void validateModelIo_(const ov::Model &model) const {
+    if (model.inputs().size() != 1 || model.outputs().size() != 1) {
+      std::ostringstream oss;
+      oss << "Model must have exactly one input and one output, but got inputs="
+          << model.inputs().size() << " outputs=" << model.outputs().size();
+      throw std::runtime_error(oss.str());
+    }
+  }
+
+  void resolveInputSpec_(const ov::Model &model) {
+    const auto input = model.input();
+    input_name_ = input.get_any_name();
+    input_element_type_ = input.get_element_type();
+
+    const auto pshape = input.get_partial_shape();
+    if (!pshape.rank().is_static() || pshape.rank().get_length() != 4) {
+      throw std::runtime_error("Input tensor must be rank-4 NCHW, got: " +
+                               partialShapeToString_(pshape));
+    }
+
+    if (pshape[1].is_static() && pshape[1].get_length() != 3) {
+      throw std::runtime_error("Input channel count must be 3, got: " +
+                               partialShapeToString_(pshape));
+    }
+
+    if (pshape[2].is_static()) {
+      height_ = static_cast<int>(pshape[2].get_length());
     } else {
-      if (!fs::exists(abs_input_path)) {
-        throw std::runtime_error("Model file not found: " +
-                                 abs_input_path.string());
-      }
-      model = core_->read_model(abs_input_path.string());
+      height_ = kDefaultInputSide;
     }
 
-    // 从模型自动读取输入 H/W（shape = [1,3,H,W]），动态维度则保持默认 640
-    const auto &pshape = model->input().get_partial_shape();
-    if (pshape.rank().is_static() && pshape.rank().get_length() == 4) {
-      if (pshape[2].is_static())
-        height_ = static_cast<int>(pshape[2].get_length());
-      if (pshape[3].is_static())
-        width_ = static_cast<int>(pshape[3].get_length());
+    if (pshape[3].is_static()) {
+      width_ = static_cast<int>(pshape[3].get_length());
+    } else {
+      width_ = kDefaultInputSide;
     }
 
-    // 预处理器只初始化一次，避免每帧重复构造
-    preprocessor_ = ImageRecognize::ImagePreprocess(cv::Size(width_, height_));
+    if (height_ <= 0 || width_ <= 0) {
+      throw std::runtime_error("Input H/W must be positive, got: " +
+                               partialShapeToString_(pshape));
+    }
 
+    if (!pshape[2].is_static() || !pshape[3].is_static()) {
+      std::cerr << "[OpenVINO] dynamic input shape detected "
+                << partialShapeToString_(pshape) << ", fallback to "
+                << width_ << "x" << height_ << std::endl;
+    }
+  }
+
+  ov::CompiledModel compileModel_(const std::shared_ptr<ov::Model> &model) {
     const unsigned int hw_threads =
         std::max(1u, std::thread::hardware_concurrency());
     const unsigned int infer_threads = std::max(
@@ -188,306 +279,452 @@ private:
     };
 
     const bool gpu_available = has_device_prefix("GPU");
-    const bool cpu_available =
-        has_device_prefix("CPU") || available_devices.empty();
-
-    auto compile_with_latency_hint = [&](const std::string &target_device)
-        -> std::optional<ov::CompiledModel> {
-      try {
-        return core_->compile_model(
-            model, target_device,
-            ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY),
-            ov::streams::num(Params().streams_num),
-            ov::inference_num_threads(infer_threads));
-      } catch (const std::exception &e) {
-        std::cerr << "[OpenVINO] device '" << target_device
-                  << "' with low-latency properties failed: " << e.what()
-                  << std::endl;
-        return std::nullopt;
-      }
-    };
-
-    auto compile_plain = [&](const std::string &target_device)
-        -> std::optional<ov::CompiledModel> {
-      try {
-        return core_->compile_model(model, target_device);
-      } catch (const std::exception &e) {
-        std::cerr << "[OpenVINO] device '" << target_device
-                  << "' plain compile failed: " << e.what() << std::endl;
-        return std::nullopt;
-      }
-    };
-
     std::vector<std::string> candidate_devices;
     if (device_name_ == "GPU") {
-      if (gpu_available) {
-        candidate_devices = {"GPU", "AUTO", "CPU"};
-      } else {
-        std::cerr << "[OpenVINO] GPU not detected by OpenVINO, falling back to "
-                     "AUTO/CPU."
-                  << std::endl;
-        candidate_devices = {"AUTO", "CPU"};
-      }
+      candidate_devices = gpu_available
+                              ? std::vector<std::string>{"GPU", "AUTO", "CPU"}
+                              : std::vector<std::string>{"AUTO", "CPU"};
     } else if (device_name_ == "AUTO") {
       candidate_devices = gpu_available
                               ? std::vector<std::string>{"AUTO", "GPU", "CPU"}
                               : std::vector<std::string>{"AUTO", "CPU"};
     } else {
       candidate_devices = {device_name_, "AUTO", "CPU"};
-      if (!cpu_available) {
-        candidate_devices.push_back("CPU");
-      }
     }
 
-    std::optional<ov::CompiledModel> compiled_model_opt;
-    std::string selected_device;
+    auto try_compile = [&](const std::string &target_device)
+        -> std::optional<ov::CompiledModel> {
+      try {
+        ov::AnyMap properties;
+        properties.emplace(ov::hint::performance_mode.name(),
+                           ov::Any(ov::hint::PerformanceMode::LATENCY));
+        properties.emplace(ov::streams::num.name(),
+                           ov::Any(Params().streams_num));
+        properties.emplace(ov::inference_num_threads.name(),
+                           ov::Any(infer_threads));
+        return core_->compile_model(model, target_device, properties);
+      } catch (const std::exception &e) {
+        std::cerr << "[OpenVINO] device '" << target_device
+                  << "' compile failed: " << e.what() << std::endl;
+        return std::nullopt;
+      }
+    };
+
     for (const auto &candidate_device : candidate_devices) {
-      compiled_model_opt = compile_with_latency_hint(candidate_device);
-      if (!compiled_model_opt) {
-        compiled_model_opt = compile_plain(candidate_device);
-      }
-      if (compiled_model_opt) {
-        selected_device = candidate_device;
-        break;
+      if (auto compiled = try_compile(candidate_device)) {
+        device_name_ = candidate_device;
+        return std::move(*compiled);
       }
     }
 
-    if (!compiled_model_opt) {
-      throw std::runtime_error(
-          "Failed to compile OpenVINO model on GPU/AUTO/CPU fallback chain.");
-    }
-
-    compiled_model_ = std::move(*compiled_model_opt);
-    device_name_ = selected_device;
-    std::cerr << "[OpenVINO] compiled on device: " << device_name_ << std::endl;
-    infer_request_ = compiled_model_.create_infer_request();
-
-    if (compiled_model_.inputs().size() != 1 ||
-        compiled_model_.outputs().size() != 1) {
-      throw std::runtime_error(
-          "Model must have exactly one input and one output");
-    }
-
-    input_name_ = compiled_model_.input().get_any_name();
-    output_name_ = compiled_model_.output().get_any_name();
-    if (output_name_.empty()) {
-      std::cerr
-          << "[Warning] Model output has no name, will use index fallback."
-          << std::endl;
-    }
-    initialized_ = true;
+    throw std::runtime_error("Failed to compile OpenVINO model on "
+                             "requested/AUTO/CPU fallback chain.");
   }
 
-  // 后处理：兼容单类/多类输出，支持 [1,C,N] 与 [1,N,C]
-  PredictResult postprocess_(const ov::Tensor &output_tensor_,
-                             const cv::Size &original_image_size_) const {
-    PredictResult result_{};
+  void createInferRequest_() {
+    infer_request_ = compiled_model_.create_infer_request();
+  }
 
-    const auto &shape = output_tensor_.get_shape();
-    if (shape.size() != 3) {
-      throw std::runtime_error(
-          "Unexpected output rank. Expect 3D tensor like [1,5,N] or [1,N,5].");
+  void resolveOutputSpec_(const ov::Model &model) {
+    const auto output = model.output();
+    output_name_ = output.get_any_name();
+    output_spec_.rank =
+        output.get_partial_shape().rank().is_static()
+            ? static_cast<std::size_t>(
+                  output.get_partial_shape().rank().get_length())
+            : 0u;
+    output_spec_.dims = partialShapeToDims_(output.get_partial_shape());
+
+    if (output_spec_.rank == 3 && output_spec_.dims.size() == 3 &&
+        output_spec_.dims[1] > 0 && output_spec_.dims[2] > 0) {
+      const auto inferred = inferOutputSpecFromDims_(output_spec_.dims);
+      output_spec_.layout = inferred.layout;
+      output_spec_.channel_first = inferred.channel_first;
+    }
+  }
+
+  PredictResult postprocess_(const ov::Tensor &output_tensor,
+                             const cv::Size &original_image_size,
+                             const PreprocessResult &preprocess_meta) {
+    const auto runtime_spec =
+        inferOutputSpecFromShape_(output_tensor.get_shape());
+    const OutputSpec effective_spec =
+        runtime_spec.layout == OutputLayoutKind::Unknown ? output_spec_
+                                                         : runtime_spec;
+
+    if (effective_spec.layout == OutputLayoutKind::Unknown) {
+      throw std::runtime_error("Unsupported output tensor shape: " +
+                               shapeToString_(output_tensor.get_shape()));
+    }
+    if (output_tensor.get_element_type() != ov::element::f32) {
+      throw std::runtime_error("Output tensor element type must be f32.");
     }
 
-    const float *data = output_tensor_.data<const float>();
-    if (!data) {
+    const float *data = output_tensor.data<const float>();
+    if (data == nullptr) {
       throw std::runtime_error("Output tensor data is null.");
     }
 
-    bool channel_first = false;
-    int num_detections = 0;
-    int channel_count = 0;
+    const std::size_t dim1 = output_tensor.get_shape()[1];
+    const std::size_t dim2 = output_tensor.get_shape()[2];
+    const std::size_t channel_count =
+        effective_spec.channel_first ? dim1 : dim2;
+    const std::size_t num_detections =
+        effective_spec.channel_first ? dim2 : dim1;
 
-    const int dim1 = static_cast<int>(shape[1]);
-    const int dim2 = static_cast<int>(shape[2]);
-    if (dim1 < Params().min_channel_dim && dim2 < Params().min_channel_dim) {
-      throw std::runtime_error(
-          "Unexpected output shape. Need channel dim >= 5.");
-    }
-    if (dim1 >= Params().min_channel_dim && dim2 >= Params().min_channel_dim) {
-      // 常见检测输出中，通道维通常小于候选框数
-      channel_first = Params().prefer_smaller_channel_dim_when_ambiguous
-                          ? (dim1 <= dim2)
-                          : (dim1 > dim2);
-    } else {
-      channel_first = (dim1 >= Params().min_channel_dim);
-    }
-    if (channel_first) {
-      channel_count = dim1;
-      num_detections = dim2;
-    } else {
-      channel_count = dim2;
-      num_detections = dim1;
-    }
-
-    auto fetch = [&](int det_idx, int ch_idx) -> float {
-      if (channel_first) {
+    auto fetch = [&](std::size_t det_idx, std::size_t ch_idx) -> float {
+      if (effective_spec.channel_first) {
         return data[ch_idx * num_detections + det_idx];
       }
       return data[det_idx * channel_count + ch_idx];
     };
 
-    const float scale_x = static_cast<float>(original_image_size_.width) /
-                          static_cast<float>(width_);
-    const float scale_y = static_cast<float>(original_image_size_.height) /
-                          static_cast<float>(height_);
+    PredictResult result;
+    result.boxes.reserve(num_detections);
 
-    int n = 0;
+    for (std::size_t i = 0; i < num_detections; ++i) {
+      if (effective_spec.layout == OutputLayoutKind::NmsBoxes) {
+        appendNmsBox_(result, fetch(i, 0), fetch(i, 1), fetch(i, 2),
+                      fetch(i, 3), fetch(i, 4), static_cast<int>(fetch(i, 5)),
+                      preprocess_meta, original_image_size);
+        continue;
+      }
 
-    for (int i = 0; i < num_detections; ++i) {
       const float cx = fetch(i, 0);
       const float cy = fetch(i, 1);
       const float w = fetch(i, 2);
       const float h = fetch(i, 3);
-      float score = fetch(i, 4);
+
       int class_id = 0;
-
-      // 单类格式: [cx, cy, w, h, score]
-      // 多类格式常见两种：
-      // 1) [cx, cy, w, h, cls0, cls1, ...]
-      // 2) [cx, cy, w, h, obj, cls0, cls1, ...]
-      if (channel_count > 5) {
-        float best_noobj = -1.0f;
-        int best_noobj_cls = 0;
-        for (int c = 4; c < channel_count; ++c) {
-          const float v = fetch(i, c);
-          if (v > best_noobj) {
-            best_noobj = v;
-            best_noobj_cls = c - 4;
-          }
-        }
-
-        float best_with_obj = -1.0f;
-        int best_with_obj_cls = 0;
-        if (channel_count > 6) {
-          const float obj = fetch(i, 4);
-          for (int c = 5; c < channel_count; ++c) {
-            const float v = obj * fetch(i, c);
-            if (v > best_with_obj) {
-              best_with_obj = v;
-              best_with_obj_cls = c - 5;
-            }
-          }
-        }
-
-        if (best_with_obj > best_noobj) {
-          score = best_with_obj;
-          class_id = best_with_obj_cls;
-        } else {
-          score = best_noobj;
-          class_id = best_noobj_cls;
+      float best_score = -1.0f;
+      for (std::size_t c = 4; c < channel_count; ++c) {
+        const float cls_score = fetch(i, c);
+        if (cls_score > best_score) {
+          best_score = cls_score;
+          class_id = static_cast<int>(c - 4);
         }
       }
 
-      // std::cout << "score = " << score << std::endl;
-      if (score <= Params().score_thresh)
-        continue;
-
-      n++;
-
-      if (w <= 0.0f || h <= 0.0f)
-        continue;
-      const float box_ratio = w / h;
-      if (box_ratio < Params().min_ratio || box_ratio > Params().max_ratio)
-        continue;
-
-      float x1 = (cx - w * 0.5f) * scale_x;
-      float y1 = (cy - h * 0.5f) * scale_y;
-      float x2 = (cx + w * 0.5f) * scale_x;
-      float y2 = (cy + h * 0.5f) * scale_y;
-
-      result_.boxes.push_back(
-          {x1, y1, x2, y2, score, static_cast<float>(class_id)});
+      appendNmsBox_(result, cx - 0.5f * w, cy - 0.5f * h, cx + 0.5f * w,
+                    cy + 0.5f * h, best_score, class_id, preprocess_meta,
+                    original_image_size);
     }
 
-    std::cout << "num = " << n << std::endl;
-    result_.boxes = nms_(result_.boxes, Params().nms_iou_thresh);
-    return result_;
+    result.boxes = mergeAndFilterBoxes_(result.boxes);
+    return result;
   }
 
-  static float iou_(const std::array<float, 6> &a,
-                    const std::array<float, 6> &b) {
+  static float boxIou_(const std::array<float, 6> &a,
+                       const std::array<float, 6> &b) {
     const float xx1 = std::max(a[0], b[0]);
     const float yy1 = std::max(a[1], b[1]);
     const float xx2 = std::min(a[2], b[2]);
     const float yy2 = std::min(a[3], b[3]);
-    const float w = std::max(0.0f, xx2 - xx1);
-    const float h = std::max(0.0f, yy2 - yy1);
-    const float inter = w * h;
+    const float inter_w = std::max(0.0f, xx2 - xx1);
+    const float inter_h = std::max(0.0f, yy2 - yy1);
+    const float inter = inter_w * inter_h;
     const float area_a =
         std::max(0.0f, a[2] - a[0]) * std::max(0.0f, a[3] - a[1]);
     const float area_b =
         std::max(0.0f, b[2] - b[0]) * std::max(0.0f, b[3] - b[1]);
     const float uni = area_a + area_b - inter;
-    return (uni <= 0.0f) ? 0.0f : (inter / uni);
+    return uni > 0.0f ? (inter / uni) : 0.0f;
   }
 
-  static std::vector<std::array<float, 6>>
-  nms_(const std::vector<std::array<float, 6>> &boxes, float iou_thresh) {
-    if (boxes.empty())
-      return {};
+  std::vector<std::array<float, 6>>
+  mergeAndFilterBoxes_(const std::vector<std::array<float, 6>> &boxes) const {
+    if (boxes.size() <= 1) {
+      return boxes;
+    }
 
     std::vector<int> order(boxes.size());
     std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(),
-              [&](int a, int b) { return boxes[a][4] > boxes[b][4]; });
+    std::sort(order.begin(), order.end(), [&](int lhs, int rhs) {
+      return boxes[static_cast<std::size_t>(lhs)][4] >
+             boxes[static_cast<std::size_t>(rhs)][4];
+    });
 
-    std::vector<char> removed(boxes.size(), 0);
-    std::vector<std::array<float, 6>> keep;
-    keep.reserve(boxes.size());
+    std::vector<char> consumed(boxes.size(), 0);
+    std::vector<std::array<float, 6>> merged;
+    merged.reserve(boxes.size());
 
-    for (size_t oi = 0; oi < order.size(); ++oi) {
-      const int i = order[oi];
-      if (removed[i])
+    for (std::size_t order_idx = 0; order_idx < order.size(); ++order_idx) {
+      const std::size_t seed_pos = static_cast<std::size_t>(order[order_idx]);
+      if (consumed[seed_pos]) {
         continue;
+      }
 
-      keep.push_back(boxes[i]);
+      const auto &seed_box = boxes[seed_pos];
+      const int seed_class = static_cast<int>(seed_box[5]);
+      float weight_sum = 0.0f;
+      float x1_sum = 0.0f;
+      float y1_sum = 0.0f;
+      float x2_sum = 0.0f;
+      float y2_sum = 0.0f;
+      float best_score = seed_box[4];
 
-      for (size_t oj = oi + 1; oj < order.size(); ++oj) {
-        const int j = order[oj];
-        if (removed[j])
+      for (std::size_t candidate_order_idx = order_idx;
+           candidate_order_idx < order.size(); ++candidate_order_idx) {
+        const std::size_t candidate_pos =
+            static_cast<std::size_t>(order[candidate_order_idx]);
+        if (consumed[candidate_pos]) {
           continue;
-        if (static_cast<int>(boxes[i][5]) != static_cast<int>(boxes[j][5]))
+        }
+
+        const auto &candidate_box = boxes[candidate_pos];
+        if (static_cast<int>(candidate_box[5]) != seed_class) {
           continue;
-        if (iou_(boxes[i], boxes[j]) > iou_thresh)
-          removed[j] = 1;
+        }
+        if (boxIou_(seed_box, candidate_box) < Params().merge_iou_thresh) {
+          continue;
+        }
+
+        const float weight = std::max(candidate_box[4], 1e-6f);
+        weight_sum += weight;
+        x1_sum += candidate_box[0] * weight;
+        y1_sum += candidate_box[1] * weight;
+        x2_sum += candidate_box[2] * weight;
+        y2_sum += candidate_box[3] * weight;
+        best_score = std::max(best_score, candidate_box[4]);
+        consumed[candidate_pos] = 1;
+      }
+
+      if (weight_sum <= 0.0f) {
+        continue;
+      }
+
+      merged.push_back({x1_sum / weight_sum, y1_sum / weight_sum,
+                        x2_sum / weight_sum, y2_sum / weight_sum, best_score,
+                        static_cast<float>(seed_class)});
+    }
+
+    std::sort(merged.begin(), merged.end(),
+              [](const std::array<float, 6> &lhs,
+                 const std::array<float, 6> &rhs) { return lhs[4] > rhs[4]; });
+
+    std::vector<std::array<float, 6>> filtered;
+    filtered.reserve(std::min(merged.size(), Params().max_output_boxes));
+    for (const auto &candidate_box : merged) {
+      bool overlaps_kept = false;
+      for (const auto &kept_box : filtered) {
+        if (static_cast<int>(candidate_box[5]) ==
+                static_cast<int>(kept_box[5]) &&
+            boxIou_(candidate_box, kept_box) >=
+                Params().suppress_iou_thresh) {
+          overlaps_kept = true;
+          break;
+        }
+      }
+      if (overlaps_kept) {
+        continue;
+      }
+
+      filtered.push_back(candidate_box);
+      if (filtered.size() >= Params().max_output_boxes) {
+        break;
       }
     }
 
-    return keep;
+    return filtered;
+  }
+
+  void appendNmsBox_(PredictResult &result, float x1, float y1, float x2,
+                     float y2, float score, int class_id,
+                     const PreprocessResult &preprocess_meta,
+                     const cv::Size &original_image_size) const {
+    if (score < Params().score_thresh) {
+      return;
+    }
+
+    const float safe_scale = std::max(preprocess_meta.scale, 1e-6f);
+    float scaled_x1 =
+        (x1 - static_cast<float>(preprocess_meta.pad_x)) / safe_scale;
+    float scaled_y1 =
+        (y1 - static_cast<float>(preprocess_meta.pad_y)) / safe_scale;
+    float scaled_x2 =
+        (x2 - static_cast<float>(preprocess_meta.pad_x)) / safe_scale;
+    float scaled_y2 =
+        (y2 - static_cast<float>(preprocess_meta.pad_y)) / safe_scale;
+
+    scaled_x1 = std::clamp(scaled_x1, 0.0f,
+                           static_cast<float>(original_image_size.width));
+    scaled_y1 = std::clamp(scaled_y1, 0.0f,
+                           static_cast<float>(original_image_size.height));
+    scaled_x2 = std::clamp(scaled_x2, 0.0f,
+                           static_cast<float>(original_image_size.width));
+    scaled_y2 = std::clamp(scaled_y2, 0.0f,
+                           static_cast<float>(original_image_size.height));
+
+    if (scaled_x2 <= scaled_x1 || scaled_y2 <= scaled_y1) {
+      return;
+    }
+
+    result.boxes.push_back({scaled_x1, scaled_y1, scaled_x2, scaled_y2, score,
+                            static_cast<float>(class_id)});
+  }
+
+  OutputSpec inferOutputSpecFromShape_(const ov::Shape &shape) const {
+    OutputSpec spec;
+    spec.rank = shape.size();
+    spec.dims.reserve(shape.size());
+    for (const auto dim : shape) {
+      spec.dims.push_back(static_cast<std::int64_t>(dim));
+    }
+
+    if (shape.size() != 3) {
+      return spec;
+    }
+    return inferOutputSpecFromDims_(spec.dims);
+  }
+
+  OutputSpec
+  inferOutputSpecFromDims_(const std::vector<std::int64_t> &dims) const {
+    OutputSpec spec;
+    spec.rank = dims.size();
+    spec.dims = dims;
+
+    if (dims.size() != 3 || dims[1] <= 0 || dims[2] <= 0) {
+      return spec;
+    }
+
+    const std::int64_t dim1 = dims[1];
+    const std::int64_t dim2 = dims[2];
+    if (dim1 == 6 && dim2 != 6) {
+      spec.layout = OutputLayoutKind::NmsBoxes;
+      spec.channel_first = true;
+      return spec;
+    }
+    if (dim2 == 6 && dim1 != 6) {
+      spec.layout = OutputLayoutKind::NmsBoxes;
+      spec.channel_first = false;
+      return spec;
+    }
+
+    const std::int64_t channel_dim = std::min(dim1, dim2);
+    const std::int64_t detection_dim = std::max(dim1, dim2);
+    if (channel_dim < Params().min_channel_dim ||
+        detection_dim <= channel_dim) {
+      return spec;
+    }
+
+    spec.layout = OutputLayoutKind::YoloRawCxCyWhCls;
+    spec.channel_first = (dim1 == channel_dim);
+    return spec;
+  }
+
+  static std::vector<std::int64_t>
+  partialShapeToDims_(const ov::PartialShape &shape) {
+    std::vector<std::int64_t> dims;
+    if (!shape.rank().is_static()) {
+      return dims;
+    }
+    dims.reserve(static_cast<std::size_t>(shape.rank().get_length()));
+    for (const auto &dim : shape) {
+      dims.push_back(dim.is_static() ? dim.get_length() : -1);
+    }
+    return dims;
+  }
+
+  static std::string partialShapeToString_(const ov::PartialShape &shape) {
+    if (!shape.rank().is_static()) {
+      return "{?}";
+    }
+
+    std::ostringstream oss;
+    oss << '{';
+    for (std::size_t i = 0;
+         i < static_cast<std::size_t>(shape.rank().get_length()); ++i) {
+      if (i != 0) {
+        oss << ',';
+      }
+      if (shape[i].is_static()) {
+        oss << shape[i].get_length();
+      } else {
+        oss << '?';
+      }
+    }
+    oss << '}';
+    return oss.str();
+  }
+
+  static std::string shapeToString_(const ov::Shape &shape) {
+    std::ostringstream oss;
+    oss << '{';
+    for (std::size_t i = 0; i < shape.size(); ++i) {
+      if (i != 0) {
+        oss << ',';
+      }
+      oss << shape[i];
+    }
+    oss << '}';
+    return oss.str();
+  }
+
+  static std::string describeOutputSpec_(const OutputSpec &spec) {
+    std::ostringstream oss;
+    switch (spec.layout) {
+    case OutputLayoutKind::YoloRawCxCyWhCls:
+      oss << "yolo_raw";
+      break;
+    case OutputLayoutKind::NmsBoxes:
+      oss << "nms_boxes";
+      break;
+    default:
+      oss << "unknown";
+      break;
+    }
+
+    oss << " rank=" << spec.rank << " dims=";
+    if (spec.dims.empty()) {
+      oss << "{?}";
+    } else {
+      oss << '{';
+      for (std::size_t i = 0; i < spec.dims.size(); ++i) {
+        if (i != 0) {
+          oss << ',';
+        }
+        oss << spec.dims[i];
+      }
+      oss << '}';
+    }
+    if (spec.layout != OutputLayoutKind::Unknown) {
+      oss << " layout="
+          << (spec.channel_first ? "channel_first" : "channel_last");
+    }
+    return oss.str();
   }
 
 private:
-  static constexpr int kDefaultInputSide = 640;
-
-  int width_ = kDefaultInputSide;  ///< 从模型自动读取的输入宽
-  int height_ = kDefaultInputSide; ///< 从模型自动读取的输入高
+  int width_ = kDefaultInputSide;
+  int height_ = kDefaultInputSide;
 
   std::unique_ptr<ov::Core> core_;
   ov::CompiledModel compiled_model_;
   ov::InferRequest infer_request_;
+  ov::element::Type input_element_type_;
 
   bool initialized_ = false;
+  bool async_inflight_ = false;
   std::string model_path_;
   std::string device_name_ = "AUTO";
   std::string input_name_;
   std::string output_name_;
+  OutputSpec output_spec_;
 
   ImageRecognize::ImagePreprocess preprocessor_{};
+  ImageRecognize::PreprocessResult async_preprocessed_{};
+  cv::Size async_original_size_{};
 };
 
 inline const ImagePredict::TunableParams &ImagePredict::Params() {
-  // ===== 调参集中区（统一放在文件末尾）=====
   static const TunableParams p{
-      2,    // hw_threads_reserved: 预留给系统/其他线程的CPU线程数
-      1,    // streams_num: OpenVINO推理流数量（低延迟建议1）
-      0.5f, // score_thresh: 置信度阈值
-      0.5f, // nms_iou_thresh: NMS阈值
-      1.0f, // max_ratio: 目标框最大长宽比（短边/长边）
-      0.3f, // min_ratio: 目标框最小长宽比（短边/长边）
-      5,    // min_channel_dim: 认为“通道维”的最小维度
-      true  // prefer_smaller_channel_dim_when_ambiguous:
-            // 两维都>=min时是否默认较小维为通道维
+      2,    // hw_threads_reserved: 预留给系统/其他线程的 CPU 线程数
+      1,    // streams_num: OpenVINO 推理流数量（低延迟建议 1）
+      0.6f, // score_thresh: 置信度阈值
+      5,    // min_channel_dim: 原始检测头最少应为 cx,cy,w,h,cls0
+      0.55f, // merge_iou_thresh: 同类高重叠框做融合
+      0.45f, // suppress_iou_thresh: 融合后再次抑制重叠框
+      1      // max_output_boxes: 最终只保留 1 个框，保证唯一目标
   };
   return p;
 }
