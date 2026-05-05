@@ -597,8 +597,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
             Tools::NormalizeDeltaDeg(filtered_pitch - matched_imu.pitch);
 
         auto [laser_yaw_angle, laser_pitch_angle] =
-            laser_angle_calculator.CalculateLaserAngles(distance,
-                                                        offset_angles.x);
+            laser_angle_calculator.CalculateLaserAngles(
+                distance, offset_angles.x, offset_angles.y);
 
         const auto t_control_start = std::chrono::steady_clock::now();
         float delta_yaw_raw = Tools::NormalizeDeltaDeg(
@@ -875,8 +875,8 @@ void IMUSendThread(serial::Serial &port,
       float offset_pitch = g_send_offset_pitch.load(std::memory_order_acquire);
       const uint8_t aimbot_state =
           g_send_aimbot_state.load(std::memory_order_acquire);
-      std::cout << std::fixed << " offset_yaw: " << offset_yaw
-                << "°, offset_pitch: " << offset_pitch << "°" << std::endl;
+      // std::cout << std::fixed << " offset_yaw: " << offset_yaw
+      //           << "°, offset_pitch: " << offset_pitch << "°" << std::endl;
       SerialTask::SerialSend(port, pitch, yaw, aimbot_state);
       g_has_pending_send.store(false, std::memory_order_release);
     } else {
@@ -981,7 +981,7 @@ const RuntimeParams &Params() {
 
       1000, // scan_origin_hold_ms: 扫描模式下保持原点的时间（毫秒）
       80.0, // max_infer_fps: 推理线程最大提交帧率，<=0 表示不限制
-      100.0, // scan_send_hz: 扫描模式下的发送频率（Hz）
+      1000.0, // scan_send_hz: 扫描模式下的发送频率（Hz）
       2, // display_every_n_frames: 每N帧显示1帧（2可明显降低render延迟）
       1 // gui_poll_every_n_frames: 每N帧轮询一次按键退出
   };

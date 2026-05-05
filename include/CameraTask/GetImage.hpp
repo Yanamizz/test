@@ -443,8 +443,8 @@ public:
   bool enable_auto_exposure = false; // 启动时是否执行一次自动曝光
   bool enable_auto_gain = false;     // 启动时是否执行一次自动增益
   double white_balance_red = 1.75;   // 手动白平衡红通道比例
-  double exposure_time_us = 5000.0;  // 手动曝光时间（微秒）
-  double gain_db = 0.0;              // 手动增益（dB）
+  double exposure_time_us = 1000.0;  // 手动曝光时间（微秒）
+  double gain_db = 17.0;             // 手动增益（dB）
   bool enable_undistort_ = false; // 是否启用去畸变（默认关闭以降低延迟）
   std::string wb_channel_name_ = "Red"; // 白平衡通道名，可改为 "Green" / "Blue"
   int wb_channel_index_ = 0; // 白平衡通道索引，通道名为空时使用

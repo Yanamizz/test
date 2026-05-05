@@ -28,7 +28,7 @@ private:
   static const TunableParams &Params() {
     // ===== 调参集中区（统一放在文件末尾）=====
     static const TunableParams p{
-        0.072f // target_height_m: 目标实际高度（米）
+        0.060f // target_height_m: 目标实际高度（米）
     };
     return p;
   }
@@ -36,54 +36,99 @@ private:
   float focal_px_ =
       CameraData().cameraMatrix.at<double>(0, 0); // 相机焦距（像素）
 };
+
 class LaserAngleCalculator {
 public:
   float CalculateLaserYawAngleByDistance(float distance) {
-    const float safe_distance =
-        std::max(distance, Params().min_valid_distance_m);
-    float angle_rad = std::atan2(Params().laser_distance_x_m, safe_distance);
-    float angle_deg = angle_rad * 180.0f / kPi;
-    return angle_deg;
+    return CalculateLaserAngles(distance, 0.0f, 0.0f).first;
   }
 
   float CalculateLaserPitchAngleByDistance(float distance) {
-    const float safe_distance =
-        std::max(distance, Params().min_valid_distance_m);
-    float angle_rad = std::atan2(Params().laser_distance_y_m, safe_distance);
-    float angle_deg = angle_rad * 180.0f / kPi;
-    return angle_deg;
+    return CalculateLaserAngles(distance, 0.0f, 0.0f).second;
   }
 
   std::pair<float, float> CalculateLaserAngles(float distance,
-                                               float offset_angles) {
-    (void)offset_angles;
-    // 组合模型：
-    // 1) fixed_*: 相机与激光不平行导致的固定安装角补偿（手动标定）
-    // 2) distance_*: 相机与激光发射点平移导致的视差补偿（随距离变化）
-    const float yaw_angle = Params().fixed_yaw_compensation_deg +
-                            CalculateLaserYawAngleByDistance(distance);
-    const float pitch_angle = Params().fixed_pitch_compensation_deg +
-                              CalculateLaserPitchAngleByDistance(distance);
-    return {yaw_angle, pitch_angle};
+                                               float offset_yaw_deg,
+                                               float offset_pitch_deg) {
+    // 相机坐标系中的横向基线模型：基线会随云台刚体旋转，
+    // 这里返回的是“激光相对相机视线”的补偿角。
+    const float current_yaw =
+        ComputeYawCorrectionDeg(distance, offset_yaw_deg, offset_pitch_deg);
+    const float current_pitch =
+        ComputePitchCorrectionDeg(distance, offset_yaw_deg, offset_pitch_deg);
+    const float reference_yaw =
+        ComputeYawCorrectionDeg(Params().reference_distance_m, 0.0f, 0.0f);
+    const float reference_pitch =
+        ComputePitchCorrectionDeg(Params().reference_distance_m, 0.0f, 0.0f);
+    const float fixed_offset_yaw = Params().fixed_offset_yaw;
+    const float fixed_offset_pitch = Params().fixed_offset_pitch;
+    return {current_yaw - reference_yaw + fixed_offset_yaw,
+            current_pitch - reference_pitch + fixed_offset_pitch};
   }
 
 private:
   struct TunableParams {
-    float laser_distance_x_m;
-    float laser_distance_y_m;
+    float laser_offset_x_m;
+    float laser_offset_y_m;
+    float reference_distance_m;
     float min_valid_distance_m;
-    float fixed_yaw_compensation_deg;
-    float fixed_pitch_compensation_deg;
+    float fixed_offset_yaw;
+    float fixed_offset_pitch;
   };
+
+  static float ComputeYawCorrectionDeg(float distance, float offset_yaw_deg,
+                                       float offset_pitch_deg) {
+    const float safe_distance =
+        std::max(distance, Params().min_valid_distance_m);
+    const float yaw_rad = offset_yaw_deg * kPi / 180.0f;
+    const float pitch_rad = offset_pitch_deg * kPi / 180.0f;
+    const float dir_x = -std::tan(yaw_rad);
+    const float dir_y = std::tan(pitch_rad);
+    const float inv_norm =
+        1.0f / std::sqrt(dir_x * dir_x + dir_y * dir_y + 1.0f);
+
+    const float target_x = safe_distance * dir_x * inv_norm;
+    const float target_z = safe_distance * inv_norm;
+
+    const float rel_x = target_x - Params().laser_offset_x_m;
+    const float rel_z = target_z;
+    const float laser_yaw_rad = -std::atan2(rel_x, rel_z);
+    return laser_yaw_rad * 180.0f / kPi - offset_yaw_deg;
+  }
+
+  static float ComputePitchCorrectionDeg(float distance, float offset_yaw_deg,
+                                         float offset_pitch_deg) {
+    const float safe_distance =
+        std::max(distance, Params().min_valid_distance_m);
+    const float yaw_rad = offset_yaw_deg * kPi / 180.0f;
+    const float pitch_rad = offset_pitch_deg * kPi / 180.0f;
+    const float dir_x = -std::tan(yaw_rad);
+    const float dir_y = std::tan(pitch_rad);
+    const float inv_norm =
+        1.0f / std::sqrt(dir_x * dir_x + dir_y * dir_y + 1.0f);
+
+    const float target_x = safe_distance * dir_x * inv_norm;
+    const float target_y = safe_distance * dir_y * inv_norm;
+    const float target_z = safe_distance * inv_norm;
+
+    const float rel_x = target_x - Params().laser_offset_x_m;
+    const float rel_y = target_y - Params().laser_offset_y_m;
+    const float rel_z = target_z;
+    const float laser_pitch_rad =
+        std::atan2(rel_y, std::sqrt(rel_x * rel_x + rel_z * rel_z));
+    return laser_pitch_rad * 180.0f / kPi - offset_pitch_deg;
+  }
 
   static const TunableParams &Params() {
     // ===== 调参集中区（统一放在文件末尾）=====
     static const TunableParams p{
-        0.0f,   // laser_distance_x_m: 激光器到相机中心x偏移（米）
-        0.066f, // laser_distance_y_m: 激光器到相机中心y偏移（米）
+        0.0f, // laser_offset_x_m: 激光相对相机的横向偏移（米，向右为正）
+        -0.0904f, // laser_offset_y_m: 激光相对相机的纵向偏移（米，向下为正）
+        18.8f, // reference_distance_m: 用于归零的参考水平距离（米）
         10.0f, // min_valid_distance_m: 距离下限（米），防止近距数值异常
-        0.063f, // fixed_yaw_compensation_deg: 固定yaw补偿角（度）
-        -1.135f // fixed_pitch_compensation_deg: 固定pitch补偿角（度）
+        0.0f, // fixed_offset_yaw: 固定补偿的yaw角（度），正值会让激光整体向右转
+        0.001f, // fixed_offset_pitch:
+                // 固定补偿的pitch角（度），正值会让激光整体向下转
     };
     return p;
   }

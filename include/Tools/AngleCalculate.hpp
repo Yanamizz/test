@@ -1,14 +1,14 @@
 #pragma once
-#include <cmath>
 #include <chrono>
+#include <cmath>
+#include <opencv2/opencv.hpp>
 #include <string>
 #include <utility>
-#include <opencv2/opencv.hpp>
 #include <vector>
 
-#include "KalmanFilter/KalmanFilter.hpp"
 #include "KalmanFilter/CubatureKalmanFilter.hpp"
 #include "KalmanFilter/ExtendedKalmanFilter.hpp"
+#include "KalmanFilter/KalmanFilter.hpp"
 #include "KalmanFilter/OneEuroFilter.hpp"
 #include "KalmanFilter/UnscentedKalmanFilter.hpp"
 #include "Tools/CameraData.hpp"
@@ -28,37 +28,41 @@ enum class FilterType {
 
 inline const char *ToString(FilterType type) {
   switch (type) {
-    case FilterType::NONE:
-      return "NONE";
-    case FilterType::KF:
-      return "KF";
-    case FilterType::EKF:
-      return "EKF";
-    case FilterType::UKF:
-      return "UKF";
-    case FilterType::CKF:
-      return "CKF";
-    case FilterType::ONE_EURO:
-      return "ONE_EURO";
-    default:
-      return "UNKNOWN";
+  case FilterType::NONE:
+    return "NONE";
+  case FilterType::KF:
+    return "KF";
+  case FilterType::EKF:
+    return "EKF";
+  case FilterType::UKF:
+    return "UKF";
+  case FilterType::CKF:
+    return "CKF";
+  case FilterType::ONE_EURO:
+    return "ONE_EURO";
+  default:
+    return "UNKNOWN";
   }
 }
 
 inline float NormalizeDeltaDeg(float delta) {
-  while (delta > 180.0f) delta -= 360.0f;
-  while (delta < -180.0f) delta += 360.0f;
+  while (delta > 180.0f)
+    delta -= 360.0f;
+  while (delta < -180.0f)
+    delta += 360.0f;
   return delta;
 }
 
 inline float InterpolateAngleDeg(float from_deg, float to_deg, float alpha) {
-  if (alpha < 0.0f) alpha = 0.0f;
-  if (alpha > 1.0f) alpha = 1.0f;
+  if (alpha < 0.0f)
+    alpha = 0.0f;
+  if (alpha > 1.0f)
+    alpha = 1.0f;
   return from_deg + NormalizeDeltaDeg(to_deg - from_deg) * alpha;
 }
 
 class AngleCalculator {
- public:
+public:
   explicit AngleCalculator() { ApplyTunableFilterGains(); }
 
   static FilterType ParseFilterType(const std::string &type) {
@@ -75,23 +79,32 @@ class AngleCalculator {
       }
     }
 
-    if (s == "NONE" || s == "RAW" || s == "NOFILTER" || s == "OFF" || s == "DISABLE") {
+    if (s == "NONE" || s == "RAW" || s == "NOFILTER" || s == "OFF" ||
+        s == "DISABLE") {
       return FilterType::NONE;
     }
-    if (s == "KF") return FilterType::KF;
-    if (s == "EKF") return FilterType::EKF;
-    if (s == "UKF") return FilterType::UKF;
-    if (s == "CKF") return FilterType::CKF;
-    if (s == "ONEEURO" || s == "ONEEUROFILTER" || s == "1EURO" || s == "1EUROFILTER") {
+    if (s == "KF")
+      return FilterType::KF;
+    if (s == "EKF")
+      return FilterType::EKF;
+    if (s == "UKF")
+      return FilterType::UKF;
+    if (s == "CKF")
+      return FilterType::CKF;
+    if (s == "ONEEURO" || s == "ONEEUROFILTER" || s == "1EURO" ||
+        s == "1EUROFILTER") {
       return FilterType::ONE_EURO;
     }
     return Params().default_filter_type;
   }
 
   CameraData cameraData;
-  std::pair<float, float> CalculateAbsoluteAngles(float targetX, float targetY, float currentYaw, float currentPitch,
-                                                  FilterType filter_type, double dt_from_main = -1.0) {
-    double dt = Params().default_dt_sec;  // 默认帧间隔
+  std::pair<float, float> CalculateAbsoluteAngles(float targetX, float targetY,
+                                                  float currentYaw,
+                                                  float currentPitch,
+                                                  FilterType filter_type,
+                                                  double dt_from_main = -1.0) {
+    double dt = Params().default_dt_sec; // 默认帧间隔
     if (dt_from_main > 0.0) {
       dt = dt_from_main;
     } else {
@@ -113,8 +126,8 @@ class AngleCalculator {
     std::vector<cv::Point2f> out;
     in.push_back(cv::Point2f(targetX, targetY));
     // 对像素点去畸变
-    cv::undistortPoints(in, out, cameraData.cameraMatrix, cameraData.distCoeffs, cv::noArray(),
-                        cameraData.cameraMatrix);
+    cv::undistortPoints(in, out, cameraData.cameraMatrix, cameraData.distCoeffs,
+                        cv::noArray(), cameraData.cameraMatrix);
     pnt = out.front();
     // 去畸变后的比值
     double rxNew = (pnt.x - cx) / fx;
@@ -133,22 +146,27 @@ class AngleCalculator {
     double absolute_yaw = currentYaw + offset_yaw;
     double absolute_pitch = currentPitch + offset_pitch;
 
-    // 冷启动时先用首帧测量初始化滤波器，避免从 0° 拉到 ±180° 导致发送直接饱和到 ±5°。
+    // 冷启动时先用首帧测量初始化滤波器，避免从 0° 拉到 ±180° 导致发送直接饱和到
+    // ±5°。
     if (!filter_initialized) {
       ResetFilters(absolute_yaw, absolute_pitch);
       filter_initialized = true;
-      return {static_cast<float>(absolute_yaw), static_cast<float>(absolute_pitch)};
+      return {static_cast<float>(absolute_yaw),
+              static_cast<float>(absolute_pitch)};
     }
 
     float filtered_yaw = static_cast<float>(
-        UpdateAngleByType(filter_type, absolute_yaw, dt, kf_yaw, ekf_yaw, ukf_yaw, ckf_yaw, oneeuro_yaw));
+        UpdateAngleByType(filter_type, absolute_yaw, dt, kf_yaw, ekf_yaw,
+                          ukf_yaw, ckf_yaw, oneeuro_yaw));
     float filtered_pitch = static_cast<float>(
-        UpdateAngleByType(filter_type, absolute_pitch, dt, kf_pitch, ekf_pitch, ukf_pitch, ckf_pitch, oneeuro_pitch));
+        UpdateAngleByType(filter_type, absolute_pitch, dt, kf_pitch, ekf_pitch,
+                          ukf_pitch, ckf_pitch, oneeuro_pitch));
 
     return {filtered_yaw, filtered_pitch};
   }
 
-  cv::Point2f AbsoluteAnglesToPixel(float absoluteYaw, float absolutePitch, float currentYaw,
+  cv::Point2f AbsoluteAnglesToPixel(float absoluteYaw, float absolutePitch,
+                                    float currentYaw,
                                     float currentPitch) const {
     const double fx = cameraData.cameraMatrix.at<double>(0, 0);
     const double fy = cameraData.cameraMatrix.at<double>(1, 1);
@@ -156,7 +174,8 @@ class AngleCalculator {
     const double cy = cameraData.cameraMatrix.at<double>(1, 2);
 
     const double offset_yaw = static_cast<double>(absoluteYaw - currentYaw);
-    const double offset_pitch = static_cast<double>(absolutePitch - currentPitch);
+    const double offset_pitch =
+        static_cast<double>(absolutePitch - currentPitch);
 
     const double rx = -std::tan(offset_yaw * kPi / 180.0);
     const double ry = std::tan(offset_pitch * kPi / 180.0);
@@ -166,7 +185,7 @@ class AngleCalculator {
     return {pred_x, pred_y};
   }
 
- private:
+private:
   void ResetFilters(double yaw, double pitch) {
     ApplyTunableFilterGains();
 
@@ -190,13 +209,16 @@ class AngleCalculator {
     kf_pitch = KalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
 
     ekf_yaw = ExtendedKalmanFilter{params.yaw_filter_q, params.yaw_filter_r};
-    ekf_pitch = ExtendedKalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
+    ekf_pitch =
+        ExtendedKalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
 
     ukf_yaw = UnscentedKalmanFilter{params.yaw_filter_q, params.yaw_filter_r};
-    ukf_pitch = UnscentedKalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
+    ukf_pitch =
+        UnscentedKalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
 
     ckf_yaw = CubatureKalmanFilter{params.yaw_filter_q, params.yaw_filter_r};
-    ckf_pitch = CubatureKalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
+    ckf_pitch =
+        CubatureKalmanFilter{params.pitch_filter_q, params.pitch_filter_r};
 
     oneeuro_yaw.reset();
     oneeuro_pitch.reset();
@@ -210,24 +232,26 @@ class AngleCalculator {
     oneeuro_pitch.setDerivativeCutoff(params.oneeuro_d_cutoff_hz);
   }
 
-  template <typename KF, typename EKF, typename UKF, typename CKF, typename OneEuro>
-  static double UpdateAngleByType(FilterType filter_type, double measurement, double dt, KF &kf, EKF &ekf, UKF &ukf,
+  template <typename KF, typename EKF, typename UKF, typename CKF,
+            typename OneEuro>
+  static double UpdateAngleByType(FilterType filter_type, double measurement,
+                                  double dt, KF &kf, EKF &ekf, UKF &ukf,
                                   CKF &ckf, OneEuro &oneeuro) {
     switch (filter_type) {
-      case FilterType::NONE:
-        return measurement;
-      case FilterType::KF:
-        return kf.update(measurement, dt);
-      case FilterType::EKF:
-        return ekf.update(measurement, dt);
-      case FilterType::UKF:
-        return ukf.update(measurement, dt);
-      case FilterType::CKF:
-        return ckf.update(measurement, dt);
-      case FilterType::ONE_EURO:
-        return oneeuro.filter(measurement, dt);
-      default:
-        return ukf.update(measurement, dt);
+    case FilterType::NONE:
+      return measurement;
+    case FilterType::KF:
+      return kf.update(measurement, dt);
+    case FilterType::EKF:
+      return ekf.update(measurement, dt);
+    case FilterType::UKF:
+      return ukf.update(measurement, dt);
+    case FilterType::CKF:
+      return ckf.update(measurement, dt);
+    case FilterType::ONE_EURO:
+      return oneeuro.filter(measurement, dt);
+    default:
+      return ukf.update(measurement, dt);
     }
   }
 
@@ -273,24 +297,25 @@ class AngleCalculator {
 
 inline const AngleCalculator::TuningParams &AngleCalculator::Params() {
   // ===== 调参集中区（统一放在文件末尾）=====
-  // 你只需要改这里的数值即可。
+  // OneEuro 调参起点：静止目标继续往响应侧推进，后续按“振荡/滞后”逐步收窄。
   static const TuningParams p{
-      FilterType::CKF,  // default_filter_type: 字符串解析失败时使用的默认滤波器类型
+      FilterType::ONE_EURO, // default_filter_type: 调参模式默认使用 OneEuro
 
-      0.03,  // default_dt_sec: 未提供帧间隔时使用的默认 dt（秒）
-      5.0,   // max_offset_deg: 单帧像素解算得到的最大角度偏移限幅（度）
+      0.03, // default_dt_sec: 未提供帧间隔时使用的默认 dt（秒）
+      5.0, // max_offset_deg: 单帧像素解算得到的最大角度偏移限幅（度）
 
-      10.0,  // yaw_filter_q: yaw 过程噪声 Q，调大以提升跟随性
-      0.01,  // yaw_filter_r: yaw 测量噪声 R，调小以减少滞后
-      0.1,   // pitch_filter_q: pitch 过程噪声 Q，调小以增强稳定性
-      1.0,   // pitch_filter_r: pitch 测量噪声 R，调大以抑制抖动
+      10.0, // yaw_filter_q: yaw 过程噪声 Q，调大以提升跟随性
+      0.01, // yaw_filter_r: yaw 测量噪声 R，调小以减少滞后
+      0.1,  // pitch_filter_q: pitch 过程噪声 Q，调小以增强稳定性
+      1.0,  // pitch_filter_r: pitch 测量噪声 R，调大以抑制抖动
 
-      120.0,  // oneeuro_freq_hz: OneEuro 采样频率（Hz），通常作为 dt 异常时的回退值
-      2.0,    // oneeuro_min_cutoff_hz: 基础截止频率，越小越稳、越大越跟手
-      5.0,    // oneeuro_beta: 速度自适应强度，越大在快速变化时越放行
-      2.0     // oneeuro_d_cutoff_hz: 导数估计截止频率，越大越灵敏、越小越平滑
+      120.0, // oneeuro_freq_hz: OneEuro 采样频率（Hz），通常作为 dt
+             // 异常时的回退值
+        5.0,   // oneeuro_min_cutoff_hz: 再抬高一点，减轻“偏稳”感
+        8.0,   // oneeuro_beta: 再上调一档，增强跟随性
+        3.0    // oneeuro_d_cutoff_hz: 导数估计截止频率，小幅再抬高
   };
   return p;
 }
 
-}  // namespace Tools
+} // namespace Tools

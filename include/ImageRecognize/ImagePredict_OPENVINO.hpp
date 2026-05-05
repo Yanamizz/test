@@ -239,8 +239,8 @@ private:
 
     if (!pshape[2].is_static() || !pshape[3].is_static()) {
       std::cerr << "[OpenVINO] dynamic input shape detected "
-                << partialShapeToString_(pshape) << ", fallback to "
-                << width_ << "x" << height_ << std::endl;
+                << partialShapeToString_(pshape) << ", fallback to " << width_
+                << "x" << height_ << std::endl;
     }
   }
 
@@ -509,8 +509,7 @@ private:
       for (const auto &kept_box : filtered) {
         if (static_cast<int>(candidate_box[5]) ==
                 static_cast<int>(kept_box[5]) &&
-            boxIou_(candidate_box, kept_box) >=
-                Params().suppress_iou_thresh) {
+            boxIou_(candidate_box, kept_box) >= Params().suppress_iou_thresh) {
           overlaps_kept = true;
           break;
         }
@@ -718,12 +717,12 @@ private:
 
 inline const ImagePredict::TunableParams &ImagePredict::Params() {
   static const TunableParams p{
-      2,    // hw_threads_reserved: 预留给系统/其他线程的 CPU 线程数
-      1,    // streams_num: OpenVINO 推理流数量（低延迟建议 1）
-      0.6f, // score_thresh: 置信度阈值
-      5,    // min_channel_dim: 原始检测头最少应为 cx,cy,w,h,cls0
-      0.55f, // merge_iou_thresh: 同类高重叠框做融合
-      0.45f, // suppress_iou_thresh: 融合后再次抑制重叠框
+      2, // hw_threads_reserved: 预留给系统/其他线程的 CPU 线程数
+      1, // streams_num: OpenVINO 推理流数量（低延迟建议 1）
+      0.7f,  // score_thresh: 置信度阈值
+      5,     // min_channel_dim: 原始检测头最少应为 cx,cy,w,h,cls0
+      0.45f, // merge_iou_thresh: 同类高重叠框做融合
+      0.35f, // suppress_iou_thresh: 融合后再次抑制重叠框
       1      // max_output_boxes: 最终只保留 1 个框，保证唯一目标
   };
   return p;
