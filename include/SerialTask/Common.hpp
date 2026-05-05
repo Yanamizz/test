@@ -17,6 +17,8 @@ typedef struct __attribute__((packed)) {
   float YawRelativeAngle;   ///< Yaw   (°)
   float PitchOffset;        ///< Pitch 偏差角 (°)
   float YawOffset;          ///< Yaw 偏差角 (°)
+  float PitchVelocity;      ///< Pitch 角速度 (°/s)
+  float YawVelocity;        ///< Yaw   角速度 (°/s)
   float SystemTimer;        ///< 时间戳
   uint8_t _EOF;             ///< 包尾 0xff
 } AimbotFrame_SCM_t;

@@ -61,6 +61,13 @@ inline float InterpolateAngleDeg(float from_deg, float to_deg, float alpha) {
   return from_deg + NormalizeDeltaDeg(to_deg - from_deg) * alpha;
 }
 
+struct AngleCommand {
+  float yaw = 0.0f;
+  float pitch = 0.0f;
+  float yaw_velocity = 0.0f;
+  float pitch_velocity = 0.0f;
+};
+
 class AngleCalculator {
 public:
   explicit AngleCalculator() { ApplyTunableFilterGains(); }
@@ -99,11 +106,11 @@ public:
   }
 
   CameraData cameraData;
-  std::pair<float, float> CalculateAbsoluteAngles(float targetX, float targetY,
-                                                  float currentYaw,
-                                                  float currentPitch,
-                                                  FilterType filter_type,
-                                                  double dt_from_main = -1.0) {
+  AngleCommand CalculateAbsoluteAnglesWithVelocity(float targetX, float targetY,
+                                                   float currentYaw,
+                                                   float currentPitch,
+                                                   FilterType filter_type,
+                                                   double dt_from_main = -1.0) {
     double dt = Params().default_dt_sec; // 默认帧间隔
     if (dt_from_main > 0.0) {
       dt = dt_from_main;
@@ -146,23 +153,48 @@ public:
     double absolute_yaw = currentYaw + offset_yaw;
     double absolute_pitch = currentPitch + offset_pitch;
 
+    AngleCommand result{};
+
     // 冷启动时先用首帧测量初始化滤波器，避免从 0° 拉到 ±180° 导致发送直接饱和到
     // ±5°。
     if (!filter_initialized) {
       ResetFilters(absolute_yaw, absolute_pitch);
       filter_initialized = true;
-      return {static_cast<float>(absolute_yaw),
-              static_cast<float>(absolute_pitch)};
+      result.yaw = static_cast<float>(absolute_yaw);
+      result.pitch = static_cast<float>(absolute_pitch);
+      last_filtered_yaw_ = result.yaw;
+      last_filtered_pitch_ = result.pitch;
+      has_last_filtered_angles_ = true;
+      return result;
     }
 
-    float filtered_yaw = static_cast<float>(
+    result.yaw = static_cast<float>(
         UpdateAngleByType(filter_type, absolute_yaw, dt, kf_yaw, ekf_yaw,
                           ukf_yaw, ckf_yaw, oneeuro_yaw));
-    float filtered_pitch = static_cast<float>(
+    result.pitch = static_cast<float>(
         UpdateAngleByType(filter_type, absolute_pitch, dt, kf_pitch, ekf_pitch,
                           ukf_pitch, ckf_pitch, oneeuro_pitch));
 
-    return {filtered_yaw, filtered_pitch};
+    const float safe_dt = static_cast<float>(std::max(dt, 1e-6));
+    if (has_last_filtered_angles_) {
+      result.yaw_velocity =
+          NormalizeDeltaDeg(result.yaw - last_filtered_yaw_) / safe_dt;
+      result.pitch_velocity = (result.pitch - last_filtered_pitch_) / safe_dt;
+    }
+    last_filtered_yaw_ = result.yaw;
+    last_filtered_pitch_ = result.pitch;
+    has_last_filtered_angles_ = true;
+    return result;
+  }
+
+  std::pair<float, float> CalculateAbsoluteAngles(float targetX, float targetY,
+                                                  float currentYaw,
+                                                  float currentPitch,
+                                                  FilterType filter_type,
+                                                  double dt_from_main = -1.0) {
+    const AngleCommand result = CalculateAbsoluteAnglesWithVelocity(
+        targetX, targetY, currentYaw, currentPitch, filter_type, dt_from_main);
+    return {result.yaw, result.pitch};
   }
 
   cv::Point2f AbsoluteAnglesToPixel(float absoluteYaw, float absolutePitch,
@@ -188,6 +220,7 @@ public:
 private:
   void ResetFilters(double yaw, double pitch) {
     ApplyTunableFilterGains();
+    has_last_filtered_angles_ = false;
 
     kf_yaw.reset(yaw, 0.0);
     kf_pitch.reset(pitch, 0.0);
@@ -290,6 +323,9 @@ private:
   OneEuroFilter oneeuro_pitch;
 
   bool filter_initialized = false;
+  float last_filtered_yaw_ = 0.0f;
+  float last_filtered_pitch_ = 0.0f;
+  bool has_last_filtered_angles_ = false;
 
   std::chrono::steady_clock::time_point last_time;
   bool is_initialized = false;

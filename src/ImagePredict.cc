@@ -104,6 +104,8 @@ static std::atomic<float> g_send_abs_yaw{0.0f};
 static std::atomic<float> g_send_abs_pitch{0.0f};
 static std::atomic<float> g_send_offset_yaw{0.0f};
 static std::atomic<float> g_send_offset_pitch{0.0f};
+static std::atomic<float> g_send_yaw_velocity{0.0f};
+static std::atomic<float> g_send_pitch_velocity{0.0f};
 static std::mutex g_control_mode_mutex;
 static std::mutex g_scan_controller_mutex;
 static bool g_target_visible = false;
@@ -322,6 +324,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   auto resetPendingSend = [&]() {
     g_send_aimbot_state.store(0x00, std::memory_order_release);
     g_send_is_scan.store(false, std::memory_order_release);
+    g_send_yaw_velocity.store(0.0f, std::memory_order_release);
+    g_send_pitch_velocity.store(0.0f, std::memory_order_release);
     g_has_pending_send.store(false, std::memory_order_release);
   };
 
@@ -573,17 +577,20 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
       if (has_matched_imu) {
         const auto t_angle_start = std::chrono::steady_clock::now();
-        std::pair<float, float> filtered_angles;
+        Tools::AngleCommand angle_command;
         if (has_realtime_frame_dt) {
-          filtered_angles = angle_calculator.CalculateAbsoluteAngles(
+          angle_command = angle_calculator.CalculateAbsoluteAnglesWithVelocity(
               center_x, center_y, matched_imu.yaw, matched_imu.pitch,
               filter_type, frame_dt);
         } else {
-          filtered_angles = angle_calculator.CalculateAbsoluteAngles(
+          angle_command = angle_calculator.CalculateAbsoluteAnglesWithVelocity(
               center_x, center_y, matched_imu.yaw, matched_imu.pitch,
               filter_type);
         }
-        const auto [filtered_yaw, filtered_pitch] = filtered_angles;
+        const float filtered_yaw = angle_command.yaw;
+        const float filtered_pitch = angle_command.pitch;
+        const float yaw_velocity = angle_command.yaw_velocity;
+        const float pitch_velocity = angle_command.pitch_velocity;
         const auto t_angle_end = std::chrono::steady_clock::now();
         latency_total.Add(latency_total.angle_calc_ns, t_angle_start,
                           t_angle_end);
@@ -624,6 +631,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           g_send_abs_pitch.store(send_abs_pitch, std::memory_order_release);
           g_send_offset_yaw.store(cmd_delta_yaw, std::memory_order_release);
           g_send_offset_pitch.store(cmd_delta_pitch, std::memory_order_release);
+          g_send_yaw_velocity.store(yaw_velocity, std::memory_order_release);
+          g_send_pitch_velocity.store(pitch_velocity,
+                                      std::memory_order_release);
           g_send_aimbot_state.store(0x01, std::memory_order_release);
           g_send_is_scan.store(false, std::memory_order_release);
 
@@ -848,15 +858,16 @@ void IMUSendThread(serial::Serial &port,
                               std::memory_order_release);
       g_send_offset_pitch.store(scan_command.offset_pitch_deg,
                                 std::memory_order_release);
+      g_send_yaw_velocity.store(0.0f, std::memory_order_release);
+      g_send_pitch_velocity.store(0.0f, std::memory_order_release);
       g_send_aimbot_state.store(scan_command.aimbot_state,
                                 std::memory_order_release);
       g_has_pending_send.store(true, std::memory_order_release);
 
       SerialTask::SerialSend(
           port, scan_command.absolute_pitch_deg, scan_command.absolute_yaw_deg,
-          g_send_offset_pitch.load(std::memory_order_acquire),
-          g_send_offset_yaw.load(std::memory_order_acquire),
-          scan_command.aimbot_state);
+          scan_command.offset_pitch_deg, scan_command.offset_yaw_deg, 0.0f,
+          0.0f, scan_command.aimbot_state);
       if (scan_waiting_at_origin && now >= scan_origin_deadline) {
         scan_waiting_at_origin = false;
         {
@@ -875,12 +886,15 @@ void IMUSendThread(serial::Serial &port,
       float yaw = g_send_abs_yaw.load(std::memory_order_acquire);
       float offset_yaw = g_send_offset_yaw.load(std::memory_order_acquire);
       float offset_pitch = g_send_offset_pitch.load(std::memory_order_acquire);
+      float yaw_velocity = g_send_yaw_velocity.load(std::memory_order_acquire);
+      float pitch_velocity =
+          g_send_pitch_velocity.load(std::memory_order_acquire);
       const uint8_t aimbot_state =
           g_send_aimbot_state.load(std::memory_order_acquire);
       std::cout << std::fixed << " offset_yaw: " << offset_yaw
                 << "°, offset_pitch: " << offset_pitch << "°" << std::endl;
       SerialTask::SerialSend(port, pitch, yaw, offset_pitch, offset_yaw,
-                             aimbot_state);
+                             pitch_velocity, yaw_velocity, aimbot_state);
       g_has_pending_send.store(false, std::memory_order_release);
     } else {
       std::this_thread::sleep_for(
@@ -978,7 +992,7 @@ const RuntimeParams &Params() {
       false, // enable_latency_profile: 是否启用阶段打点统计
       100, // latency_print_interval_frames: 每多少帧打印一次窗口统计
 
-      false, // enable_display: 是否启用显示窗口（关闭后 render 只保留极小开销）
+      true, // enable_display: 是否启用显示窗口（关闭后 render 只保留极小开销）
       false, // enable_motion_prediction: 测试时关闭运动预测，直接用检测框
       true, // enable_scan_mode: 调试跟踪振荡时可关闭 scan，仅保留 track 下发
 

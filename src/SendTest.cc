@@ -1,7 +1,7 @@
+#include <chrono>
+#include <iomanip>
 #include <iostream>
 #include <string>
-#include <iomanip>
-#include <chrono>
 #include <thread>
 
 #include <serial/serial.h>
@@ -10,10 +10,11 @@
 #include "SerialTask/SerialRead.hpp"
 #include "SerialTask/SerialSend.hpp"
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   try {
     if (argc < 3) {
-      std::cerr << "用法: " << argv[0] << " <pitch_relative_deg> <yaw_relative_deg>" << std::endl;
+      std::cerr << "用法: " << argv[0]
+                << " <pitch_relative_deg> <yaw_relative_deg>" << std::endl;
       return 1;
     }
 
@@ -34,7 +35,8 @@ int main(int argc, char** argv) {
 
     SerialTask::EulerAngles imu_angles{};
     bool got_imu = false;
-    const auto read_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+    const auto read_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
     int valid_frames = 0;
 
     // 在短时间窗口内连续取帧，始终保留“最后一帧”作为当前姿态。
@@ -62,18 +64,21 @@ int main(int argc, char** argv) {
     const float absolute_pitch_deg = imu_angles.pitch + pitch_relative_deg;
     const float absolute_yaw_deg = imu_angles.yaw + yaw_relative_deg;
 
-    SerialTask::SerialSend(port, absolute_pitch_deg, absolute_yaw_deg, 0x01);
+    SerialTask::SerialSend(port, absolute_pitch_deg, absolute_yaw_deg,
+                           pitch_relative_deg, yaw_relative_deg, 0, 0, 0x01);
 
-    std::cout << std::fixed << std::setprecision(3) << "IMU当前角度: pitch=" << imu_angles.pitch
+    std::cout << std::fixed << std::setprecision(3)
+              << "IMU当前角度: pitch=" << imu_angles.pitch
               << " deg, yaw=" << imu_angles.yaw << " deg" << std::endl;
-    std::cout << "输入相对角度: pitch=" << pitch_relative_deg << " deg, yaw=" << yaw_relative_deg << " deg"
+    std::cout << "输入相对角度: pitch=" << pitch_relative_deg
+              << " deg, yaw=" << yaw_relative_deg << " deg" << std::endl;
+    std::cout << "发送绝对角度: pitch=" << absolute_pitch_deg
+              << " deg, yaw=" << absolute_yaw_deg << " deg (已发送 1 次)"
               << std::endl;
-    std::cout << "发送绝对角度: pitch=" << absolute_pitch_deg << " deg, yaw=" << absolute_yaw_deg
-              << " deg (已发送 1 次)" << std::endl;
 
     port.close();
     return 0;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     std::cerr << "SendTest 异常: " << e.what() << std::endl;
     return 3;
   }
