@@ -311,9 +311,9 @@ inline const AngleCalculator::TuningParams &AngleCalculator::Params() {
 
       120.0, // oneeuro_freq_hz: OneEuro 采样频率（Hz），通常作为 dt
              // 异常时的回退值
-        5.0,   // oneeuro_min_cutoff_hz: 再抬高一点，减轻“偏稳”感
-        8.0,   // oneeuro_beta: 再上调一档，增强跟随性
-        3.0    // oneeuro_d_cutoff_hz: 导数估计截止频率，小幅再抬高
+      5.0,   // oneeuro_min_cutoff_hz: 再抬高一点，减轻“偏稳”感
+      8.0,   // oneeuro_beta: 再上调一档，增强跟随性
+      3.0    // oneeuro_d_cutoff_hz: 导数估计截止频率，小幅再抬高
   };
   return p;
 }

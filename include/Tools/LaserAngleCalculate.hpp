@@ -127,8 +127,8 @@ private:
         18.8f, // reference_distance_m: 用于归零的参考水平距离（米）
         10.0f, // min_valid_distance_m: 距离下限（米），防止近距数值异常
         0.0f, // fixed_offset_yaw: 固定补偿的yaw角（度），正值会让激光整体向右转
-        0.001f, // fixed_offset_pitch:
-                // 固定补偿的pitch角（度），正值会让激光整体向下转
+        0.00f, // fixed_offset_pitch:
+               // 固定补偿的pitch角（度），正值会让激光整体向下转
     };
     return p;
   }

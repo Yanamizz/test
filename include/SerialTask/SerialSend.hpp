@@ -35,11 +35,13 @@ inline float NormalizeDegTo360(float d) {
 
 inline void SendAimbotFrame(serial::Serial &serial_port,
                             float pitch_relative_angle,
-                            float yaw_relative_angle, uint8_t AimbotState);
+                            float yaw_relative_angle, float pitch_offset,
+                            float yaw_offset, uint8_t AimbotState);
 
 // 重载：使用已知的当前角度发送，不再从串口读取（适用于接收线程在外部运行时）
 inline void SerialSend(serial::Serial &serial_port, float absolute_pitch,
-                       float absolute_yaw, uint8_t AimbotState) {
+                       float absolute_yaw, float pitch_offset, float yaw_offset,
+                       uint8_t AimbotState) {
   float pitch_relative_angle = (absolute_pitch);
   float yaw_relative_angle = (absolute_yaw);
 
@@ -52,12 +54,14 @@ inline void SerialSend(serial::Serial &serial_port, float absolute_pitch,
   yaw_relative_angle *= kDegToRad;
 
   SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle,
-                              yaw_relative_angle, AimbotState);
+                              yaw_relative_angle, pitch_offset, yaw_offset,
+                              AimbotState);
 }
 
 inline void SendAimbotFrame(serial::Serial &serial_port,
                             float pitch_relative_angle,
-                            float yaw_relative_angle, uint8_t AimbotState) {
+                            float yaw_relative_angle, float pitch_offset,
+                            float yaw_offset, uint8_t AimbotState) {
   AimbotFrame_SCM_t aimbot_frame;
   aimbot_frame._SOF = 0x55;               // 包头
   aimbot_frame.ID = 0x02;                 // 发送 ID
@@ -65,6 +69,8 @@ inline void SendAimbotFrame(serial::Serial &serial_port,
   aimbot_frame.AimbotTarget = 0x00;       // 目前未使用，默认为 0
   aimbot_frame.PitchRelativeAngle = pitch_relative_angle;
   aimbot_frame.YawRelativeAngle = yaw_relative_angle;
+  aimbot_frame.PitchOffset = pitch_offset;
+  aimbot_frame.YawOffset = yaw_offset;
   aimbot_frame.SystemTimer = 0.0f; ///< 时间戳
   aimbot_frame._EOF = 0xFF;        // 包尾
   serial_port.write(reinterpret_cast<uint8_t *>(&aimbot_frame),

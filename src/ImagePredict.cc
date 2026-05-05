@@ -852,9 +852,11 @@ void IMUSendThread(serial::Serial &port,
                                 std::memory_order_release);
       g_has_pending_send.store(true, std::memory_order_release);
 
-      SerialTask::SerialSend(port, scan_command.absolute_pitch_deg,
-                             scan_command.absolute_yaw_deg,
-                             scan_command.aimbot_state);
+      SerialTask::SerialSend(
+          port, scan_command.absolute_pitch_deg, scan_command.absolute_yaw_deg,
+          g_send_offset_pitch.load(std::memory_order_acquire),
+          g_send_offset_yaw.load(std::memory_order_acquire),
+          scan_command.aimbot_state);
       if (scan_waiting_at_origin && now >= scan_origin_deadline) {
         scan_waiting_at_origin = false;
         {
@@ -875,9 +877,10 @@ void IMUSendThread(serial::Serial &port,
       float offset_pitch = g_send_offset_pitch.load(std::memory_order_acquire);
       const uint8_t aimbot_state =
           g_send_aimbot_state.load(std::memory_order_acquire);
-      // std::cout << std::fixed << " offset_yaw: " << offset_yaw
-      //           << "°, offset_pitch: " << offset_pitch << "°" << std::endl;
-      SerialTask::SerialSend(port, pitch, yaw, aimbot_state);
+      std::cout << std::fixed << " offset_yaw: " << offset_yaw
+                << "°, offset_pitch: " << offset_pitch << "°" << std::endl;
+      SerialTask::SerialSend(port, pitch, yaw, offset_pitch, offset_yaw,
+                             aimbot_state);
       g_has_pending_send.store(false, std::memory_order_release);
     } else {
       std::this_thread::sleep_for(
