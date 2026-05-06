@@ -59,7 +59,7 @@ link_directories(
 
 # 递归检索指定目录下所有 .cc
 set(SRC_ROOT ${PROJECT_SOURCE_DIR}/src)
-file(GLOB_RECURSE SRCS ${SRC_ROOT}/*.cc)
+file(GLOB_RECURSE SRCS CONFIGURE_DEPENDS ${SRC_ROOT}/*.cc)
 
 # 为每个 .cc 生成对应文件名的可执行文件
 foreach(src ${SRCS})

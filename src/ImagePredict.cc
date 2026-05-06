@@ -61,6 +61,8 @@ struct RuntimeParams {
   bool enable_display;
   bool enable_motion_prediction;
   bool enable_scan_mode;
+  bool enable_save_no_target_images;
+
   int scan_origin_hold_ms;
   double max_infer_fps;
   double scan_send_hz;
@@ -296,8 +298,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
             << (Params().enable_scan_mode ? "true" : "false") << std::endl;
   std::cout << "[扫描模式] 发送频率: " << Params().scan_send_hz << " Hz"
             << std::endl;
+  static std::unique_ptr<Tools::SaveImageOnNoTarget> no_target_saver;
+  if (Params().enable_save_no_target_images && !no_target_saver) {
+    no_target_saver =
+        std::make_unique<Tools::SaveImageOnNoTarget>(5, "captures");
+  }
 
-  // static Tools::SaveImageOnNoTarget no_target_saver(5, "captures");
   std::chrono::steady_clock::time_point prev_frame_ts{};
   bool has_prev_frame_ts = false;
   LatencyStats latency_total;
@@ -701,7 +707,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     }
 
     // 当检测框数量不是 1 个时，按间隔保存画框前原图
-    // no_target_saver.Update(raw_frame, result.boxes.size() != 1);
+    if (Params().enable_save_no_target_images && no_target_saver) {
+      no_target_saver->Update(raw_frame, result.boxes.size() != 1);
+    }
 
     // 处理 GUI 事件并允许按键退出
     if (do_gui_poll && ImageRecognize::ImageShow::WaitForExit()) {
@@ -995,6 +1003,7 @@ const RuntimeParams &Params() {
       true, // enable_display: 是否启用显示窗口（关闭后 render 只保留极小开销）
       false, // enable_motion_prediction: 测试时关闭运动预测，直接用检测框
       true, // enable_scan_mode: 调试跟踪振荡时可关闭 scan，仅保留 track 下发
+      false, // enable_save_no_target_images: 是否开启存图模式
 
       1000, // scan_origin_hold_ms: 扫描模式下保持原点的时间（毫秒）
       80.0, // max_infer_fps: 推理线程最大提交帧率，<=0 表示不限制
