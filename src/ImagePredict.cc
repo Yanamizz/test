@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "CameraTask/GetImage.hpp"
+#include "ImageRecognize/ImagePredictCommandLine.hpp"
 #include "ImageRecognize/ImagePredict_OPENVINO.hpp"
 #include "ImageRecognize/ImageShow.hpp"
 #include "ImageRecognize/TargetAssociation.hpp"
@@ -173,16 +174,19 @@ InterpolateEulerAngles(const SerialTask::EulerAngles &lower,
 
 void CaptureThread(CameraTask::GalaxyCamera *camera);
 void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
-                        Tools::ScanController &scan_controller);
+                        Tools::ScanController &scan_controller,
+                        bool enable_display);
 void IMUReadThread(serial::Serial &port);
 void IMUSendThread(serial::Serial &port,
                    Tools::ScanController &scan_controller);
 
-int main() {
+int main(int argc, char **argv) {
   CameraTask::GalaxyCamera camera;
   serial::Serial port;
   bool serial_enabled = false;
   std::unique_ptr<ImageRecognize::ImagePredict> predictor;
+  const auto command_line_options =
+      ImageRecognize::ParseImagePredictCommandLine(argc, argv);
 
   cv::setUseOptimized(true);
   cv::setNumThreads(1);
@@ -221,7 +225,8 @@ int main() {
   std::thread image_capture(CaptureThread, &camera);
   Tools::ScanController scan_controller;
   std::thread image_predict(ImagePredictThread, std::ref(*predictor),
-                            std::ref(scan_controller));
+                            std::ref(scan_controller),
+                            command_line_options.enable_display);
   std::thread imu_read;
   std::thread imu_send;
   if (serial_enabled) {
@@ -275,7 +280,8 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
 }
 
 void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
-                        Tools::ScanController &scan_controller) {
+                        Tools::ScanController &scan_controller,
+                        bool enable_display) {
   Tools::BindCurrentThreadToBigCores();
   FPSCounter fps_counter;
   static Tools::AngleCalculator
@@ -294,6 +300,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   std::cout << "[运动预测] 启用: "
             << (enable_motion_prediction ? "true" : "false") << std::endl;
   std::cout << "[跟踪阵营] 模式: " << ToString(target_camp_mode) << std::endl;
+  std::cout << "[显示窗口] 启用: " << (enable_display ? "true" : "false")
+            << std::endl;
   std::cout << "[扫描模式] 启用: "
             << (Params().enable_scan_mode ? "true" : "false") << std::endl;
   std::cout << "[扫描模式] 发送频率: " << Params().scan_send_hz << " Hz"
@@ -688,12 +696,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     // 渲染打点：统计显示和 GUI 轮询开销
     const auto t_render_start = std::chrono::steady_clock::now();
     const bool do_display =
-        Params().enable_display &&
+        enable_display &&
         (ui_frame_counter % static_cast<std::uint64_t>(
                                 std::max(1, Params().display_every_n_frames)) ==
          0);
     const bool do_gui_poll =
-        Params().enable_display &&
+        enable_display &&
         (ui_frame_counter % static_cast<std::uint64_t>(std::max(
                                 1, Params().gui_poll_every_n_frames)) ==
          0);
@@ -1000,7 +1008,7 @@ const RuntimeParams &Params() {
       false, // enable_latency_profile: 是否启用阶段打点统计
       100, // latency_print_interval_frames: 每多少帧打印一次窗口统计
 
-      true, // enable_display: 是否启用显示窗口（关闭后 render 只保留极小开销）
+      true, // enable_display: 是否启用显示窗口（可用 --no-display 关闭）
       false, // enable_motion_prediction: 测试时关闭运动预测，直接用检测框
       true, // enable_scan_mode: 调试跟踪振荡时可关闭 scan，仅保留 track 下发
       false, // enable_save_no_target_images: 是否开启存图模式

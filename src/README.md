@@ -1,143 +1,100 @@
-一、测试前网络连接方式
+一、测试前需要提前做的硬件设置
 
-可以使用下面任意一种方式：
-
-方式 1：设备 A 网口  <----网线---->  设备 B 网口
-
-方式 2：设备 A 网口  <----网线---->  交换机  <----网线---->  设备 B 网口
-
-现代网卡一般支持 Auto MDI-X，普通网线直连通常可以工作。若是很老的设备，直连失败时可能需要交叉网线，或者中间接交换机。
-
-二、IP 地址规划
+IP 地址规划
 
 两台设备必须配置在同一个网段，例如：
 
-设备	IP 地址	子网掩码	网关
-设备 A	192.168.10.1	255.255.255.0	可不填
-设备 B	192.168.10.2	255.255.255.0	可不填
-
-端口使用：
-
-TCP 端口：5000
-三、Linux 下网络设置
-
-先查看网卡名：
-
-ip link
-
-假设设备 A 的网卡名是 eth0，配置如下：
-
-sudo ip addr flush dev eth0
-sudo ip addr add 192.168.10.1/24 dev eth0
-sudo ip link set eth0 up
-
-设备 B 配置如下：
-
-sudo ip addr flush dev eth0
-sudo ip addr add 192.168.10.2/24 dev eth0
-sudo ip link set eth0 up
-
-如果你的网卡名不是 eth0，例如是 enp3s0、ens33，把命令里的 eth0 替换掉即可。
-
-检查 IP：
-
-ip addr show eth0
-
-在设备 A 上测试能否 ping 通设备 B：
-
-ping 192.168.10.2
-
-在设备 B 上测试能否 ping 通设备 A：
-
-ping 192.168.10.1
-
-如果系统开启了防火墙，需要放行端口 5000。
-
-Ubuntu / Debian 常见命令：
-
-sudo ufw allow 5000/tcp
-
-CentOS / Rocky / Fedora 常见命令：
-
-sudo firewall-cmd --add-port=5000/tcp --permanent
-sudo firewall-cmd --reload
-四、Windows 下网络设置
-
-进入：
-
-控制面板
-→ 网络和 Internet
-→ 网络连接
-→ 以太网
-→ 属性
-→ Internet 协议版本 4 TCP/IPv4
-
-设备 A 设置：
-
-IP 地址：192.168.10.1
-子网掩码：255.255.255.0
-默认网关：不填
-DNS：不填
-
-设备 B 设置：
-
-IP 地址：192.168.10.2
-子网掩码：255.255.255.0
-默认网关：不填
-DNS：不填
+| 设备   |     IP 地址   | 子网掩码       |  网关  | 
+| 设备 A | 192.168.10.1 | 255.255.255.0 | 可不填 |  （发）
+| 设备 B | 192.168.10.2 | 255.255.255.0 | 可不填 |  （收）
+TCP 端口使用 5000。
 
 然后在设备 A 上测试：
-
+```bash
 ping 192.168.10.2
+```
 
 在设备 B 上测试：
-
+```bash
 ping 192.168.10.1
-
-如果 Windows 防火墙拦截，需要放行 TCP 5000 端口，或者临时关闭防火墙进行测试。
-
+```
 
 
+二、头文件调用方式
 
-九、运行测试步骤
+如果修改IP需要在头文件中修改默认值
 
-先在设备 A 上运行服务端：
+1. 收方：把收到的数据写入变量
 
-./device_a_server 5000
+```cpp
+#include "NetworkTask/DeviceAServer.hpp"
 
-输出类似：
+NetworkTask::socket_t listen_fd = NetworkTask::kInvalidSocketFd;
+if (!NetworkTask::CreateListeningSocket(listen_fd)) {
+  // 处理错误
+}
 
-设备 A 服务端已启动，监听端口：5000
-等待设备 B 连接...
+NetworkTask::socket_t client_fd = NetworkTask::kInvalidSocketFd;
+std::string client_ip;
+if (!NetworkTask::AcceptClient(listen_fd, client_fd, &client_ip)) {
+  // 处理错误
+}
 
-然后在设备 B 上运行客户端：
+std::string received_content;
+if (NetworkTask::ReceiveText(client_fd, received_content)) {
+  // received_content 就是收方收到的数据
+}
+```
 
-./device_b_client 192.168.10.1 5000
+连续循环接收时，可以一直复用同一个变量：
 
-连接成功后，设备 A 会显示：
+```cpp
+std::string received_content;
+while (running) {
+  if (!NetworkTask::ReceiveText(client_fd, received_content)) {
+    break;
+  }
 
-设备 B 已连接，IP：192.168.10.2
+  // received_content 每次都会被更新
+}
+```
 
-此时两边都可以输入消息。
+2. 发方：把内容传入发送接口
 
-例如设备 B 输入：
+```cpp
+#include "NetworkTask/DeviceBClient.hpp"
 
-hello from device B
+NetworkTask::socket_t fd = NetworkTask::kInvalidSocketFd;
+if (!NetworkTask::ConnectToServer(fd)) {
+  // 处理错误
+}
 
-设备 A 会收到：
+std::string input_content = "hello from device B";
+NetworkTask::SendText(fd, input_content);
+```
 
-[收到] hello from device B
+如果要持续发送，只需要不断更新 input_content 再调用 SendText 即可。
 
-设备 A 输入：
+三、测试程序的运行方式
 
-hello from device A
+如果只是直接跑测试程序，也可以继续使用现成可执行文件：
 
-设备 B 会收到：
+收方：
 
-[收到] hello from device A
+```bash
+./device_a_server
+```
 
-任意一端输入：
+发方：
 
-quit
+```bash
+./device_b_client
+```
 
-即可退出。
+四、测试流程建议
+
+1. 先完成硬件连接和 IP 配置。
+2. 先启动收方 device_a_server。
+3. 再启动发方 device_b_client。
+4. 收方用 ReceiveText 把数据传出到变量，发方用 SendText 把内容传入发送接口。
+5. 任意一端输入 quit，双方退出。
