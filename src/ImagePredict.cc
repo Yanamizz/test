@@ -156,11 +156,10 @@ static void StartScanMode() {
 
 static void SendAimbotCommand(serial::Serial &port,
                               const AimbotSendCommand &command) {
-  SerialTask::SerialSend(port, command.absolute_pitch, command.absolute_yaw,
-                         command.offset_pitch, command.offset_yaw,
-                         command.pitch_velocity, command.yaw_velocity,
-                         command.aimbot_state,
-                         g_aimbot_target.load(std::memory_order_acquire));
+  SerialTask::SerialSend(
+      port, command.absolute_pitch, command.absolute_yaw, command.offset_pitch,
+      command.offset_yaw, command.pitch_velocity, command.yaw_velocity,
+      command.aimbot_state, g_aimbot_target.load(std::memory_order_acquire));
 }
 
 static bool OpenSerialPort(serial::Serial &port) {
@@ -294,19 +293,17 @@ InterpolateEulerAngles(const SerialTask::EulerAngles &lower,
 }
 
 // 用图像帧时间戳匹配 IMU，必要时在相邻两帧 IMU 之间插值。
-static bool MatchImuForFrame(
-    const std::chrono::steady_clock::time_point &frame_ts,
-    SerialTask::EulerAngles *matched_imu) {
+static bool
+MatchImuForFrame(const std::chrono::steady_clock::time_point &frame_ts,
+                 SerialTask::EulerAngles *matched_imu) {
   std::lock_guard<std::mutex> lk(g_imu_mutex);
   if (g_imu_buffer.empty()) {
     return false;
   }
 
-  auto upper_it =
-      std::lower_bound(g_imu_buffer.begin(), g_imu_buffer.end(), frame_ts,
-                       [](const auto &entry, const auto &ts) {
-                         return entry.first < ts;
-                       });
+  auto upper_it = std::lower_bound(
+      g_imu_buffer.begin(), g_imu_buffer.end(), frame_ts,
+      [](const auto &entry, const auto &ts) { return entry.first < ts; });
 
   if (g_imu_buffer.size() == 1 || upper_it == g_imu_buffer.begin()) {
     *matched_imu = g_imu_buffer.front().second;
@@ -318,19 +315,17 @@ static bool MatchImuForFrame(
   }
 
   const auto lower_it = std::prev(upper_it);
-  const auto span_ns =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(upper_it->first -
-                                                           lower_it->first)
-          .count();
+  const auto span_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           upper_it->first - lower_it->first)
+                           .count();
   if (span_ns <= 0) {
     *matched_imu = upper_it->second;
     return true;
   }
 
-  const auto elapsed_ns =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(frame_ts -
-                                                           lower_it->first)
-          .count();
+  const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              frame_ts - lower_it->first)
+                              .count();
   const float alpha =
       static_cast<float>(elapsed_ns) / static_cast<float>(span_ns);
   *matched_imu =
@@ -508,8 +503,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       cv::Mat next_raw_frame;
       std::chrono::steady_clock::time_point next_frame_ts{};
       if (!SnapshotLatestFrame(has_last_submitted_frame_ts, inflight_frame_ts,
-                               &next_frame, &next_raw_frame,
-                               &next_frame_ts)) {
+                               &next_frame, &next_raw_frame, &next_frame_ts)) {
         continue;
       }
 
@@ -691,9 +685,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
             Tools::NormalizeDeltaDeg(filtered_pitch - matched_imu.pitch);
 
         auto [laser_yaw_angle, laser_pitch_angle] =
-            laser_angle_calculator.CalculateLaserAngles(distance,
-                                                        offset_yaw_angle,
-                                                        offset_pitch_angle);
+            laser_angle_calculator.CalculateLaserAngles(
+                distance, offset_yaw_angle, offset_pitch_angle);
 
         const auto t_control_start = std::chrono::steady_clock::now();
         float delta_yaw_raw = Tools::NormalizeDeltaDeg(
@@ -712,10 +705,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           const float send_abs_yaw = matched_imu.yaw + cmd_delta_yaw;
           const float send_abs_pitch = matched_imu.pitch + cmd_delta_pitch;
 
-          StorePendingSend(AimbotSendCommand{send_abs_pitch, send_abs_yaw,
-                                             cmd_delta_pitch, cmd_delta_yaw,
-                                             pitch_velocity, yaw_velocity,
-                                             0x01});
+          StorePendingSend(AimbotSendCommand{
+              send_abs_pitch, send_abs_yaw, cmd_delta_pitch, cmd_delta_yaw,
+              pitch_velocity, yaw_velocity, 0x01});
           ImageRecognize::ImageShow::ShowAngles(
               frame, send_abs_yaw, send_abs_pitch, matched_imu.yaw,
               matched_imu.pitch, cmd_delta_yaw, cmd_delta_pitch, distance);
@@ -1048,8 +1040,7 @@ bool ParseAimbotTargetMessage(const std::string &message, uint8_t &target) {
     target = 0x01;
     return true;
   }
-  if (!text.empty() &&
-      std::all_of(text.begin(), text.end(), [](char c) {
+  if (!text.empty() && std::all_of(text.begin(), text.end(), [](char c) {
         return c == '0' || c == '1' || c == 'X';
       })) {
     for (auto it = text.rbegin(); it != text.rend(); ++it) {
@@ -1077,7 +1068,7 @@ bool ParseAimbotTargetMessage(const std::string &message, uint8_t &target) {
 }
 
 bool ShouldTrackClassId(int class_id, TargetCampMode mode) {
-  if (class_id == 2) {
+  if (class_id == 2 || class_id == 3) {
     return true;
   }
 
@@ -1087,7 +1078,7 @@ bool ShouldTrackClassId(int class_id, TargetCampMode mode) {
   case TargetCampMode::BlueAndPurple:
     return class_id == 1;
   case TargetCampMode::All:
-    return class_id == 0 || class_id == 1 || class_id == 2;
+    return class_id == 0 || class_id == 1 || class_id == 2 || class_id == 3;
   default:
     return false;
   }
@@ -1110,12 +1101,12 @@ FilterTrackBoxes(const std::vector<std::array<float, 6>> &boxes,
 const RuntimeParams &Params() {
   // ===== 调参集中区（统一放在文件末尾）=====
   static const RuntimeParams p{
-      "/home/nuc/antidrone/src/model/antidrone_26n.xml", // model_path:
+      "/home/nuc/antidrone/src/model/antidrone_all.xml", // model_path:
                                                          // 模型路径
       "CPU", // openvino_device_name: 低延迟优先，优先使用核显推理
       "ONE_EURO", // angle_filter_type:
                   // 角度滤波类型（NONE/KF/EKF/UKF/CKF/ONE_EURO）
-      "RED",      // target_camp_mode: RED/BLUE/ALL；purple 始终允许跟踪
+      "ALL",      // target_camp_mode: RED/BLUE/ALL；purple 始终允许跟踪
 
       1000, // capture_timeout_ms: 相机取帧超时（毫秒）
       5,    // capture_empty_sleep_ms: 空帧时休眠（毫秒）
@@ -1134,10 +1125,10 @@ const RuntimeParams &Params() {
       false, // enable_latency_profile: 是否启用阶段打点统计
       100, // latency_print_interval_frames: 每多少帧打印一次窗口统计
 
-      true, // enable_display: 是否启用显示窗口（可用 --no-display 关闭）
+      false, // enable_display: 是否启用显示窗口（可用 --no-display 关闭）
       false, // enable_motion_prediction: 测试时关闭运动预测，直接用检测框
       true, // enable_scan_mode: 调试跟踪振荡时可关闭 scan，仅保留 track 下发
-      false, // enable_save_no_target_images: 是否开启存图模式
+      true, // enable_save_no_target_images: 是否开启存图模式
 
       1000, // scan_origin_hold_ms: 扫描模式下保持原点的时间（毫秒）
       80.0, // max_infer_fps: 推理线程最大提交帧率，<=0 表示不限制

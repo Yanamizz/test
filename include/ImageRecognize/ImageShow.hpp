@@ -16,6 +16,8 @@ public:
       return "blue";
     case 2:
       return "purple";
+    case 3:
+      return "target";
     default:
       return "unknown";
     }

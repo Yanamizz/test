@@ -12,32 +12,46 @@ constexpr float kPi = 3.1415926f;
 class DistanceCalculator {
 public:
   float CalculateDistance(float edge_a, float edge_b) {
-    float h_ = std::max(edge_a, edge_b);
-    float w_ = std::min(edge_a, edge_b);
-    if (h_ <= 0.0f || w_ <= 0.0f)
+    static_cast<void>(edge_b);
+    const float h_ = edge_a;
+    if (h_ <= 0.0f)
       return 0.0f;
-    float distance_by_h = (Params().target_height * focal_px_) / h_;
-    float distance_by_w = (Params().target_width * focal_px_) / w_;
-    const float raw_distance =
-        FuseDistance(distance_by_h, distance_by_w, h_, w_);
+
+    const float raw_distance = EstimateCalibratedDistanceByHeight(h_);
     return FilterDistance(raw_distance);
   }
 
 private:
   struct TunableParams {
-    float target_height;
-    float target_width;
-    float width_weight_scale;
+    float near_calibration_distance_m;
+    float near_calibration_target_height;
+    float near_pixel;
+    float far_calibration_distance_m;
+    float far_calibration_target_height;
+    float far_pixel;
     float distance_filter_alpha;
     float filter_reset_ratio;
   };
 
-  static float FuseDistance(float distance_by_h, float distance_by_w,
-                            float pixel_h, float pixel_w) {
-    const float height_weight = pixel_h * pixel_h;
-    const float width_weight = pixel_w * pixel_w * Params().width_weight_scale;
-    return (distance_by_h * height_weight + distance_by_w * width_weight) /
-           (height_weight + width_weight);
+  float EstimateCalibratedDistanceByHeight(float pixel_h) const {
+    const float near_height = Params().near_calibration_target_height;
+    const float far_height = Params().far_calibration_target_height;
+    const float near_pixel = Params().near_pixel;
+    const float far_pixel = Params().far_pixel;
+
+    if (near_pixel <= 0.0f || far_pixel <= 0.0f || near_height <= 0.0f ||
+        far_height <= 0.0f || std::abs(far_pixel - near_pixel) <= 1e-6f) {
+      return EstimateDistanceByHeight(far_height, pixel_h);
+    }
+
+    const float t = std::clamp(
+        (pixel_h - near_pixel) / (far_pixel - near_pixel), 0.0f, 1.0f);
+    const float target_height = near_height + t * (far_height - near_height);
+    return EstimateDistanceByHeight(target_height, pixel_h);
+  }
+
+  float EstimateDistanceByHeight(float target_height, float pixel_h) const {
+    return (target_height * focal_px_) / pixel_h;
   }
 
   float FilterDistance(float raw_distance) {
@@ -62,9 +76,12 @@ private:
   static const TunableParams &Params() {
     // ===== 调参集中区（统一放在文件末尾）=====
     static const TunableParams p{
-        0.060f, // target_height: 目标实际高度（米）
-        0.055f, // target_width: 目标实际宽度（米）
-        0.15f, // width_weight_scale: 宽度框更容易受姿态影响，略降权
+        13.0f, // near_calibration_distance_m: 近点标定距离（米）
+        0.0591f, // near_calibration_target_height: 近点补偿目标高度（米）
+        83.9f, // near_pixel: 近点标定时目标在图像中的像素高度（px）
+        20.0f, // far_calibration_distance_m: 远点标定距离（米）
+        0.0655f, // far_calibration_target_height: 远点补偿目标高度（米）
+        59.56f, // far_pixel: 远点标定时目标在图像中的像素高度（px）
         0.25f, // distance_filter_alpha: 一阶滤波系数，越大响应越快
         0.5f   // filter_reset_ratio: 距离突变超过该比例时重置滤波
     };
