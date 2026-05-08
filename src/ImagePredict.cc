@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -20,6 +22,7 @@
 #include "ImageRecognize/ImageShow.hpp"
 #include "ImageRecognize/TargetAssociation.hpp"
 #include "ImageRecognize/TargetMotionPredictor.hpp"
+#include "NetworkTask/DeviceAServer.hpp"
 #include "SerialTask/SerialRead.hpp"
 #include "SerialTask/SerialSend.hpp"
 #include "Tools/AngleCalculate.hpp"
@@ -71,10 +74,21 @@ struct RuntimeParams {
   int gui_poll_every_n_frames;
 };
 
+struct AimbotSendCommand {
+  float absolute_pitch = 0.0f;
+  float absolute_yaw = 0.0f;
+  float offset_pitch = 0.0f;
+  float offset_yaw = 0.0f;
+  float pitch_velocity = 0.0f;
+  float yaw_velocity = 0.0f;
+  uint8_t aimbot_state = 0x00;
+};
+
 const RuntimeParams &Params();
 
 TargetCampMode ParseTargetCampMode(const std::string &mode);
 const char *ToString(TargetCampMode mode);
+bool ParseAimbotTargetMessage(const std::string &message, uint8_t &target);
 bool ShouldTrackClassId(int class_id, TargetCampMode mode);
 std::vector<std::array<float, 6>>
 FilterTrackBoxes(const std::vector<std::array<float, 6>> &boxes,
@@ -100,20 +114,129 @@ static FrameItem g_frame_buffers[2];    // 双buffer
 static std::atomic<int> g_write_idx{0}; // 当前写入buffer索引
 static std::atomic<int> g_read_idx{-1}; // 当前可读buffer索引，-1表示无新帧
 
-static std::atomic<bool> g_has_pending_send{false}; // 是否有待发送的控制命令
-static std::atomic<uint8_t> g_send_aimbot_state{0x00};
+// 线程间共享的控制输出；图像线程写入，串口线程读取并发送。
+static std::mutex g_pending_send_mutex;
+static AimbotSendCommand g_pending_send;
+static bool g_has_pending_send = false;
+static std::atomic<uint8_t> g_aimbot_target{0x00};
 static std::atomic<bool> g_send_is_scan{false};
-static std::atomic<float> g_send_abs_yaw{0.0f};
-static std::atomic<float> g_send_abs_pitch{0.0f};
-static std::atomic<float> g_send_offset_yaw{0.0f};
-static std::atomic<float> g_send_offset_pitch{0.0f};
-static std::atomic<float> g_send_yaw_velocity{0.0f};
-static std::atomic<float> g_send_pitch_velocity{0.0f};
-static std::mutex g_control_mode_mutex;
 static std::mutex g_scan_controller_mutex;
-static bool g_target_visible = false;
+static std::atomic<bool> g_target_visible{false};
 
 namespace {
+static void ClearPendingSend() {
+  std::lock_guard<std::mutex> lk(g_pending_send_mutex);
+  g_send_is_scan.store(false, std::memory_order_release);
+  g_has_pending_send = false;
+}
+
+static void StorePendingSend(const AimbotSendCommand &command) {
+  std::lock_guard<std::mutex> lk(g_pending_send_mutex);
+  g_pending_send = command;
+  g_send_is_scan.store(false, std::memory_order_release);
+  g_has_pending_send = true;
+}
+
+static bool TakePendingSend(AimbotSendCommand *command) {
+  std::lock_guard<std::mutex> lk(g_pending_send_mutex);
+  if (!g_has_pending_send) {
+    return false;
+  }
+
+  *command = g_pending_send;
+  g_has_pending_send = false;
+  return true;
+}
+
+static void StartScanMode() {
+  std::lock_guard<std::mutex> lk(g_pending_send_mutex);
+  g_has_pending_send = false;
+  g_send_is_scan.store(true, std::memory_order_release);
+}
+
+static void SendAimbotCommand(serial::Serial &port,
+                              const AimbotSendCommand &command) {
+  SerialTask::SerialSend(port, command.absolute_pitch, command.absolute_yaw,
+                         command.offset_pitch, command.offset_yaw,
+                         command.pitch_velocity, command.yaw_velocity,
+                         command.aimbot_state,
+                         g_aimbot_target.load(std::memory_order_acquire));
+}
+
+static bool OpenSerialPort(serial::Serial &port) {
+  if (port.isOpen()) {
+    return true;
+  }
+
+  SerialTask::DefaultConfig(port);
+  try {
+    port.open();
+    return true;
+  } catch (const std::exception &e) {
+    std::cerr << "Warning: failed to open IMU serial port, continue without "
+                 "serial: "
+              << e.what() << std::endl;
+    return false;
+  }
+}
+
+static void JoinIfNeeded(std::thread &thread) {
+  if (thread.joinable()) {
+    thread.join();
+  }
+}
+
+static void PrintPredictSettings(Tools::FilterType filter_type,
+                                 TargetCampMode target_camp_mode,
+                                 bool enable_display,
+                                 bool enable_motion_prediction) {
+  std::cout << "[角度滤波] 类型: " << Tools::ToString(filter_type) << std::endl;
+  std::cout << "[运动预测] 启用: "
+            << (enable_motion_prediction ? "true" : "false") << std::endl;
+  std::cout << "[跟踪阵营] 模式: " << ToString(target_camp_mode) << std::endl;
+  std::cout << "[显示窗口] 启用: " << (enable_display ? "true" : "false")
+            << std::endl;
+  std::cout << "[扫描模式] 启用: "
+            << (Params().enable_scan_mode ? "true" : "false") << std::endl;
+  std::cout << "[扫描模式] 发送频率: " << Params().scan_send_hz << " Hz"
+            << std::endl;
+}
+
+// 等待相机线程交付下一帧；raw_frame 保留给未命中保存逻辑使用。
+static bool SnapshotLatestFrame(
+    bool has_last_submitted_frame_ts,
+    const std::chrono::steady_clock::time_point &last_submitted_frame_ts,
+    cv::Mat *frame, cv::Mat *raw_frame,
+    std::chrono::steady_clock::time_point *frame_ts) {
+  std::unique_lock<std::mutex> lk(g_frame_mutex);
+  const auto has_new_frame = [&]() {
+    const int read_idx = g_read_idx.load(std::memory_order_acquire);
+    if (read_idx < 0) {
+      return false;
+    }
+    return !has_last_submitted_frame_ts ||
+           g_frame_buffers[read_idx].ts != last_submitted_frame_ts;
+  };
+
+  g_frame_cv.wait(lk, [&]() { return !g_running || has_new_frame(); });
+  if (!g_running) {
+    return false;
+  }
+
+  const int read_idx = g_read_idx.load(std::memory_order_acquire);
+  if (read_idx < 0) {
+    return false;
+  }
+
+  *frame = g_frame_buffers[read_idx].frame;
+  *frame_ts = g_frame_buffers[read_idx].ts;
+  if (frame->empty()) {
+    return false;
+  }
+  *raw_frame = frame->clone();
+  return true;
+}
+
 struct LatencyStats {
   std::uint64_t frames = 0;
   std::uint64_t infer_ns = 0;
@@ -170,6 +293,61 @@ InterpolateEulerAngles(const SerialTask::EulerAngles &lower,
   return result;
 }
 
+// 用图像帧时间戳匹配 IMU，必要时在相邻两帧 IMU 之间插值。
+static bool MatchImuForFrame(
+    const std::chrono::steady_clock::time_point &frame_ts,
+    SerialTask::EulerAngles *matched_imu) {
+  std::lock_guard<std::mutex> lk(g_imu_mutex);
+  if (g_imu_buffer.empty()) {
+    return false;
+  }
+
+  auto upper_it =
+      std::lower_bound(g_imu_buffer.begin(), g_imu_buffer.end(), frame_ts,
+                       [](const auto &entry, const auto &ts) {
+                         return entry.first < ts;
+                       });
+
+  if (g_imu_buffer.size() == 1 || upper_it == g_imu_buffer.begin()) {
+    *matched_imu = g_imu_buffer.front().second;
+    return true;
+  }
+  if (upper_it == g_imu_buffer.end()) {
+    *matched_imu = g_imu_buffer.back().second;
+    return true;
+  }
+
+  const auto lower_it = std::prev(upper_it);
+  const auto span_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(upper_it->first -
+                                                           lower_it->first)
+          .count();
+  if (span_ns <= 0) {
+    *matched_imu = upper_it->second;
+    return true;
+  }
+
+  const auto elapsed_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(frame_ts -
+                                                           lower_it->first)
+          .count();
+  const float alpha =
+      static_cast<float>(elapsed_ns) / static_cast<float>(span_ns);
+  *matched_imu =
+      InterpolateEulerAngles(lower_it->second, upper_it->second, alpha);
+  return true;
+}
+
+static bool GetLatestImu(SerialTask::EulerAngles *latest_imu) {
+  std::lock_guard<std::mutex> lk(g_imu_mutex);
+  if (g_imu_buffer.empty()) {
+    return false;
+  }
+
+  *latest_imu = g_imu_buffer.back().second;
+  return true;
+}
+
 } // namespace
 
 void CaptureThread(CameraTask::GalaxyCamera *camera);
@@ -179,11 +357,11 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 void IMUReadThread(serial::Serial &port);
 void IMUSendThread(serial::Serial &port,
                    Tools::ScanController &scan_controller);
+void AimbotTargetReceiveThread();
 
 int main(int argc, char **argv) {
   CameraTask::GalaxyCamera camera;
   serial::Serial port;
-  bool serial_enabled = false;
   std::unique_ptr<ImageRecognize::ImagePredict> predictor;
   const auto command_line_options =
       ImageRecognize::ParseImagePredictCommandLine(argc, argv);
@@ -207,20 +385,7 @@ int main(int argc, char **argv) {
 
   Tools::BindCurrentThreadToAllCores();
 
-  if (!port.isOpen()) {
-    SerialTask::DefaultConfig(port);
-    try {
-      port.open();
-      serial_enabled = true;
-    } catch (const std::exception &e) {
-      std::cerr << "Warning: failed to open IMU serial port, continue without "
-                   "serial: "
-                << e.what() << std::endl;
-      serial_enabled = false;
-    }
-  } else {
-    serial_enabled = true;
-  }
+  const bool serial_enabled = OpenSerialPort(port);
 
   std::thread image_capture(CaptureThread, &camera);
   Tools::ScanController scan_controller;
@@ -229,7 +394,10 @@ int main(int argc, char **argv) {
                             command_line_options.enable_display);
   std::thread imu_read;
   std::thread imu_send;
+  std::thread aimbot_target_receive;
   if (serial_enabled) {
+    // 只有串口可用时才启动云台相关链路。
+    aimbot_target_receive = std::thread(AimbotTargetReceiveThread);
     imu_read = std::thread(IMUReadThread, std::ref(port));
     imu_send =
         std::thread(IMUSendThread, std::ref(port), std::ref(scan_controller));
@@ -237,14 +405,11 @@ int main(int argc, char **argv) {
     std::cout << "[IMU] 串口已禁用，仅运行检测/显示。" << std::endl;
   }
 
-  if (image_capture.joinable())
-    image_capture.join();
-  if (image_predict.joinable())
-    image_predict.join();
-  if (imu_read.joinable())
-    imu_read.join();
-  if (imu_send.joinable())
-    imu_send.join();
+  JoinIfNeeded(image_capture);
+  JoinIfNeeded(image_predict);
+  JoinIfNeeded(imu_read);
+  JoinIfNeeded(imu_send);
+  JoinIfNeeded(aimbot_target_receive);
 
   return 0;
 }
@@ -264,12 +429,11 @@ void CaptureThread(CameraTask::GalaxyCamera *camera) {
       continue;
     }
 
-    // 双buffer写入：无锁切换，避免clone
+    // 双 buffer 避免相机线程和推理线程争用同一帧。
     int write_idx = g_write_idx.load(std::memory_order_relaxed);
-    g_frame_buffers[write_idx].frame = std::move(frame); // 移动语义，避免拷贝
+    g_frame_buffers[write_idx].frame = std::move(frame);
     g_frame_buffers[write_idx].ts = std::chrono::steady_clock::now();
 
-    // 原子切换读写索引
     int next_write = 1 - write_idx;
     g_write_idx.store(next_write, std::memory_order_release);
     g_read_idx.store(write_idx, std::memory_order_release);
@@ -296,16 +460,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       ParseTargetCampMode(Params().target_camp_mode);
   const bool enable_motion_prediction = Params().enable_motion_prediction;
 
-  std::cout << "[角度滤波] 类型: " << Tools::ToString(filter_type) << std::endl;
-  std::cout << "[运动预测] 启用: "
-            << (enable_motion_prediction ? "true" : "false") << std::endl;
-  std::cout << "[跟踪阵营] 模式: " << ToString(target_camp_mode) << std::endl;
-  std::cout << "[显示窗口] 启用: " << (enable_display ? "true" : "false")
-            << std::endl;
-  std::cout << "[扫描模式] 启用: "
-            << (Params().enable_scan_mode ? "true" : "false") << std::endl;
-  std::cout << "[扫描模式] 发送频率: " << Params().scan_send_hz << " Hz"
-            << std::endl;
+  PrintPredictSettings(filter_type, target_camp_mode, enable_display,
+                       enable_motion_prediction);
   static std::unique_ptr<Tools::SaveImageOnNoTarget> no_target_saver;
   if (Params().enable_save_no_target_images && !no_target_saver) {
     no_target_saver =
@@ -335,51 +491,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   std::chrono::steady_clock::time_point next_infer_submit_time =
       std::chrono::steady_clock::now();
 
-  auto resetPendingSend = [&]() {
-    g_send_aimbot_state.store(0x00, std::memory_order_release);
-    g_send_is_scan.store(false, std::memory_order_release);
-    g_send_yaw_velocity.store(0.0f, std::memory_order_release);
-    g_send_pitch_velocity.store(0.0f, std::memory_order_release);
-    g_has_pending_send.store(false, std::memory_order_release);
-  };
-
-  auto snapshotLatestFrame =
-      [&](cv::Mat *frame, cv::Mat *raw_frame,
-          std::chrono::steady_clock::time_point *frame_ts) -> bool {
-    std::unique_lock<std::mutex> lk(g_frame_mutex);
-    const auto has_new_frame = [&]() {
-      if (g_read_idx.load(std::memory_order_acquire) < 0) {
-        return false;
-      }
-      const int read_idx = g_read_idx.load(std::memory_order_acquire);
-      if (read_idx < 0) {
-        return false;
-      }
-      if (!has_last_submitted_frame_ts) {
-        return true;
-      }
-      return g_frame_buffers[read_idx].ts != inflight_frame_ts;
-    };
-
-    g_frame_cv.wait(lk, [&]() { return !g_running || has_new_frame(); });
-    if (!g_running) {
-      return false;
-    }
-
-    const int read_idx = g_read_idx.load(std::memory_order_acquire);
-    if (read_idx < 0) {
-      return false;
-    }
-
-    *frame = g_frame_buffers[read_idx].frame;
-    *frame_ts = g_frame_buffers[read_idx].ts;
-    if (frame->empty()) {
-      return false;
-    }
-    *raw_frame = frame->clone();
-    return true;
-  };
-
   while (g_running) {
     if (!infer_inflight) {
       if (infer_submit_interval !=
@@ -396,7 +507,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       cv::Mat next_frame;
       cv::Mat next_raw_frame;
       std::chrono::steady_clock::time_point next_frame_ts{};
-      if (!snapshotLatestFrame(&next_frame, &next_raw_frame, &next_frame_ts)) {
+      if (!SnapshotLatestFrame(has_last_submitted_frame_ts, inflight_frame_ts,
+                               &next_frame, &next_raw_frame,
+                               &next_frame_ts)) {
         continue;
       }
 
@@ -461,44 +574,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
       // 关联最近一次 IMU 状态并记录延迟
       const auto t_imu_match_start = std::chrono::steady_clock::now();
-      {
-        std::lock_guard<std::mutex> lk(g_imu_mutex);
-        if (!g_imu_buffer.empty()) {
-          auto upper_it =
-              std::lower_bound(g_imu_buffer.begin(), g_imu_buffer.end(),
-                               frame_ts, [](const auto &entry, const auto &ts) {
-                                 return entry.first < ts;
-                               });
-
-          if (g_imu_buffer.size() == 1 || upper_it == g_imu_buffer.begin()) {
-            matched_imu = g_imu_buffer.front().second;
-            has_matched_imu = true;
-          } else if (upper_it == g_imu_buffer.end()) {
-            matched_imu = g_imu_buffer.back().second;
-            has_matched_imu = true;
-          } else {
-            auto lower_it = std::prev(upper_it);
-            const auto span_ns =
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    upper_it->first - lower_it->first)
-                    .count();
-            if (span_ns > 0) {
-              const auto elapsed_ns =
-                  std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      frame_ts - lower_it->first)
-                      .count();
-              float alpha =
-                  static_cast<float>(elapsed_ns) / static_cast<float>(span_ns);
-              matched_imu = InterpolateEulerAngles(lower_it->second,
-                                                   upper_it->second, alpha);
-              has_matched_imu = true;
-            } else {
-              matched_imu = upper_it->second;
-              has_matched_imu = true;
-            }
-          }
-        }
-      }
+      has_matched_imu = MatchImuForFrame(frame_ts, &matched_imu);
       const auto t_imu_match_end = std::chrono::steady_clock::now();
       latency_total.Add(latency_total.imu_match_ns, t_imu_match_start,
                         t_imu_match_end);
@@ -509,7 +585,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       std::cerr << "ImagePredictThread exception: " << e.what() << std::endl;
     }
 
-    cv::Point2d offset_angles;
     std::array<float, 6> tracked_box{};
     bool has_tracked_box = false;
     const auto track_boxes = FilterTrackBoxes(result.boxes, target_camp_mode);
@@ -519,10 +594,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     const bool track_alive =
         track_result.has_box || target_tracker.HasRecentLock();
     const auto now = std::chrono::steady_clock::now();
-    {
-      std::lock_guard<std::mutex> lk(g_control_mode_mutex);
-      g_target_visible = track_alive;
-    }
+    g_target_visible.store(track_alive, std::memory_order_release);
 
     if (track_alive) {
       target_lost_since_initialized = false;
@@ -583,11 +655,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       ImageRecognize::ImageShow::ShowPred(frame, tracked_center.x,
                                           tracked_center.y);
 
-      float center_x = tracked_center.x;
-      float center_y = tracked_center.y;
-      float width = tracked_box[2] - tracked_box[0];
-      float height = tracked_box[3] - tracked_box[1];
-      float distance = distance_calculator.CalculateDistance(height, width);
+      const float center_x = tracked_center.x;
+      const float center_y = tracked_center.y;
+      const float width = tracked_box[2] - tracked_box[0];
+      const float height = tracked_box[3] - tracked_box[1];
+      const float distance =
+          distance_calculator.CalculateDistance(height, width);
 
       if (has_matched_imu) {
         const auto t_angle_start = std::chrono::steady_clock::now();
@@ -611,52 +684,43 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         latency_window.Add(latency_window.angle_calc_ns, t_angle_start,
                            t_angle_end);
 
-        // 必须用“最短角差”，否则跨越 ±180° 时会出现 300° 级突变
-        offset_angles.x =
+        // 必须用最短角差，否则跨越 ±180° 时会出现 300° 级突变。
+        const float offset_yaw_angle =
             Tools::NormalizeDeltaDeg(filtered_yaw - matched_imu.yaw);
-        offset_angles.y =
+        const float offset_pitch_angle =
             Tools::NormalizeDeltaDeg(filtered_pitch - matched_imu.pitch);
 
         auto [laser_yaw_angle, laser_pitch_angle] =
-            laser_angle_calculator.CalculateLaserAngles(
-                distance, offset_angles.x, offset_angles.y);
+            laser_angle_calculator.CalculateLaserAngles(distance,
+                                                        offset_yaw_angle,
+                                                        offset_pitch_angle);
 
         const auto t_control_start = std::chrono::steady_clock::now();
         float delta_yaw_raw = Tools::NormalizeDeltaDeg(
-            static_cast<float>(offset_angles.x + laser_yaw_angle));
+            static_cast<float>(offset_yaw_angle + laser_yaw_angle));
         float delta_pitch_raw = Tools::NormalizeDeltaDeg(
-            static_cast<float>(offset_angles.y + laser_pitch_angle));
+            static_cast<float>(offset_pitch_angle + laser_pitch_angle));
         if (std::abs(delta_yaw_raw) > Params().minimum_angle_deg ||
             std::abs(delta_pitch_raw) > Params().minimum_angle_deg) {
-          float delta_yaw =
+          const float cmd_delta_yaw =
               std::clamp(delta_yaw_raw, -Params().max_send_delta_deg,
                          Params().max_send_delta_deg);
-          float delta_pitch =
+          const float cmd_delta_pitch =
               std::clamp(delta_pitch_raw, -Params().pitch_abs_limit,
                          Params().pitch_abs_limit);
-
-          const float cmd_delta_yaw = delta_yaw;
-          const float cmd_delta_pitch = delta_pitch;
 
           const float send_abs_yaw = matched_imu.yaw + cmd_delta_yaw;
           const float send_abs_pitch = matched_imu.pitch + cmd_delta_pitch;
 
-          g_send_abs_yaw.store(send_abs_yaw, std::memory_order_release);
-          g_send_abs_pitch.store(send_abs_pitch, std::memory_order_release);
-          g_send_offset_yaw.store(cmd_delta_yaw, std::memory_order_release);
-          g_send_offset_pitch.store(cmd_delta_pitch, std::memory_order_release);
-          g_send_yaw_velocity.store(yaw_velocity, std::memory_order_release);
-          g_send_pitch_velocity.store(pitch_velocity,
-                                      std::memory_order_release);
-          g_send_aimbot_state.store(0x01, std::memory_order_release);
-          g_send_is_scan.store(false, std::memory_order_release);
-
-          g_has_pending_send.store(true, std::memory_order_release);
+          StorePendingSend(AimbotSendCommand{send_abs_pitch, send_abs_yaw,
+                                             cmd_delta_pitch, cmd_delta_yaw,
+                                             pitch_velocity, yaw_velocity,
+                                             0x01});
           ImageRecognize::ImageShow::ShowAngles(
               frame, send_abs_yaw, send_abs_pitch, matched_imu.yaw,
               matched_imu.pitch, cmd_delta_yaw, cmd_delta_pitch, distance);
         } else {
-          resetPendingSend();
+          ClearPendingSend();
         }
 
         {
@@ -669,23 +733,15 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         latency_window.Add(latency_window.control_calc_ns, t_control_start,
                            t_control_end);
       } else {
-        resetPendingSend();
+        ClearPendingSend();
       }
     } else {
-      bool target_visible = false;
-      {
-        std::lock_guard<std::mutex> lk(g_control_mode_mutex);
-        target_visible = g_target_visible;
-      }
-
-      if (Params().enable_scan_mode && has_matched_imu && !target_visible &&
+      if (Params().enable_scan_mode && has_matched_imu && !track_alive &&
           target_lost_since_initialized &&
           (now - target_lost_since) >= scan_trigger_delay) {
-        g_send_aimbot_state.store(0x01, std::memory_order_release);
-        g_send_is_scan.store(true, std::memory_order_release);
-        g_has_pending_send.store(true, std::memory_order_release);
+        StartScanMode();
       } else {
-        resetPendingSend();
+        ClearPendingSend();
       }
     }
 
@@ -802,17 +858,12 @@ void IMUSendThread(serial::Serial &port,
 
   while (g_running) {
     const bool scan_mode = g_send_is_scan.load(std::memory_order_acquire);
-
-    bool target_visible = false;
-    {
-      std::lock_guard<std::mutex> lk(g_control_mode_mutex);
-      target_visible = g_target_visible;
-    }
+    const bool target_visible =
+        g_target_visible.load(std::memory_order_acquire);
 
     if (scan_mode) {
       if (target_visible) {
-        g_send_is_scan.store(false, std::memory_order_release);
-        g_has_pending_send.store(false, std::memory_order_release);
+        ClearPendingSend();
         last_scan_mode = false;
         scan_waiting_at_origin = false;
         next_scan_send_time = Clock::now();
@@ -839,16 +890,7 @@ void IMUSendThread(serial::Serial &port,
       }
 
       SerialTask::EulerAngles latest_imu{};
-      bool has_latest_imu = false;
-      {
-        std::lock_guard<std::mutex> lk(g_imu_mutex);
-        if (!g_imu_buffer.empty()) {
-          latest_imu = g_imu_buffer.back().second;
-          has_latest_imu = true;
-        }
-      }
-
-      if (!has_latest_imu) {
+      if (!GetLatestImu(&latest_imu)) {
         std::this_thread::sleep_for(
             std::chrono::milliseconds(Params().imu_send_idle_sleep_ms));
         continue;
@@ -866,24 +908,12 @@ void IMUSendThread(serial::Serial &port,
         }
       }
 
-      g_send_abs_yaw.store(scan_command.absolute_yaw_deg,
-                           std::memory_order_release);
-      g_send_abs_pitch.store(scan_command.absolute_pitch_deg,
-                             std::memory_order_release);
-      g_send_offset_yaw.store(scan_command.offset_yaw_deg,
-                              std::memory_order_release);
-      g_send_offset_pitch.store(scan_command.offset_pitch_deg,
-                                std::memory_order_release);
-      g_send_yaw_velocity.store(0.0f, std::memory_order_release);
-      g_send_pitch_velocity.store(0.0f, std::memory_order_release);
-      g_send_aimbot_state.store(scan_command.aimbot_state,
-                                std::memory_order_release);
-      g_has_pending_send.store(true, std::memory_order_release);
-
-      SerialTask::SerialSend(
-          port, scan_command.absolute_pitch_deg, scan_command.absolute_yaw_deg,
-          scan_command.offset_pitch_deg, scan_command.offset_yaw_deg, 0.0f,
-          0.0f, scan_command.aimbot_state);
+      SendAimbotCommand(port,
+                        AimbotSendCommand{scan_command.absolute_pitch_deg,
+                                          scan_command.absolute_yaw_deg,
+                                          scan_command.offset_pitch_deg,
+                                          scan_command.offset_yaw_deg, 0.0f,
+                                          0.0f, scan_command.aimbot_state});
       if (scan_waiting_at_origin && now >= scan_origin_deadline) {
         scan_waiting_at_origin = false;
         {
@@ -897,26 +927,77 @@ void IMUSendThread(serial::Serial &port,
 
     last_scan_mode = false;
     scan_waiting_at_origin = false;
-    if (g_has_pending_send.load(std::memory_order_acquire)) {
-      float pitch = g_send_abs_pitch.load(std::memory_order_acquire);
-      float yaw = g_send_abs_yaw.load(std::memory_order_acquire);
-      float offset_yaw = g_send_offset_yaw.load(std::memory_order_acquire);
-      float offset_pitch = g_send_offset_pitch.load(std::memory_order_acquire);
-      float yaw_velocity = g_send_yaw_velocity.load(std::memory_order_acquire);
-      float pitch_velocity =
-          g_send_pitch_velocity.load(std::memory_order_acquire);
-      const uint8_t aimbot_state =
-          g_send_aimbot_state.load(std::memory_order_acquire);
-      std::cout << std::fixed << " offset_yaw: " << offset_yaw
-                << "°, offset_pitch: " << offset_pitch << "°" << std::endl;
-      SerialTask::SerialSend(port, pitch, yaw, offset_pitch, offset_yaw,
-                             pitch_velocity, yaw_velocity, aimbot_state);
-      g_has_pending_send.store(false, std::memory_order_release);
+    AimbotSendCommand command;
+    if (TakePendingSend(&command)) {
+      std::cout << std::fixed << " offset_yaw: " << command.offset_yaw
+                << "°, offset_pitch: " << command.offset_pitch << "°"
+                << std::endl;
+      SendAimbotCommand(port, command);
     } else {
       std::this_thread::sleep_for(
           std::chrono::milliseconds(Params().imu_send_idle_sleep_ms));
     }
   }
+}
+
+void AimbotTargetReceiveThread() {
+  Tools::BindCurrentThreadToAuxCore(3);
+
+  NetworkTask::socket_t listen_fd = NetworkTask::kInvalidSocketFd;
+  if (!NetworkTask::CreateListeningSocket(listen_fd)) {
+    std::cerr << "[Network] AimbotTarget 监听端口 5000 失败" << std::endl;
+    return;
+  }
+
+  std::cout << "[Network] AimbotTarget 接收端已启动，监听端口：5000"
+            << std::endl;
+
+  while (g_running) {
+    NetworkTask::socket_t client_fd = NetworkTask::kInvalidSocketFd;
+    std::string client_ip;
+    while (g_running) {
+      // 超时轮询避免程序退出时卡在 accept/recv。
+      if (!NetworkTask::WaitForReadable(listen_fd, 100)) {
+        continue;
+      }
+      if (NetworkTask::AcceptClient(listen_fd, client_fd, &client_ip)) {
+        break;
+      }
+    }
+
+    if (!g_running || client_fd == NetworkTask::kInvalidSocketFd) {
+      break;
+    }
+
+    std::cout << "[Network] AimbotTarget 发送端已连接，IP：" << client_ip
+              << std::endl;
+
+    while (g_running) {
+      if (!NetworkTask::WaitForReadable(client_fd, 100)) {
+        continue;
+      }
+
+      std::string received_content;
+      if (!NetworkTask::ReceiveText(client_fd, received_content)) {
+        std::cout << "[Network] AimbotTarget 发送端已断开" << std::endl;
+        break;
+      }
+
+      uint8_t target = 0x00;
+      if (!ParseAimbotTargetMessage(received_content, target)) {
+        std::cerr << "[Network] 忽略非法 AimbotTarget 数据" << std::endl;
+        continue;
+      }
+
+      g_aimbot_target.store(target, std::memory_order_release);
+      std::cout << "[Network] AimbotTarget=" << static_cast<int>(target)
+                << std::endl;
+    }
+
+    NetworkTask::CloseSocket(client_fd);
+  }
+
+  NetworkTask::CloseSocket(listen_fd);
 }
 
 namespace {
@@ -948,6 +1029,51 @@ const char *ToString(TargetCampMode mode) {
   default:
     return "UNKNOWN";
   }
+}
+
+bool ParseAimbotTargetMessage(const std::string &message, uint8_t &target) {
+  std::string text;
+  text.reserve(message.size());
+  for (unsigned char c : message) {
+    if (std::isprint(c) && !std::isspace(c)) {
+      text.push_back(static_cast<char>(std::toupper(c)));
+    }
+  }
+
+  if (text == "0" || text == "00" || text == "0X00") {
+    target = 0x00;
+    return true;
+  }
+  if (text == "1" || text == "01" || text == "0X01") {
+    target = 0x01;
+    return true;
+  }
+  if (!text.empty() &&
+      std::all_of(text.begin(), text.end(), [](char c) {
+        return c == '0' || c == '1' || c == 'X';
+      })) {
+    for (auto it = text.rbegin(); it != text.rend(); ++it) {
+      if (*it == '0' || *it == '1') {
+        target = (*it == '1') ? 0x01 : 0x00;
+        return true;
+      }
+    }
+  }
+
+  bool found_binary_target = false;
+  uint8_t binary_target = 0x00;
+  for (unsigned char c : message) {
+    if (c == 0x00 || c == 0x01) {
+      binary_target = c;
+      found_binary_target = true;
+    }
+  }
+  if (!found_binary_target) {
+    return false;
+  }
+
+  target = binary_target;
+  return true;
 }
 
 bool ShouldTrackClassId(int class_id, TargetCampMode mode) {

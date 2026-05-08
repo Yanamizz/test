@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <unistd.h>
 #endif
 
@@ -77,6 +78,27 @@ inline bool SetReuseAddress(socket_t fd) {
 #else
   return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == 0;
 #endif
+}
+
+inline bool WaitForReadable(socket_t fd, int timeout_ms) {
+  if (fd == kInvalidSocketFd) {
+    return false;
+  }
+
+  fd_set read_fds;
+  FD_ZERO(&read_fds);
+  FD_SET(fd, &read_fds);
+
+  timeval timeout{};
+  timeout.tv_sec = timeout_ms / 1000;
+  timeout.tv_usec = (timeout_ms % 1000) * 1000;
+
+#ifdef _WIN32
+  const int ready = select(0, &read_fds, nullptr, nullptr, &timeout);
+#else
+  const int ready = select(fd + 1, &read_fds, nullptr, nullptr, &timeout);
+#endif
+  return ready > 0 && FD_ISSET(fd, &read_fds);
 }
 
 inline bool SendAll(socket_t fd, const std::string &data) {
