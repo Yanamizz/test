@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="/home/nuc/antidrone"
+BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
+TARGET="${BUILD_DIR}/bin/ImagePredict"
+JOBS="${JOBS:-$(nproc)}"
+
+if [[ ! -d "${BUILD_DIR}" ]]; then
+  cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}"
+fi
+cmake --build "${BUILD_DIR}" --target ImagePredict -j"${JOBS}"
+
+"${TARGET}" \
+  --display \
+  --calibration-sliders \
+  --no-scan-mode \
+  "$@"

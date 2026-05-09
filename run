@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="/home/nuc/antidrone"
+BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
+TARGET="${BUILD_DIR}/bin/ImagePredict"
+JOBS="${JOBS:-$(nproc)}"
+
+if [[ -z "${ANTIDRONE_IN_TERMINAL:-}" && ! -t 1 ]]; then
+  SCRIPT_PATH="$(readlink -f "$0")"
+  CMD="ANTIDRONE_IN_TERMINAL=1 $(printf '%q' "${SCRIPT_PATH}")"
+  for ARG in "$@"; do
+    CMD+=" $(printf '%q' "${ARG}")"
+  done
+  CMD+="; STATUS=\$?; echo; read -rp '程序已退出，按 Enter 关闭窗口...'; exit \${STATUS}"
+
+  if command -v gnome-terminal >/dev/null 2>&1; then
+    exec gnome-terminal -- bash -lc "${CMD}"
+  elif command -v konsole >/dev/null 2>&1; then
+    exec konsole -e bash -lc "${CMD}"
+  elif command -v xfce4-terminal >/dev/null 2>&1; then
+    exec xfce4-terminal --command "bash -lc $(printf '%q' "${CMD}")"
+  elif command -v xterm >/dev/null 2>&1; then
+    exec xterm -e bash -lc "${CMD}"
+  fi
+fi
+
+if [[ ! -d "${BUILD_DIR}" ]]; then
+  cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}"
+fi
+cmake --build "${BUILD_DIR}" --target ImagePredict -j"${JOBS}"
+
+"${TARGET}" \
+  --no-display \
+  --no-calibration-sliders \
+  --no-latency-profile \
+  --no-motion-prediction \
+  --no-save-no-target-images \
+  --no-send-log \
+  "$@"

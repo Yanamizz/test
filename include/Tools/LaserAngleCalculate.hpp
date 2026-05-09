@@ -128,6 +128,24 @@ private:
 
 class LaserAngleCalculator {
 public:
+  struct FixedOffsets {
+    float fixed_offset_yaw;
+    float fixed_offset_pitch;
+  };
+
+  static FixedOffsets GetFixedOffsets() {
+    const auto params = Params();
+    return {params.fixed_offset_yaw, params.fixed_offset_pitch};
+  }
+
+  static void SetFixedOffsets(float fixed_offset_yaw,
+                              float fixed_offset_pitch) {
+    std::lock_guard<std::mutex> lk(ParamsMutex());
+    auto &params = MutableParams();
+    params.fixed_offset_yaw = fixed_offset_yaw;
+    params.fixed_offset_pitch = fixed_offset_pitch;
+  }
+
   float CalculateLaserYawAngleByDistance(float distance) {
     return CalculateLaserAngles(distance, 0.0f, 0.0f).first;
   }
@@ -139,11 +157,12 @@ public:
   std::pair<float, float> CalculateLaserAngles(float distance, float, float) {
     // 激光和相机的连线始终垂直于相机视线；激光在上方时，pitch 补偿为 atan(高度
     // / 距离)。
+    const auto params = Params();
     const float current_pitch = ComputePitchCorrectionDeg(distance);
     const float reference_pitch =
-        ComputePitchCorrectionDeg(Params().reference_distance_m);
-    return {Params().fixed_offset_yaw,
-            current_pitch - reference_pitch + Params().fixed_offset_pitch};
+        ComputePitchCorrectionDeg(params.reference_distance_m);
+    return {params.fixed_offset_yaw,
+            current_pitch - reference_pitch + params.fixed_offset_pitch};
   }
 
 private:
@@ -168,7 +187,22 @@ private:
     return std::max(distance, Params().min_valid_distance_m);
   }
 
-  static const TunableParams &Params() {
+  static TunableParams Params() {
+    std::lock_guard<std::mutex> lk(ParamsMutex());
+    return MutableParams();
+  }
+
+  static TunableParams &MutableParams() {
+    static TunableParams params = DefaultParams();
+    return params;
+  }
+
+  static std::mutex &ParamsMutex() {
+    static std::mutex mutex;
+    return mutex;
+  }
+
+  static const TunableParams &DefaultParams() {
     // ===== 调参集中区（统一放在文件末尾）=====
     static const TunableParams p{
         0.090f, // laser_height_above_camera_m: 激光在相机上方 0.09m

@@ -1,6 +1,7 @@
 # Ignore build artifacts
 build/
 **/build/
+build/**
 
 # Editor and OS temp files
 *~
@@ -15,6 +16,8 @@ Thumbs.db
 *.log
 *.out
 *.err
+captures/
+**/captures/
 
 # Python caches
 __pycache__/

@@ -6,34 +6,74 @@
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include "CameraTask/ExposureHotkeyController.hpp"
 #include "Tools/LaserAngleCalculate.hpp"
 
 namespace Tools {
 
 class CalibrationSliderPanel {
 public:
-  static void Show() {
+  static void Show(CameraTask::ExposureHotkeyController *exposure_controller) {
+    exposure_controller_ = exposure_controller;
     EnsureInitialized();
-    ApplySliderValues();
     DrawPanel();
   }
 
 private:
   static constexpr const char *kWindowName = "Calibration Sliders";
+  static constexpr const char *kNearHeightTrackbar = "near target height";
+  static constexpr const char *kFarHeightTrackbar = "far target height";
+  static constexpr const char *kFixedYawTrackbar = "fixed yaw x0.01";
+  static constexpr const char *kFixedPitchTrackbar = "fixed pitch x0.01";
+  static constexpr const char *kExposureTrackbar = "exposure x100us";
   static constexpr int kHeightScale = 100000;
   static constexpr int kMinHeightTicks = 5500;
   static constexpr int kMaxHeightTicks = 7000;
-  static constexpr int kSliderMax = kMaxHeightTicks - kMinHeightTicks;
+  static constexpr int kHeightSliderMax = kMaxHeightTicks - kMinHeightTicks;
+  static constexpr int kOffsetScale = 100;
+  static constexpr int kMinOffsetTicks = -100;
+  static constexpr int kMaxOffsetTicks = 100;
+  static constexpr int kOffsetSliderMax = kMaxOffsetTicks - kMinOffsetTicks;
+  static constexpr int kExposureMinUs = 100;
+  static constexpr int kExposureMaxUs = 10000;
+  static constexpr int kExposureStepUs = 100;
+  static constexpr int kExposureSliderMax =
+      (kExposureMaxUs - kExposureMinUs) / kExposureStepUs;
 
   static int ToSliderValue(float height_m) {
     const int ticks = static_cast<int>(height_m * kHeightScale + 0.5f);
-    return std::clamp(ticks - kMinHeightTicks, 0, kSliderMax);
+    return std::clamp(ticks - kMinHeightTicks, 0, kHeightSliderMax);
   }
 
   static float ToHeightMeters(int slider_value) {
     const int ticks =
-        kMinHeightTicks + std::clamp(slider_value, 0, kSliderMax);
+        kMinHeightTicks + std::clamp(slider_value, 0, kHeightSliderMax);
     return static_cast<float>(ticks) / static_cast<float>(kHeightScale);
+  }
+
+  static int ToOffsetSliderValue(float offset_deg) {
+    const int ticks = static_cast<int>(offset_deg * kOffsetScale +
+                                      (offset_deg >= 0.0f ? 0.5f : -0.5f));
+    return std::clamp(ticks - kMinOffsetTicks, 0, kOffsetSliderMax);
+  }
+
+  static float ToOffsetDeg(int slider_value) {
+    const int ticks =
+        kMinOffsetTicks + std::clamp(slider_value, 0, kOffsetSliderMax);
+    return static_cast<float>(ticks) / static_cast<float>(kOffsetScale);
+  }
+
+  static int ToExposureSliderValue(double exposure_us) {
+    const int ticks =
+        static_cast<int>((exposure_us - kExposureMinUs) / kExposureStepUs +
+                         0.5);
+    return std::clamp(ticks, 0, kExposureSliderMax);
+  }
+
+  static double ToExposureUs(int slider_value) {
+    return static_cast<double>(
+        kExposureMinUs +
+        std::clamp(slider_value, 0, kExposureSliderMax) * kExposureStepUs);
   }
 
   static void EnsureInitialized() {
@@ -45,27 +85,84 @@ private:
     near_height_slider_ =
         ToSliderValue(heights.near_calibration_target_height);
     far_height_slider_ = ToSliderValue(heights.far_calibration_target_height);
+    const auto offsets = LaserAngleCalculator::GetFixedOffsets();
+    fixed_offset_yaw_slider_ =
+        ToOffsetSliderValue(offsets.fixed_offset_yaw);
+    fixed_offset_pitch_slider_ =
+        ToOffsetSliderValue(offsets.fixed_offset_pitch);
+    if (exposure_controller_ != nullptr) {
+      exposure_slider_ =
+          ToExposureSliderValue(exposure_controller_->GetExposureTime());
+    }
 
     cv::namedWindow(kWindowName, cv::WINDOW_AUTOSIZE);
-    cv::createTrackbar("near target height", kWindowName,
-                       &near_height_slider_, kSliderMax, OnTrackbar);
-    cv::createTrackbar("far target height", kWindowName, &far_height_slider_,
-                       kSliderMax, OnTrackbar);
+    cv::createTrackbar(kNearHeightTrackbar, kWindowName, nullptr,
+                       kHeightSliderMax, OnTrackbar);
+    cv::createTrackbar(kFarHeightTrackbar, kWindowName, nullptr,
+                       kHeightSliderMax, OnTrackbar);
+    cv::createTrackbar(kFixedYawTrackbar, kWindowName, nullptr,
+                       kOffsetSliderMax, OnTrackbar);
+    cv::createTrackbar(kFixedPitchTrackbar, kWindowName, nullptr,
+                       kOffsetSliderMax, OnTrackbar);
+    cv::createTrackbar(kExposureTrackbar, kWindowName, nullptr,
+                       kExposureSliderMax, OnTrackbar);
+    cv::setTrackbarPos(kNearHeightTrackbar, kWindowName, near_height_slider_);
+    cv::setTrackbarPos(kFarHeightTrackbar, kWindowName, far_height_slider_);
+    cv::setTrackbarPos(kFixedYawTrackbar, kWindowName,
+                       fixed_offset_yaw_slider_);
+    cv::setTrackbarPos(kFixedPitchTrackbar, kWindowName,
+                       fixed_offset_pitch_slider_);
+    cv::setTrackbarPos(kExposureTrackbar, kWindowName, exposure_slider_);
 
     initialized_ = true;
-    ApplySliderValues();
+    ApplySliderValues(false);
   }
 
-  static void OnTrackbar(int, void *) { ApplySliderValues(); }
+  static void OnTrackbar(int, void *) {
+    if (!initialized_) {
+      return;
+    }
 
-  static void ApplySliderValues() {
+    ApplySliderValues(true);
+  }
+
+  static void ApplySliderValues(bool allow_exposure_update) {
+    ReadSliderValues();
     DistanceCalculator::SetCalibrationTargetHeights(
         ToHeightMeters(near_height_slider_), ToHeightMeters(far_height_slider_));
+    LaserAngleCalculator::SetFixedOffsets(
+        ToOffsetDeg(fixed_offset_yaw_slider_),
+        ToOffsetDeg(fixed_offset_pitch_slider_));
+
+    if (allow_exposure_update && exposure_controller_ != nullptr) {
+      exposure_controller_->RequestExposureTime(ToExposureUs(exposure_slider_));
+    }
+  }
+
+  static void ReadSliderValues() {
+    if (!initialized_) {
+      return;
+    }
+
+    near_height_slider_ =
+        cv::getTrackbarPos(kNearHeightTrackbar, kWindowName);
+    far_height_slider_ =
+        cv::getTrackbarPos(kFarHeightTrackbar, kWindowName);
+    fixed_offset_yaw_slider_ =
+        cv::getTrackbarPos(kFixedYawTrackbar, kWindowName);
+    fixed_offset_pitch_slider_ =
+        cv::getTrackbarPos(kFixedPitchTrackbar, kWindowName);
+    exposure_slider_ =
+        cv::getTrackbarPos(kExposureTrackbar, kWindowName);
   }
 
   static void DrawPanel() {
     const auto heights = DistanceCalculator::GetCalibrationTargetHeights();
-    cv::Mat panel(82, 460, CV_8UC3, cv::Scalar(28, 30, 32));
+    const auto offsets = LaserAngleCalculator::GetFixedOffsets();
+    const double exposure_us = exposure_controller_ != nullptr
+                                   ? exposure_controller_->GetExposureTime()
+                                   : ToExposureUs(exposure_slider_);
+    cv::Mat panel(178, 500, CV_8UC3, cv::Scalar(28, 30, 32));
     cv::putText(panel,
                 "near_calibration_target_height: " +
                     cv::format("%.5f m",
@@ -78,12 +175,32 @@ private:
                                heights.far_calibration_target_height),
                 {12, 62}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
+    cv::putText(panel,
+                "fixed_offset_yaw:              " +
+                    cv::format("%.2f deg", offsets.fixed_offset_yaw),
+                {12, 94}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
+    cv::putText(panel,
+                "fixed_offset_pitch:            " +
+                    cv::format("%.2f deg", offsets.fixed_offset_pitch),
+                {12, 126}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
+    cv::putText(panel,
+                "exposure_time_us:              " +
+                    cv::format("%.0f us", exposure_us),
+                {12, 158}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
     cv::imshow(kWindowName, panel);
   }
 
   inline static bool initialized_ = false;
   inline static int near_height_slider_ = 0;
   inline static int far_height_slider_ = 0;
+  inline static int fixed_offset_yaw_slider_ = 0;
+  inline static int fixed_offset_pitch_slider_ = 0;
+  inline static int exposure_slider_ = ToExposureSliderValue(1000.0);
+  inline static CameraTask::ExposureHotkeyController *exposure_controller_ =
+      nullptr;
 };
 
 } // namespace Tools

@@ -21,6 +21,17 @@ public:
     update_pending_ = false;
   }
 
+  double GetExposureTime() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return requested_exposure_time_us_;
+  }
+
+  void RequestExposureTime(double exposure_time_us) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    requested_exposure_time_us_ = std::max(1.0, exposure_time_us);
+    update_pending_ = true;
+  }
+
   bool HandleGuiKey(int key) {
     if (key < 0) {
       return false;
@@ -80,7 +91,7 @@ private:
     }
   }
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   double requested_exposure_time_us_;
   bool update_pending_ = false;
 };

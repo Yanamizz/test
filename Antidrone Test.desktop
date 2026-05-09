@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Antidrone Test
+Comment=Run antidrone test mode with display and calibration sliders
+Exec=/home/nuc/antidrone/test
+Path=/home/nuc/antidrone
+Terminal=true
+Categories=Utility;

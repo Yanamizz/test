@@ -25865,7 +25865,7 @@
 			<docs value="https://docs.ultralytics.com" />
 			<imgsz value="[480, 480]" />
 			<license value="AGPL-3.0 License (https://ultralytics.com/license)" />
-			<names value="{0: 'red', 1: 'blue', 2: 'purple'}" />
+			<names value="{0: 'red', 1: 'blue', 2: 'purple' }" />
 			<stride value="32" />
 			<task value="detect" />
 			<version value="8.3.239" />

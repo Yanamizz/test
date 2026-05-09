@@ -1,11 +1,18 @@
 #pragma once
 
+#include <optional>
 #include <string_view>
 
 namespace ImageRecognize {
 
 struct ImagePredictCommandLineOptions {
   bool enable_display = true;
+  bool enable_calibration_sliders = true;
+  bool enable_send_log = true;
+  std::optional<bool> enable_latency_profile;
+  std::optional<bool> enable_motion_prediction;
+  std::optional<bool> enable_scan_mode;
+  std::optional<bool> enable_save_no_target_images;
 };
 
 namespace detail {
@@ -15,7 +22,7 @@ inline bool StartsWith(std::string_view text, std::string_view prefix) {
          text.substr(0, prefix.size()) == prefix;
 }
 
-inline bool ParseDisplayValue(std::string_view value, bool fallback) {
+inline bool ParseBoolValue(std::string_view value, bool fallback) {
   if (value == "0" || value == "false" || value == "off" || value == "no") {
     return false;
   }
@@ -25,6 +32,10 @@ inline bool ParseDisplayValue(std::string_view value, bool fallback) {
   return fallback;
 }
 
+inline bool ParseBoolValue(std::string_view value, std::optional<bool> fallback) {
+  return ParseBoolValue(value, fallback.value_or(false));
+}
+
 } // namespace detail
 
 inline ImagePredictCommandLineOptions
@@ -32,6 +43,14 @@ ParseImagePredictCommandLine(int argc, char **argv) {
   ImagePredictCommandLineOptions options{};
   constexpr std::string_view kEnableDisplayPrefix = "--enable-display=";
   constexpr std::string_view kDisplayPrefix = "--display=";
+  constexpr std::string_view kCalibrationSlidersPrefix =
+      "--calibration-sliders=";
+  constexpr std::string_view kLatencyProfilePrefix = "--latency-profile=";
+  constexpr std::string_view kMotionPredictionPrefix = "--motion-prediction=";
+  constexpr std::string_view kScanModePrefix = "--scan-mode=";
+  constexpr std::string_view kSaveNoTargetImagesPrefix =
+      "--save-no-target-images=";
+  constexpr std::string_view kSendLogPrefix = "--send-log=";
 
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg = argv[i] != nullptr ? argv[i] : "";
@@ -47,14 +66,119 @@ ParseImagePredictCommandLine(int argc, char **argv) {
     }
 
     if (detail::StartsWith(arg, kEnableDisplayPrefix)) {
-      options.enable_display = detail::ParseDisplayValue(
+      options.enable_display = detail::ParseBoolValue(
           arg.substr(kEnableDisplayPrefix.size()), options.enable_display);
       continue;
     }
 
     if (detail::StartsWith(arg, kDisplayPrefix)) {
-      options.enable_display = detail::ParseDisplayValue(
+      options.enable_display = detail::ParseBoolValue(
           arg.substr(kDisplayPrefix.size()), options.enable_display);
+      continue;
+    }
+
+    if (arg == "--calibration-sliders" ||
+        arg == "--enable-calibration-sliders") {
+      options.enable_calibration_sliders = true;
+      continue;
+    }
+
+    if (arg == "--no-calibration-sliders" ||
+        arg == "--disable-calibration-sliders") {
+      options.enable_calibration_sliders = false;
+      continue;
+    }
+
+    if (detail::StartsWith(arg, kCalibrationSlidersPrefix)) {
+      options.enable_calibration_sliders = detail::ParseBoolValue(
+          arg.substr(kCalibrationSlidersPrefix.size()),
+          options.enable_calibration_sliders);
+      continue;
+    }
+
+    if (arg == "--latency-profile" || arg == "--enable-latency-profile") {
+      options.enable_latency_profile = true;
+      continue;
+    }
+
+    if (arg == "--no-latency-profile" || arg == "--disable-latency-profile") {
+      options.enable_latency_profile = false;
+      continue;
+    }
+
+    if (detail::StartsWith(arg, kLatencyProfilePrefix)) {
+      options.enable_latency_profile = detail::ParseBoolValue(
+          arg.substr(kLatencyProfilePrefix.size()),
+          options.enable_latency_profile);
+      continue;
+    }
+
+    if (arg == "--motion-prediction" || arg == "--enable-motion-prediction") {
+      options.enable_motion_prediction = true;
+      continue;
+    }
+
+    if (arg == "--no-motion-prediction" ||
+        arg == "--disable-motion-prediction") {
+      options.enable_motion_prediction = false;
+      continue;
+    }
+
+    if (detail::StartsWith(arg, kMotionPredictionPrefix)) {
+      options.enable_motion_prediction = detail::ParseBoolValue(
+          arg.substr(kMotionPredictionPrefix.size()),
+          options.enable_motion_prediction);
+      continue;
+    }
+
+    if (arg == "--scan-mode" || arg == "--enable-scan-mode") {
+      options.enable_scan_mode = true;
+      continue;
+    }
+
+    if (arg == "--no-scan-mode" || arg == "--disable-scan-mode") {
+      options.enable_scan_mode = false;
+      continue;
+    }
+
+    if (detail::StartsWith(arg, kScanModePrefix)) {
+      options.enable_scan_mode = detail::ParseBoolValue(
+          arg.substr(kScanModePrefix.size()), options.enable_scan_mode);
+      continue;
+    }
+
+    if (arg == "--save-no-target-images" ||
+        arg == "--enable-save-no-target-images") {
+      options.enable_save_no_target_images = true;
+      continue;
+    }
+
+    if (arg == "--no-save-no-target-images" ||
+        arg == "--disable-save-no-target-images") {
+      options.enable_save_no_target_images = false;
+      continue;
+    }
+
+    if (detail::StartsWith(arg, kSaveNoTargetImagesPrefix)) {
+      options.enable_save_no_target_images = detail::ParseBoolValue(
+          arg.substr(kSaveNoTargetImagesPrefix.size()),
+          options.enable_save_no_target_images);
+      continue;
+    }
+
+    if (arg == "--send-log" || arg == "--enable-send-log") {
+      options.enable_send_log = true;
+      continue;
+    }
+
+    if (arg == "--no-send-log" || arg == "--disable-send-log") {
+      options.enable_send_log = false;
+      continue;
+    }
+
+    if (detail::StartsWith(arg, kSendLogPrefix)) {
+      options.enable_send_log = detail::ParseBoolValue(
+          arg.substr(kSendLogPrefix.size()), options.enable_send_log);
       continue;
     }
   }
