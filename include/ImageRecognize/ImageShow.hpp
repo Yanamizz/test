@@ -69,18 +69,7 @@ public:
     DrawCenterMarker(frame, pred_cx, pred_cy, {0, 255, 0}, "PRED");
   }
 
-  static void ShowAngles(cv::Mat &frame, float yaw, float pitch, float imu_yaw,
-                         float imu_pitch, float offset_yaw, float offset_pitch,
-                         float distance) {
-    (void)frame;
-    (void)yaw;
-    (void)pitch;
-    (void)imu_yaw;
-    (void)imu_pitch;
-    std::string text = " Offset_Yaw: " + std::to_string(offset_yaw) +
-                       " Offset_Pitch: " + std::to_string(offset_pitch) +
-                       " Distance: " + std::to_string(distance);
-    // std::cout << text << std::endl;
+  static void ShowDistance(cv::Mat &frame, float distance) {
     cv::putText(frame, "Distance: " + std::to_string(distance), {10, 60},
                 cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 0}, 2);
   }
@@ -88,10 +77,14 @@ public:
   /**
    * @brief 等待按键退出
    *@ return true 如果按q或ESC退出 */
-  static bool WaitForExit() {
-    char key = static_cast<char>(cv::waitKey(1));
-    return (key == 'q' || key == 27);
+  static int PollKey() { return cv::waitKey(1); }
+
+  static bool IsExitKey(int key) {
+    key &= 0xff;
+    return (key == 'q' || key == 'Q' || key == 27);
   }
+
+  static bool WaitForExit() { return IsExitKey(PollKey()); }
 
 private:
   static void DrawCenterMarker(cv::Mat &frame, double cx, double cy,

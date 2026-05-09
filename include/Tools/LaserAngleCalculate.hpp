@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 #include <utility>
 
 #include "Tools/CameraData.hpp"
@@ -11,8 +12,26 @@ constexpr float kPi = 3.1415926f;
 
 class DistanceCalculator {
 public:
-  float CalculateDistance(float edge_a, float edge_b) {
-    static_cast<void>(edge_b);
+  struct CalibrationTargetHeights {
+    float near_calibration_target_height;
+    float far_calibration_target_height;
+  };
+
+  static CalibrationTargetHeights GetCalibrationTargetHeights() {
+    const auto params = Params();
+    return {params.near_calibration_target_height,
+            params.far_calibration_target_height};
+  }
+
+  static void SetCalibrationTargetHeights(float near_height,
+                                          float far_height) {
+    std::lock_guard<std::mutex> lk(ParamsMutex());
+    auto &params = MutableParams();
+    params.near_calibration_target_height = near_height;
+    params.far_calibration_target_height = far_height;
+  }
+
+  float CalculateDistance(float edge_a) {
     const float h_ = edge_a;
     if (h_ <= 0.0f)
       return 0.0f;
@@ -23,10 +42,8 @@ public:
 
 private:
   struct TunableParams {
-    float near_calibration_distance_m;
     float near_calibration_target_height;
     float near_pixel;
-    float far_calibration_distance_m;
     float far_calibration_target_height;
     float far_pixel;
     float distance_filter_alpha;
@@ -34,10 +51,11 @@ private:
   };
 
   float EstimateCalibratedDistanceByHeight(float pixel_h) const {
-    const float near_height = Params().near_calibration_target_height;
-    const float far_height = Params().far_calibration_target_height;
-    const float near_pixel = Params().near_pixel;
-    const float far_pixel = Params().far_pixel;
+    const auto params = Params();
+    const float near_height = params.near_calibration_target_height;
+    const float far_height = params.far_calibration_target_height;
+    const float near_pixel = params.near_pixel;
+    const float far_pixel = params.far_pixel;
 
     if (near_pixel <= 0.0f || far_pixel <= 0.0f || near_height <= 0.0f ||
         far_height <= 0.0f || std::abs(far_pixel - near_pixel) <= 1e-6f) {
@@ -55,6 +73,7 @@ private:
   }
 
   float FilterDistance(float raw_distance) {
+    const auto params = Params();
     if (!has_filtered_distance_ || filtered_distance_ <= 0.0f) {
       filtered_distance_ = raw_distance;
       has_filtered_distance_ = true;
@@ -62,24 +81,37 @@ private:
     }
 
     const float reset_threshold =
-        filtered_distance_ * Params().filter_reset_ratio;
+        filtered_distance_ * params.filter_reset_ratio;
     if (std::abs(raw_distance - filtered_distance_) > reset_threshold) {
       filtered_distance_ = raw_distance;
       return raw_distance;
     }
 
     filtered_distance_ +=
-        Params().distance_filter_alpha * (raw_distance - filtered_distance_);
+        params.distance_filter_alpha * (raw_distance - filtered_distance_);
     return filtered_distance_;
   }
 
-  static const TunableParams &Params() {
+  static TunableParams Params() {
+    std::lock_guard<std::mutex> lk(ParamsMutex());
+    return MutableParams();
+  }
+
+  static TunableParams &MutableParams() {
+    static TunableParams params = DefaultParams();
+    return params;
+  }
+
+  static std::mutex &ParamsMutex() {
+    static std::mutex mutex;
+    return mutex;
+  }
+
+  static const TunableParams &DefaultParams() {
     // ===== 调参集中区（统一放在文件末尾）=====
     static const TunableParams p{
-        13.0f, // near_calibration_distance_m: 近点标定距离（米）
         0.0591f, // near_calibration_target_height: 近点补偿目标高度（米）
         83.9f, // near_pixel: 近点标定时目标在图像中的像素高度（px）
-        20.0f, // far_calibration_distance_m: 远点标定距离（米）
         0.0655f, // far_calibration_target_height: 远点补偿目标高度（米）
         59.56f, // far_pixel: 远点标定时目标在图像中的像素高度（px）
         0.25f, // distance_filter_alpha: 一阶滤波系数，越大响应越快
@@ -104,12 +136,7 @@ public:
     return CalculateLaserAngles(distance, 0.0f, 0.0f).second;
   }
 
-  std::pair<float, float> CalculateLaserAngles(float distance,
-                                               float offset_yaw_deg,
-                                               float offset_pitch_deg) {
-    static_cast<void>(offset_yaw_deg);
-    static_cast<void>(offset_pitch_deg);
-
+  std::pair<float, float> CalculateLaserAngles(float distance, float, float) {
     // 激光和相机的连线始终垂直于相机视线；激光在上方时，pitch 补偿为 atan(高度
     // / 距离)。
     const float current_pitch = ComputePitchCorrectionDeg(distance);

@@ -3,8 +3,12 @@
 
 #include <opencv2/opencv.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -17,7 +21,7 @@
 namespace CameraTask {
 
 class GalaxyCamera {
-public:
+ public:
   GalaxyCamera() = default;
   ~GalaxyCamera() { close(); }
 
@@ -27,9 +31,7 @@ public:
   // 手动参数统一放到文件末尾，这里只保留操作接口
   // 手动设置接口（优先使用这些 setter）
   void setWhiteBalanceAuto(bool enable) { enable_auto_white_balance = enable; }
-  void setWhiteBalanceChannel(const std::string &channel_name) {
-    wb_channel_name_ = channel_name;
-  }
+  void setWhiteBalanceChannel(const std::string &channel_name) { wb_channel_name_ = channel_name; }
   void setWhiteBalanceChannelIndex(int idx) { wb_channel_index_ = idx; }
   void setWhiteBalanceRatio(double ratio) { white_balance_red = ratio; }
   void setExposureAuto(bool enable) { enable_auto_exposure = enable; }
@@ -37,9 +39,54 @@ public:
   void setGainAuto(bool enable) { enable_auto_gain = enable; }
   void setGain(double db) { gain_db = db; }
 
+  double getExposureTime() const { return exposure_time_us; }
+
+  bool applyExposureTime(double us) {
+    enable_auto_exposure = false;
+    if (device_handle_) {
+      GX_STATUS off_status = GXSetEnumValueByString(device_handle_, "ExposureAuto", "Off");
+      if (off_status != GX_STATUS_SUCCESS) logLastError("GXSetEnumValueByString(ExposureAuto:Off)");
+    }
+    return applyManualExposureTime(us);
+  }
+
+  bool loadRuntimeParams(const std::string &path = "camera_runtime_params.ini") {
+    std::ifstream file(path);
+    if (!file.is_open()) return false;
+
+    bool loaded = false;
+    std::string line;
+    while (std::getline(file, line)) {
+      const auto key_pos = line.find("exposure_time_us");
+      if (key_pos == std::string::npos) continue;
+
+      const auto eq_pos = line.find('=', key_pos);
+      if (eq_pos == std::string::npos) continue;
+
+      try {
+        exposure_time_us = std::stod(line.substr(eq_pos + 1));
+        loaded = true;
+      } catch (...) {
+        std::cerr << "[GalaxyCamera] invalid exposure_time_us in " << path << ": " << line << std::endl;
+      }
+    }
+    return loaded;
+  }
+
+  bool saveRuntimeParams(const std::string &path = "camera_runtime_params.ini") const {
+    std::ofstream file(path, std::ios::trunc);
+    if (!file.is_open()) {
+      std::cerr << "[GalaxyCamera] failed to open runtime params file for write: " << path << std::endl;
+      return false;
+    }
+
+    file << "# Runtime camera parameters\n";
+    file << std::fixed << std::setprecision(1) << "exposure_time_us=" << exposure_time_us << '\n';
+    return true;
+  }
+
   bool open() {
-    if (opened_)
-      return true;
+    if (opened_) return true;
 
     GX_STATUS status = GXInitLib();
     if (status != GX_STATUS_SUCCESS) {
@@ -50,8 +97,7 @@ public:
     uint32_t device_number = 0;
     status = GXUpdateAllDeviceList(&device_number, 1000);
     if (status != GX_STATUS_SUCCESS || device_number == 0) {
-      if (status != GX_STATUS_SUCCESS)
-        logLastError("GXUpdateAllDeviceList");
+      if (status != GX_STATUS_SUCCESS) logLastError("GXUpdateAllDeviceList");
       GXCloseLib();
       return false;
     }
@@ -94,13 +140,12 @@ public:
 
     // Query color filter (for Bayer to RGB)
     GX_NODE_ACCESS_MODE access_mode;
-    status =
-        GXGetNodeAccessMode(device_handle_, "PixelColorFilter", &access_mode);
-    has_color_filter_ = (status == GX_STATUS_SUCCESS) &&
-                        ((access_mode == GX_NODE_ACCESS_MODE_WO) ||
-                         (access_mode == GX_NODE_ACCESS_MODE_RO) ||
-                         (access_mode == GX_NODE_ACCESS_MODE_RW));
-    if (has_color_filter_) {
+    status = GXGetNodeAccessMode(device_handle_, "PixelColorFilter", &access_mode);
+    const bool has_color_filter = (status == GX_STATUS_SUCCESS) &&
+                                  ((access_mode == GX_NODE_ACCESS_MODE_WO) ||
+                                   (access_mode == GX_NODE_ACCESS_MODE_RO) ||
+                                   (access_mode == GX_NODE_ACCESS_MODE_RW));
+    if (has_color_filter) {
       GX_ENUM_VALUE emValue;
       status = GXGetEnumValue(device_handle_, "PixelColorFilter", &emValue);
       if (status == GX_STATUS_SUCCESS) {
@@ -114,8 +159,7 @@ public:
     uint32_t ds_num = 0;
     status = GXGetDataStreamNumFromDev(device_handle_, &ds_num);
     if (status != GX_STATUS_SUCCESS || ds_num < 1) {
-      if (status != GX_STATUS_SUCCESS)
-        logLastError("GXGetDataStreamNumFromDev");
+      if (status != GX_STATUS_SUCCESS) logLastError("GXGetDataStreamNumFromDev");
       close();
       return false;
     }
@@ -129,8 +173,7 @@ public:
     uint32_t payload_size = 0;
     status = GXGetPayLoadSize(ds_handle, &payload_size);
     if (status != GX_STATUS_SUCCESS || payload_size == 0) {
-      if (status != GX_STATUS_SUCCESS)
-        logLastError("GXGetPayLoadSize");
+      if (status != GX_STATUS_SUCCESS) logLastError("GXGetPayLoadSize");
       close();
       return false;
     }
@@ -145,8 +188,7 @@ public:
   }
 
   bool start() {
-    if (!opened_ || started_)
-      return opened_;
+    if (!opened_ || started_) return opened_;
 
     applyCameraParams();
     GX_STATUS status = GXSetCommandValue(device_handle_, "AcquisitionStart");
@@ -162,8 +204,7 @@ public:
   void setUndistort(bool enable) { enable_undistort_ = enable; }
 
   void stop() {
-    if (!opened_ || !started_)
-      return;
+    if (!opened_ || !started_) return;
     GX_STATUS status = GXSetCommandValue(device_handle_, "AcquisitionStop");
     if (status != GX_STATUS_SUCCESS) {
       logLastError("GXSetCommandValue(AcquisitionStop)");
@@ -172,8 +213,7 @@ public:
   }
 
   void close() {
-    if (!opened_)
-      return;
+    if (!opened_) return;
     stop();
     if (device_handle_) {
       GXCloseDevice(device_handle_);
@@ -185,18 +225,15 @@ public:
   }
 
   cv::Mat grab(int timeout_ms = 1000) {
-    if (!opened_)
-      return {};
-    if (!started_ && !start())
-      return {};
+    if (!opened_) return {};
+    if (!started_ && !start()) return {};
 
     GX_STATUS status = GXGetImage(device_handle_, &frame_data_, timeout_ms);
     if (status != GX_STATUS_SUCCESS) {
       if (status == GX_STATUS_TIMEOUT) {
         // 超时是正常现象（相机暂时无新帧），静默重试；连续超时过多则重启采集
         if (++consecutive_timeouts_ >= 30) {
-          std::cerr << "[GalaxyCamera] " << consecutive_timeouts_
-                    << " consecutive timeouts, restarting acquisition..."
+          std::cerr << "[GalaxyCamera] " << consecutive_timeouts_ << " consecutive timeouts, restarting acquisition..."
                     << std::endl;
           stop();
           start();
@@ -209,22 +246,19 @@ public:
       return {};
     }
     consecutive_timeouts_ = 0;
-    if (frame_data_.nStatus != GX_FRAME_STATUS_SUCCESS)
-      return {};
+    if (frame_data_.nStatus != GX_FRAME_STATUS_SUCCESS) return {};
 
     return convertToMat();
   }
 
-private:
+ private:
   cv::Mat convertToMat() {
     const int width = frame_data_.nWidth;
     const int height = frame_data_.nHeight;
-    if (width <= 0 || height <= 0 || frame_data_.pImgBuf == nullptr)
-      return {};
+    if (width <= 0 || height <= 0 || frame_data_.pImgBuf == nullptr) return {};
 
     const auto pixel_format = static_cast<int32_t>(frame_data_.nPixelFormat);
-    const auto img_size =
-        static_cast<size_t>(width) * static_cast<size_t>(height);
+    const auto img_size = static_cast<size_t>(width) * static_cast<size_t>(height);
 
     if (pixel_format == GX_PIXEL_FORMAT_MONO8) {
       cv::Mat mono(height, width, CV_8UC1, frame_data_.pImgBuf);
@@ -232,11 +266,9 @@ private:
       return postProcess(out);
     }
 
-    if (pixel_format == GX_PIXEL_FORMAT_MONO10 ||
-        pixel_format == GX_PIXEL_FORMAT_MONO12) {
+    if (pixel_format == GX_PIXEL_FORMAT_MONO10 || pixel_format == GX_PIXEL_FORMAT_MONO12) {
       raw8_buffer_.resize(img_size);
-      if (DxRaw16toRaw8(static_cast<unsigned char *>(frame_data_.pImgBuf),
-                        raw8_buffer_.data(), width, height,
+      if (DxRaw16toRaw8(static_cast<unsigned char *>(frame_data_.pImgBuf), raw8_buffer_.data(), width, height,
                         DX_BIT_2_9) != DX_OK) {
         return {};
       }
@@ -247,9 +279,8 @@ private:
 
     if (isBayer8(pixel_format)) {
       rgb_buffer_.resize(img_size * 3);
-      if (DxRaw8toRGB24(static_cast<unsigned char *>(frame_data_.pImgBuf),
-                        rgb_buffer_.data(), width, height, RAW2RGB_NEIGHBOUR,
-                        DX_PIXEL_COLOR_FILTER(color_filter_), false) != DX_OK) {
+      if (DxRaw8toRGB24(static_cast<unsigned char *>(frame_data_.pImgBuf), rgb_buffer_.data(), width, height,
+                        RAW2RGB_NEIGHBOUR, DX_PIXEL_COLOR_FILTER(color_filter_), false) != DX_OK) {
         return {};
       }
       cv::Mat rgb(height, width, CV_8UC3, rgb_buffer_.data());
@@ -260,15 +291,13 @@ private:
 
     if (isBayer16(pixel_format)) {
       raw8_buffer_.resize(img_size);
-      if (DxRaw16toRaw8(static_cast<unsigned char *>(frame_data_.pImgBuf),
-                        raw8_buffer_.data(), width, height,
+      if (DxRaw16toRaw8(static_cast<unsigned char *>(frame_data_.pImgBuf), raw8_buffer_.data(), width, height,
                         DX_BIT_2_9) != DX_OK) {
         return {};
       }
       rgb_buffer_.resize(img_size * 3);
-      if (DxRaw8toRGB24(raw8_buffer_.data(), rgb_buffer_.data(), width, height,
-                        RAW2RGB_NEIGHBOUR, DX_PIXEL_COLOR_FILTER(color_filter_),
-                        false) != DX_OK) {
+      if (DxRaw8toRGB24(raw8_buffer_.data(), rgb_buffer_.data(), width, height, RAW2RGB_NEIGHBOUR,
+                        DX_PIXEL_COLOR_FILTER(color_filter_), false) != DX_OK) {
         return {};
       }
       cv::Mat rgb(height, width, CV_8UC3, rgb_buffer_.data());
@@ -282,29 +311,29 @@ private:
 
   static bool isBayer8(int32_t fmt) {
     switch (fmt) {
-    case GX_PIXEL_FORMAT_BAYER_GR8:
-    case GX_PIXEL_FORMAT_BAYER_RG8:
-    case GX_PIXEL_FORMAT_BAYER_GB8:
-    case GX_PIXEL_FORMAT_BAYER_BG8:
-      return true;
-    default:
-      return false;
+      case GX_PIXEL_FORMAT_BAYER_GR8:
+      case GX_PIXEL_FORMAT_BAYER_RG8:
+      case GX_PIXEL_FORMAT_BAYER_GB8:
+      case GX_PIXEL_FORMAT_BAYER_BG8:
+        return true;
+      default:
+        return false;
     }
   }
 
   static bool isBayer16(int32_t fmt) {
     switch (fmt) {
-    case GX_PIXEL_FORMAT_BAYER_GR10:
-    case GX_PIXEL_FORMAT_BAYER_RG10:
-    case GX_PIXEL_FORMAT_BAYER_GB10:
-    case GX_PIXEL_FORMAT_BAYER_BG10:
-    case GX_PIXEL_FORMAT_BAYER_GR12:
-    case GX_PIXEL_FORMAT_BAYER_RG12:
-    case GX_PIXEL_FORMAT_BAYER_GB12:
-    case GX_PIXEL_FORMAT_BAYER_BG12:
-      return true;
-    default:
-      return false;
+      case GX_PIXEL_FORMAT_BAYER_GR10:
+      case GX_PIXEL_FORMAT_BAYER_RG10:
+      case GX_PIXEL_FORMAT_BAYER_GB10:
+      case GX_PIXEL_FORMAT_BAYER_BG10:
+      case GX_PIXEL_FORMAT_BAYER_GR12:
+      case GX_PIXEL_FORMAT_BAYER_RG12:
+      case GX_PIXEL_FORMAT_BAYER_GB12:
+      case GX_PIXEL_FORMAT_BAYER_BG12:
+        return true;
+      default:
+        return false;
     }
   }
 
@@ -314,41 +343,31 @@ private:
     size_t size = sizeof(err_text);
     const GX_STATUS ret = GXGetLastError(&error_code, err_text, &size);
     if (ret == GX_STATUS_SUCCESS) {
-      std::cerr << "[GalaxyCamera] " << where << " failed: " << err_text << " ("
-                << error_code << ")" << std::endl;
+      std::cerr << "[GalaxyCamera] " << where << " failed: " << err_text << " (" << error_code << ")" << std::endl;
     } else {
-      std::cerr << "[GalaxyCamera] " << where
-                << " failed: GXGetLastError failed (" << ret << ")"
-                << std::endl;
+      std::cerr << "[GalaxyCamera] " << where << " failed: GXGetLastError failed (" << ret << ")" << std::endl;
     }
   }
 
   void applyCameraParams() {
-    if (!device_handle_)
-      return;
+    if (!device_handle_) return;
     // 白平衡设置：支持自动/手动；手动时先选择通道（selector），再设置
     // BalanceRatio
     if (enable_auto_white_balance) {
-      GX_STATUS status = GXSetEnumValueByString(
-          device_handle_, "BalanceWhiteAuto", "Continuous");
-      if (status != GX_STATUS_SUCCESS)
-        logLastError("GXSetEnumValueByString(BalanceWhiteAuto:Continuous)");
+      GX_STATUS status = GXSetEnumValueByString(device_handle_, "BalanceWhiteAuto", "Continuous");
+      if (status != GX_STATUS_SUCCESS) logLastError("GXSetEnumValueByString(BalanceWhiteAuto:Continuous)");
     } else {
-      GX_STATUS off_status =
-          GXSetEnumValueByString(device_handle_, "BalanceWhiteAuto", "Off");
-      if (off_status != GX_STATUS_SUCCESS)
-        logLastError("GXSetEnumValueByString(BalanceWhiteAuto:Off)");
+      GX_STATUS off_status = GXSetEnumValueByString(device_handle_, "BalanceWhiteAuto", "Off");
+      if (off_status != GX_STATUS_SUCCESS) logLastError("GXSetEnumValueByString(BalanceWhiteAuto:Off)");
 
       // 先设置通道：优先使用名称（如 "Red"/"Green"/"Blue"），否则使用索引
       if (!wb_channel_name_.empty()) {
-        GX_STATUS sel_status = GXSetEnumValueByString(
-            device_handle_, "BalanceRatioSelector", wb_channel_name_.c_str());
+        GX_STATUS sel_status = GXSetEnumValueByString(device_handle_, "BalanceRatioSelector", wb_channel_name_.c_str());
         if (sel_status != GX_STATUS_SUCCESS) {
           logLastError("GXSetEnumValueByString(BalanceRatioSelector)");
         }
       } else {
-        GX_STATUS sel_status = GXSetIntValue(
-            device_handle_, "BalanceRatioSelector", wb_channel_index_);
+        GX_STATUS sel_status = GXSetIntValue(device_handle_, "BalanceRatioSelector", wb_channel_index_);
         if (sel_status != GX_STATUS_SUCCESS) {
           logLastError("GXSetIntValue(BalanceRatioSelector)");
         }
@@ -356,47 +375,69 @@ private:
 
       // 再写入比率（节点名 BalanceRatio）
       if (white_balance_red > 0.0) {
-        GX_STATUS ratio_status =
-            GXSetFloatValue(device_handle_, "BalanceRatio", white_balance_red);
-        if (ratio_status != GX_STATUS_SUCCESS)
-          logLastError("GXSetFloatValue(BalanceRatio)");
+        GX_STATUS ratio_status = GXSetFloatValue(device_handle_, "BalanceRatio", white_balance_red);
+        if (ratio_status != GX_STATUS_SUCCESS) logLastError("GXSetFloatValue(BalanceRatio)");
       }
     }
 
     if (enable_auto_exposure) {
-      GX_STATUS status =
-          GXSetEnumValueByString(device_handle_, "ExposureAuto", "Continuous");
-      if (status != GX_STATUS_SUCCESS)
-        logLastError("GXSetEnumValueByString(ExposureAuto:Continuous)");
+      GX_STATUS status = GXSetEnumValueByString(device_handle_, "ExposureAuto", "Continuous");
+      if (status != GX_STATUS_SUCCESS) logLastError("GXSetEnumValueByString(ExposureAuto:Continuous)");
     } else {
-      GX_STATUS off_status =
-          GXSetEnumValueByString(device_handle_, "ExposureAuto", "Off");
-      if (off_status != GX_STATUS_SUCCESS)
-        logLastError("GXSetEnumValueByString(ExposureAuto:Off)");
+      GX_STATUS off_status = GXSetEnumValueByString(device_handle_, "ExposureAuto", "Off");
+      if (off_status != GX_STATUS_SUCCESS) logLastError("GXSetEnumValueByString(ExposureAuto:Off)");
       if (exposure_time_us > 0.0) {
-        GX_STATUS status =
-            GXSetFloatValue(device_handle_, "ExposureTime", exposure_time_us);
-        if (status != GX_STATUS_SUCCESS)
-          logLastError("GXSetFloatValue(ExposureTime)");
+        applyManualExposureTime(exposure_time_us);
       }
     }
 
     if (enable_auto_gain) {
-      GX_STATUS status =
-          GXSetEnumValueByString(device_handle_, "GainAuto", "Once");
-      if (status != GX_STATUS_SUCCESS)
-        logLastError("GXSetEnumValueByString(GainAuto:Once)");
+      GX_STATUS status = GXSetEnumValueByString(device_handle_, "GainAuto", "Once");
+      if (status != GX_STATUS_SUCCESS) logLastError("GXSetEnumValueByString(GainAuto:Once)");
     } else {
-      GX_STATUS off_status =
-          GXSetEnumValueByString(device_handle_, "GainAuto", "Off");
-      if (off_status != GX_STATUS_SUCCESS)
-        logLastError("GXSetEnumValueByString(GainAuto:Off)");
+      GX_STATUS off_status = GXSetEnumValueByString(device_handle_, "GainAuto", "Off");
+      if (off_status != GX_STATUS_SUCCESS) logLastError("GXSetEnumValueByString(GainAuto:Off)");
       if (gain_db >= 0.0) {
         GX_STATUS status = GXSetFloatValue(device_handle_, "Gain", gain_db);
-        if (status != GX_STATUS_SUCCESS)
-          logLastError("GXSetFloatValue(Gain)");
+        if (status != GX_STATUS_SUCCESS) logLastError("GXSetFloatValue(Gain)");
       }
     }
+  }
+
+  double normalizeExposureTime(double us) const {
+    double value = std::max(1.0, us);
+    if (!device_handle_) return value;
+
+    GX_FLOAT_VALUE exposure_range{};
+    const GX_STATUS status = GXGetFloatValue(device_handle_, "ExposureTime", &exposure_range);
+    if (status != GX_STATUS_SUCCESS) {
+      logLastError("GXGetFloatValue(ExposureTime)");
+      return value;
+    }
+
+    value = std::clamp(value, exposure_range.dMin, exposure_range.dMax);
+    if (exposure_range.bIncIsValid && exposure_range.dInc > 0.0) {
+      value = exposure_range.dMin + std::round((value - exposure_range.dMin) / exposure_range.dInc) * exposure_range.dInc;
+      value = std::clamp(value, exposure_range.dMin, exposure_range.dMax);
+    }
+    return value;
+  }
+
+  bool applyManualExposureTime(double us) {
+    const double normalized_us = normalizeExposureTime(us);
+    if (!device_handle_) {
+      exposure_time_us = normalized_us;
+      return true;
+    }
+
+    GX_STATUS status = GXSetFloatValue(device_handle_, "ExposureTime", normalized_us);
+    if (status != GX_STATUS_SUCCESS) {
+      logLastError("GXSetFloatValue(ExposureTime)");
+      return false;
+    }
+
+    exposure_time_us = normalized_us;
+    return true;
   }
 
   cv::Mat postProcess(cv::Mat &img) {
@@ -408,12 +449,12 @@ private:
     }
 
     if (enable_invert) {
-      cv::flip(img, img, -1); // flip both vertically and horizontally
+      cv::flip(img, img, -1);  // flip both vertically and horizontally
     }
     return img;
   }
 
-private:
+ private:
   struct BufferDeleter {
     void operator()(uint8_t *p) const { delete[] p; }
   };
@@ -427,27 +468,24 @@ private:
   std::string index_str_;
   bool opened_ = false;
   bool started_ = false;
-  bool has_color_filter_ = false;
   int64_t color_filter_ = GX_COLOR_FILTER_NONE;
-  int consecutive_timeouts_ = 0; ///< 连续超时帧计数，用于触发自动重启
+  int consecutive_timeouts_ = 0;  ///< 连续超时帧计数，用于触发自动重启
 
-public:
+ public:
   // ===== 手动配置区（统一放在文件末尾）=====
   cv::Mat camera_matrix_ =
-      (cv::Mat_<double>(3, 3) << 1576.303044, 0.0, 952.451125, 0.0, 1578.069737,
-       599.901423, 0.0, 0.0, 1.0);
-  cv::Mat dist_coeffs_ =
-      (cv::Mat_<double>(1, 5) << -0.275212, 0.210437, -0.000083, 0.000589, 0.0);
-  bool enable_invert = false;            // 是否翻转图像
-  bool enable_auto_white_balance = true; // 是否持续自动白平衡
-  bool enable_auto_exposure = false; // 启动时是否执行一次自动曝光
-  bool enable_auto_gain = false;     // 启动时是否执行一次自动增益
-  double white_balance_red = 1.75;   // 手动白平衡红通道比例
-  double exposure_time_us = 5000.0;  // 手动曝光时间（微秒）
-  double gain_db = 24.0;             // 手动增益（dB）
-  bool enable_undistort_ = false; // 是否启用去畸变（默认关闭以降低延迟）
-  std::string wb_channel_name_ = "Red"; // 白平衡通道名，可改为 "Green" / "Blue"
-  int wb_channel_index_ = 0; // 白平衡通道索引，通道名为空时使用
+      (cv::Mat_<double>(3, 3) << 1576.303044, 0.0, 952.451125, 0.0, 1578.069737, 599.901423, 0.0, 0.0, 1.0);
+  cv::Mat dist_coeffs_ = (cv::Mat_<double>(1, 5) << -0.275212, 0.210437, -0.000083, 0.000589, 0.0);
+  bool enable_invert = false;             // 是否翻转图像
+  bool enable_auto_white_balance = true;  // 是否持续自动白平衡
+  bool enable_auto_exposure = false;      // 启动时是否执行一次自动曝光
+  bool enable_auto_gain = false;          // 启动时是否执行一次自动增益
+  double white_balance_red = 1.75;        // 手动白平衡红通道比例
+  double exposure_time_us = 1000.0;       // 手动曝光时间（微秒）
+  double gain_db = 24.0;                  // 手动增益（dB）
+  bool enable_undistort_ = false;         // 是否启用去畸变（默认关闭以降低延迟）
+  std::string wb_channel_name_ = "Red";   // 白平衡通道名，可改为 "Green" / "Blue"
+  int wb_channel_index_ = 0;              // 白平衡通道索引，通道名为空时使用
 };
 
-} // namespace CameraTask
+}  // namespace CameraTask

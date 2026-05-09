@@ -39,12 +39,11 @@ inline bool PrepareSocketRuntime() {
   }();
   return initialized;
 #else
-  static const bool ignored = []() {
+  static const bool initialized = []() {
     signal(SIGPIPE, SIG_IGN);
     return true;
   }();
-  (void)ignored;
-  return true;
+  return initialized;
 #endif
 }
 

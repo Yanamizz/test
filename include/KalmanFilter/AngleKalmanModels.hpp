@@ -43,8 +43,7 @@ class AngleSystemModel : public Kalman::LinearizedSystemModel<AngleState> {
 
   bool setProcessNoise(double process_noise) { return this->setCovariance(MakeStateCovariance(process_noise)); }
 
-  State f(const State &x, const Control &u) const override {
-    (void)u;
+  State f(const State &x, const Control &) const override {
     State next;
     next(0) = x(0) + x(1) * dt_;
     next(1) = x(1);
@@ -52,9 +51,7 @@ class AngleSystemModel : public Kalman::LinearizedSystemModel<AngleState> {
   }
 
  protected:
-  void updateJacobians(const State &x, const Control &u) override {
-    (void)x;
-    (void)u;
+  void updateJacobians(const State &, const Control &) override {
     this->F.setZero();
     this->F(0, 0) = 1.0;
     this->F(0, 1) = dt_;
@@ -86,8 +83,7 @@ class AngleMeasurementModel : public Kalman::LinearizedMeasurementModel<AngleSta
   }
 
  protected:
-  void updateJacobians(const State &x) override {
-    (void)x;
+  void updateJacobians(const State &) override {
     this->H.setZero();
     this->H(0, 0) = 1.0;
     this->V.setIdentity();
