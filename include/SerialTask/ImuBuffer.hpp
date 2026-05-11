@@ -54,13 +54,14 @@ public:
       return true;
     }
 
-    const auto elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                frame_ts - lower_it->first)
-                                .count();
+    const auto elapsed_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(frame_ts -
+                                                             lower_it->first)
+            .count();
     const float alpha =
         static_cast<float>(elapsed_ns) / static_cast<float>(span_ns);
-    *matched_imu = InterpolateEulerAngles(lower_it->second, upper_it->second,
-                                          alpha);
+    *matched_imu =
+        InterpolateEulerAngles(lower_it->second, upper_it->second, alpha);
     return true;
   }
 
@@ -71,6 +72,30 @@ public:
     }
 
     *latest_imu = entries_.back().second;
+    return true;
+  }
+
+  bool GetLatestVelocity(float *pitch_velocity_deg_per_sec,
+                         float *yaw_velocity_deg_per_sec) const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (entries_.size() < 2) {
+      return false;
+    }
+
+    const auto &prev = entries_[entries_.size() - 2];
+    const auto &curr = entries_.back();
+    const auto dt_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           curr.first - prev.first)
+                           .count();
+    if (dt_ns <= 0) {
+      return false;
+    }
+
+    const float dt_sec = static_cast<float>(dt_ns) * 1e-9f;
+    *pitch_velocity_deg_per_sec =
+        NormalizeDeltaDeg(curr.second.pitch - prev.second.pitch) / dt_sec;
+    *yaw_velocity_deg_per_sec =
+        NormalizeDeltaDeg(curr.second.yaw - prev.second.yaw) / dt_sec;
     return true;
   }
 

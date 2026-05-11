@@ -18,8 +18,8 @@
 #include "ImageRecognize/ImagePredictCommandLine.hpp"
 #include "ImageRecognize/ImagePredict_OPENVINO.hpp"
 #include "ImageRecognize/ImageShow.hpp"
-#include "ImageRecognize/TargetClassFilter.hpp"
 #include "ImageRecognize/TargetAssociation.hpp"
+#include "ImageRecognize/TargetClassFilter.hpp"
 #include "ImageRecognize/TargetMotionPredictor.hpp"
 #include "NetworkTask/AimbotTargetReceiver.hpp"
 #include "SerialTask/ImuBuffer.hpp"
@@ -36,11 +36,11 @@
 #include "Tools/ScanController.hpp"
 
 namespace {
+using ImageRecognize::ImagePredictCommandLineOptions;
 using Tools::LatencyStats;
 using Tools::PixelHeightStats;
 using Tools::PrintLatencyStats;
 using Tools::PrintPixelHeightStats;
-using ImageRecognize::ImagePredictCommandLineOptions;
 
 struct AimbotSendCommand {
   float absolute_pitch = 0.0f;
@@ -77,6 +77,7 @@ static std::atomic<bool> g_send_is_scan{false};
 static std::mutex g_scan_controller_mutex;
 static std::atomic<bool> g_target_visible{false};
 static CameraTask::ExposureHotkeyController g_exposure_controller;
+static std::mutex g_serial_mutex;
 
 namespace {
 static void RequestStop() {
@@ -122,7 +123,37 @@ static void SendAimbotCommand(serial::Serial &port,
       command.aimbot_state, g_aimbot_target.load(std::memory_order_acquire));
 }
 
+static void HandleSerialWriteFailure(serial::Serial &port,
+                                     const std::exception &e) {
+  std::cerr << "Warning: IMU serial write failed, stop sending until restart: "
+            << e.what() << std::endl;
+  std::lock_guard<std::mutex> lk(g_serial_mutex);
+  if (port.isOpen()) {
+    port.close();
+  }
+  ClearPendingSend();
+}
+
+static bool TryReopenSerialPort(serial::Serial &port) {
+  std::lock_guard<std::mutex> lk(g_serial_mutex);
+  if (port.isOpen()) {
+    return true;
+  }
+
+  try {
+    SerialTask::DefaultConfig(port);
+    port.open();
+    std::cerr << "Info: IMU serial reconnected." << std::endl;
+    return true;
+  } catch (const std::exception &e) {
+    std::cerr << "Warning: IMU serial reconnect failed: " << e.what()
+              << std::endl;
+    return false;
+  }
+}
+
 static bool OpenSerialPort(serial::Serial &port) {
+  std::lock_guard<std::mutex> lk(g_serial_mutex);
   if (port.isOpen()) {
     return true;
   }
@@ -145,20 +176,18 @@ static void JoinIfNeeded(std::thread &thread) {
   }
 }
 
-static void PrintPredictSettings(Tools::FilterType filter_type,
-                                 ImageRecognize::TargetCampMode target_camp_mode,
-                                 bool enable_display,
-                                 bool enable_motion_prediction,
-                                 bool enable_scan_mode,
-                                 bool enable_save_no_target_images,
-                                 bool enable_latency_profile,
-                                 bool enable_calibration_sliders,
-                                 bool enable_send_log) {
+static void
+PrintPredictSettings(Tools::FilterType filter_type,
+                     ImageRecognize::TargetCampMode target_camp_mode,
+                     bool enable_display, bool enable_motion_prediction,
+                     bool enable_scan_mode, bool enable_save_no_target_images,
+                     bool enable_latency_profile,
+                     bool enable_calibration_sliders, bool enable_send_log) {
   std::cout << "[角度滤波] 类型: " << Tools::ToString(filter_type) << std::endl;
   std::cout << "[运动预测] 启用: "
             << (enable_motion_prediction ? "true" : "false") << std::endl;
-  std::cout << "[跟踪阵营] 模式: "
-            << ImageRecognize::ToString(target_camp_mode) << std::endl;
+  std::cout << "[跟踪阵营] 模式: " << ImageRecognize::ToString(target_camp_mode)
+            << std::endl;
   std::cout << "[显示窗口] 启用: " << (enable_display ? "true" : "false")
             << std::endl;
   std::cout << "[标定滑块] 启用: "
@@ -184,11 +213,11 @@ static std::chrono::steady_clock::time_point ProfileNow(bool enabled) {
                  : std::chrono::steady_clock::time_point{};
 }
 
-static void AddLatencySample(
-    bool enabled, LatencyStats &total, LatencyStats &window,
-    std::uint64_t LatencyStats::*bucket,
-    const std::chrono::steady_clock::time_point &t0,
-    const std::chrono::steady_clock::time_point &t1) {
+static void AddLatencySample(bool enabled, LatencyStats &total,
+                             LatencyStats &window,
+                             std::uint64_t LatencyStats::*bucket,
+                             const std::chrono::steady_clock::time_point &t0,
+                             const std::chrono::steady_clock::time_point &t1) {
   if (!enabled) {
     return;
   }
@@ -212,8 +241,7 @@ static bool SnapshotLatestFrame(
     bool has_last_submitted_frame_ts,
     const std::chrono::steady_clock::time_point &last_submitted_frame_ts,
     cv::Mat *frame, cv::Mat *raw_frame,
-    std::chrono::steady_clock::time_point *frame_ts,
-    bool keep_raw_frame) {
+    std::chrono::steady_clock::time_point *frame_ts, bool keep_raw_frame) {
   std::unique_lock<std::mutex> lk(g_frame_mutex);
   const auto has_new_frame = [&]() {
     const int read_idx = g_read_idx.load(std::memory_order_acquire);
@@ -247,7 +275,6 @@ static bool SnapshotLatestFrame(
   return true;
 }
 
-
 } // namespace
 
 void CaptureThread(CameraTask::GalaxyCamera *camera);
@@ -255,8 +282,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
                         Tools::ScanController &scan_controller,
                         ImagePredictCommandLineOptions command_line_options);
 void IMUReadThread(serial::Serial &port);
-void IMUSendThread(serial::Serial &port,
-                   Tools::ScanController &scan_controller,
+void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
                    bool enable_send_log);
 void AimbotTargetReceiveThread();
 
@@ -281,9 +307,10 @@ int main(int argc, char **argv) {
   } catch (const std::exception &e) {
     std::cerr << "Failed to initialize OpenVINO model: " << e.what()
               << std::endl;
-    std::cerr << "Configured model_path: " << Tools::Params().model_path << std::endl;
-    std::cerr << "Configured device_name: " << Tools::Params().openvino_device_name
+    std::cerr << "Configured model_path: " << Tools::Params().model_path
               << std::endl;
+    std::cerr << "Configured device_name: "
+              << Tools::Params().openvino_device_name << std::endl;
     return -2;
   }
 
@@ -294,8 +321,7 @@ int main(int argc, char **argv) {
   std::thread image_capture(CaptureThread, &camera);
   Tools::ScanController scan_controller;
   std::thread image_predict(ImagePredictThread, std::ref(*predictor),
-                            std::ref(scan_controller),
-                            command_line_options);
+                            std::ref(scan_controller), command_line_options);
   std::thread imu_read;
   std::thread imu_send;
   std::thread aimbot_target_receive;
@@ -365,15 +391,16 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   static ImageRecognize::CrossFrameTargetTracker target_tracker;
   static ImageRecognize::TargetMotionPredictor target_motion_predictor;
   static const Tools::FilterType filter_type =
-      Tools::AngleCalculator::ParseFilterType(Tools::Params().angle_filter_type);
+      Tools::AngleCalculator::ParseFilterType(
+          Tools::Params().angle_filter_type);
   static const ImageRecognize::TargetCampMode target_camp_mode =
       ImageRecognize::ParseTargetCampMode(Tools::Params().target_camp_mode);
   const bool enable_display = command_line_options.enable_display;
   const bool enable_calibration_sliders =
       command_line_options.enable_calibration_sliders;
-  const bool enable_motion_prediction = ResolveOption(
-      command_line_options.enable_motion_prediction,
-      Tools::Params().enable_motion_prediction);
+  const bool enable_motion_prediction =
+      ResolveOption(command_line_options.enable_motion_prediction,
+                    Tools::Params().enable_motion_prediction);
   const bool enable_scan_mode = ResolveOption(
       command_line_options.enable_scan_mode, Tools::Params().enable_scan_mode);
   const bool enable_save_no_target_images =
@@ -555,8 +582,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           target_motion_predictor.Predict(frame_dt, frame.size());
       const auto t_motion_predict_end = ProfileNow(enable_latency_profile);
       AddLatencySample(enable_latency_profile, latency_total, latency_window,
-                       &LatencyStats::motion_predict_ns,
-                       t_motion_predict_start, t_motion_predict_end);
+                       &LatencyStats::motion_predict_ns, t_motion_predict_start,
+                       t_motion_predict_end);
       if (motion_prediction.valid) {
         tracked_box = motion_prediction.box;
         has_tracked_box = true;
@@ -672,8 +699,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     const auto t_render_start = ProfileNow(enable_latency_profile);
     const bool do_display =
         enable_display &&
-        (ui_frame_counter % static_cast<std::uint64_t>(
-                                std::max(1, Tools::Params().display_every_n_frames)) ==
+        (ui_frame_counter % static_cast<std::uint64_t>(std::max(
+                                1, Tools::Params().display_every_n_frames)) ==
          0);
     const bool do_gui_poll =
         enable_display &&
@@ -723,8 +750,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     AddLatencyFrame(enable_latency_profile, latency_total, latency_window);
 
     if (enable_latency_profile &&
-        latency_window.frames >= static_cast<std::uint64_t>(
-                                     Tools::Params().latency_print_interval_frames)) {
+        latency_window.frames >=
+            static_cast<std::uint64_t>(
+                Tools::Params().latency_print_interval_frames)) {
       PrintLatencyStats(latency_window, "窗口");
       latency_window = LatencyStats{};
     }
@@ -741,13 +769,30 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 void IMUReadThread(serial::Serial &port) {
   Tools::BindCurrentThreadToAuxCore(1);
   while (g_running) {
-    SerialTask::EulerAngles angles;
-    if (SerialTask::ReadIMUData(port, angles)) {
-      auto ts = std::chrono::steady_clock::now();
-      g_imu_buffer.Add(
-          ts, angles,
-          std::chrono::milliseconds(Tools::Params().imu_buffer_max_age_ms));
-    } else {
+    try {
+      SerialTask::EulerAngles angles;
+      bool read_ok = false;
+      {
+        std::lock_guard<std::mutex> lk(g_serial_mutex);
+        read_ok = SerialTask::ReadIMUData(port, angles);
+      }
+      if (read_ok) {
+        auto ts = std::chrono::steady_clock::now();
+        g_imu_buffer.Add(
+            ts, angles,
+            std::chrono::milliseconds(Tools::Params().imu_buffer_max_age_ms));
+      } else {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(Tools::Params().imu_read_fail_sleep_ms));
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "Warning: IMU serial read failed: " << e.what() << std::endl;
+      {
+        std::lock_guard<std::mutex> lk(g_serial_mutex);
+        if (port.isOpen()) {
+          port.close();
+        }
+      }
       std::this_thread::sleep_for(
           std::chrono::milliseconds(Tools::Params().imu_read_fail_sleep_ms));
     }
@@ -756,16 +801,15 @@ void IMUReadThread(serial::Serial &port) {
     port.close();
 }
 
-void IMUSendThread(serial::Serial &port,
-                   Tools::ScanController &scan_controller,
+void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
                    bool enable_send_log) {
   Tools::BindCurrentThreadToAuxCore(2);
   using Clock = std::chrono::steady_clock;
   const double scan_send_hz = std::max(1.0, Tools::Params().scan_send_hz);
   const auto scan_send_interval = std::chrono::duration_cast<Clock::duration>(
       std::chrono::duration<double>(1.0 / scan_send_hz));
-  const auto scan_origin_hold_duration =
-      std::chrono::milliseconds(std::max(0, Tools::Params().scan_origin_hold_ms));
+  const auto scan_origin_hold_duration = std::chrono::milliseconds(
+      std::max(0, Tools::Params().scan_origin_hold_ms));
 
   auto next_scan_send_time = Clock::now();
   bool last_scan_mode = false;
@@ -773,6 +817,12 @@ void IMUSendThread(serial::Serial &port,
   Clock::time_point scan_origin_deadline = Clock::now();
 
   while (g_running) {
+    if (!TryReopenSerialPort(port)) {
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(Tools::Params().imu_read_fail_sleep_ms));
+      continue;
+    }
+
     const bool scan_mode = g_send_is_scan.load(std::memory_order_acquire);
     const bool target_visible =
         g_target_visible.load(std::memory_order_acquire);
@@ -812,6 +862,11 @@ void IMUSendThread(serial::Serial &port,
         continue;
       }
 
+      float gimbal_pitch_velocity = 0.0f;
+      float gimbal_yaw_velocity = 0.0f;
+      g_imu_buffer.GetLatestVelocity(&gimbal_pitch_velocity,
+                                     &gimbal_yaw_velocity);
+
       Tools::ScanCommand scan_command{};
       {
         std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
@@ -824,12 +879,21 @@ void IMUSendThread(serial::Serial &port,
         }
       }
 
-      SendAimbotCommand(port,
-                        AimbotSendCommand{scan_command.absolute_pitch_deg,
-                                          scan_command.absolute_yaw_deg,
-                                          scan_command.offset_pitch_deg,
-                                          scan_command.offset_yaw_deg, 0.0f,
-                                          0.0f, scan_command.aimbot_state});
+      try {
+        std::lock_guard<std::mutex> lk(g_serial_mutex);
+        SendAimbotCommand(
+            port, AimbotSendCommand{scan_command.absolute_pitch_deg,
+                                    scan_command.absolute_yaw_deg,
+                                    scan_command.offset_pitch_deg,
+                                    scan_command.offset_yaw_deg,
+                                    gimbal_pitch_velocity, gimbal_yaw_velocity,
+                                    scan_command.aimbot_state});
+      } catch (const std::exception &e) {
+        HandleSerialWriteFailure(port, e);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(Tools::Params().imu_send_idle_sleep_ms));
+        continue;
+      }
       if (scan_waiting_at_origin && now >= scan_origin_deadline) {
         scan_waiting_at_origin = false;
         {
@@ -850,7 +914,15 @@ void IMUSendThread(serial::Serial &port,
                   << "°, offset_pitch: " << command.offset_pitch << "°"
                   << std::endl;
       }
-      SendAimbotCommand(port, command);
+      try {
+        std::lock_guard<std::mutex> lk(g_serial_mutex);
+        SendAimbotCommand(port, command);
+      } catch (const std::exception &e) {
+        HandleSerialWriteFailure(port, e);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(Tools::Params().imu_send_idle_sleep_ms));
+        continue;
+      }
     } else {
       std::this_thread::sleep_for(
           std::chrono::milliseconds(Tools::Params().imu_send_idle_sleep_ms));
@@ -860,7 +932,7 @@ void IMUSendThread(serial::Serial &port,
 
 void AimbotTargetReceiveThread() {
   Tools::BindCurrentThreadToAuxCore(3);
-  NetworkTask::RunAimbotTargetReceiver(
-      g_aimbot_target,
-      []() { return g_running.load(std::memory_order_acquire); });
+  NetworkTask::RunAimbotTargetReceiver(g_aimbot_target, []() {
+    return g_running.load(std::memory_order_acquire);
+  });
 }
