@@ -1,0 +1,17 @@
+description: ONNX -> OpenVINO INT8 (NNCF MIXED)
+author: onnx2openvino.py
+version: '1.0'
+task: detect
+batch: 1
+imgsz:
+- 480
+- 480
+channels: 3
+stride: 32
+names:
+  0: target
+args:
+  nms: false
+  dynamic: false
+  int8: true
+  preset: mixed

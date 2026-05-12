@@ -15,6 +15,7 @@
 
 #include "CameraTask/ExposureHotkeyController.hpp"
 #include "CameraTask/GetImage.hpp"
+#include "ImageRecognize/AerialRobotLaserLockJudge.hpp"
 #include "ImageRecognize/ImagePredictCommandLine.hpp"
 #include "ImageRecognize/ImagePredict_OPENVINO.hpp"
 #include "ImageRecognize/ImageShow.hpp"
@@ -76,6 +77,8 @@ static std::atomic<uint8_t> g_aimbot_target{0x00};
 static std::atomic<bool> g_send_is_scan{false};
 static std::mutex g_scan_controller_mutex;
 static std::atomic<bool> g_target_visible{false};
+static std::atomic<int> g_aerial_robot_stage{
+    ImageRecognize::AerialRobotLaserLockJudge::kInitialStage};
 static CameraTask::ExposureHotkeyController g_exposure_controller;
 static std::mutex g_serial_mutex;
 
@@ -236,7 +239,30 @@ static void AddLatencyFrame(bool enabled, LatencyStats &total,
   window.AddFrame();
 }
 
+static int ResolveLaserJudgeClassId(
+    const ImageRecognize::PredictResult &result) {
+  for (const auto &box : result.boxes) {
+    const int class_id = static_cast<int>(box[5]);
+    if (ImageRecognize::AerialRobotLaserLockJudge::IsPurpleClassId(class_id)) {
+      return class_id;
+    }
+  }
+
+  if (result.boxes.empty()) {
+    return -1;
+  }
+  return static_cast<int>(result.boxes.front()[5]);
+}
+
+static void NormalizeStage3PredictResult(
+    ImageRecognize::PredictResult *result) {
+  for (auto &box : result->boxes) {
+    box[5] = 3.0f;
+  }
+}
+
 // 等待相机线程交付下一帧；raw_frame 保留给未命中保存逻辑使用。
+static bool SnapshotLatestFrame(
 static bool SnapshotLatestFrame(
     bool has_last_submitted_frame_ts,
     const std::chrono::steady_clock::time_point &last_submitted_frame_ts,
@@ -294,6 +320,7 @@ int main(int argc, char **argv) {
       ImageRecognize::ParseImagePredictCommandLine(argc, argv);
 
   camera.loadRuntimeParams();
+  camera.setExposureTime(Tools::Params().stage12_exposure_time_us);
   g_exposure_controller.SetExposureTime(camera.getExposureTime());
 
   cv::setUseOptimized(true);
@@ -303,12 +330,13 @@ int main(int argc, char **argv) {
 
   try {
     predictor = std::make_unique<ImageRecognize::ImagePredict>(
-        Tools::Params().model_path, Tools::Params().openvino_device_name);
+        Tools::Params().stage12_model_path,
+        Tools::Params().openvino_device_name);
   } catch (const std::exception &e) {
     std::cerr << "Failed to initialize OpenVINO model: " << e.what()
               << std::endl;
-    std::cerr << "Configured model_path: " << Tools::Params().model_path
-              << std::endl;
+    std::cerr << "Configured stage12_model_path: "
+              << Tools::Params().stage12_model_path << std::endl;
     std::cerr << "Configured device_name: "
               << Tools::Params().openvino_device_name << std::endl;
     return -2;
@@ -390,6 +418,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   static Tools::DistanceCalculator distance_calculator;
   static ImageRecognize::CrossFrameTargetTracker target_tracker;
   static ImageRecognize::TargetMotionPredictor target_motion_predictor;
+  static ImageRecognize::AerialRobotLaserLockJudge aerial_robot_stage_judge;
   static const Tools::FilterType filter_type =
       Tools::AngleCalculator::ParseFilterType(
           Tools::Params().angle_filter_type);
@@ -443,6 +472,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           : std::chrono::steady_clock::duration::zero();
   std::chrono::steady_clock::time_point next_infer_submit_time =
       std::chrono::steady_clock::now();
+  std::unique_ptr<ImageRecognize::ImagePredict> stage3_predictor;
+  ImageRecognize::ImagePredict *active_predictor = &predictor;
+  bool using_stage3_predictor = false;
+  bool pending_stage3_switch = false;
 
   while (g_running) {
     if (!infer_inflight) {
@@ -468,7 +501,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
       try {
         inflight_infer_start = ProfileNow(enable_latency_profile);
-        predictor.startAsync(next_frame);
+        active_predictor->startAsync(next_frame);
         inflight_frame = std::move(next_frame);
         inflight_raw_frame = std::move(next_raw_frame);
         inflight_frame_ts = next_frame_ts;
@@ -486,7 +519,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       continue;
     }
 
-    while (g_running && !predictor.isAsyncReady()) {
+    while (g_running && !active_predictor->isAsyncReady()) {
       std::unique_lock<std::mutex> lk(g_frame_mutex);
       g_frame_cv.wait_for(lk, std::chrono::milliseconds(1),
                           [] { return !g_running; });
@@ -504,9 +537,16 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     SerialTask::EulerAngles matched_imu{};
     bool has_matched_imu = false;
     double frame_dt = 0.0;
+    double stage_dt =
+        ImageRecognize::AerialRobotLaserLockJudge::kDefaultDeltaSeconds;
     bool has_realtime_frame_dt = false;
+    bool has_predict_result = false;
     try {
-      result = predictor.getAsyncResult();
+      result = active_predictor->getAsyncResult();
+      if (using_stage3_predictor) {
+        NormalizeStage3PredictResult(&result);
+      }
+      has_predict_result = true;
       const auto t_infer_end = ProfileNow(enable_latency_profile);
       infer_inflight = false;
       AddLatencySample(enable_latency_profile, latency_total, latency_window,
@@ -516,6 +556,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       if (has_prev_frame_ts) {
         frame_dt =
             std::chrono::duration<double>(frame_ts - prev_frame_ts).count();
+        if (frame_dt > 0.0) {
+          stage_dt = frame_dt;
+        }
         has_realtime_frame_dt = true;
       }
       prev_frame_ts = frame_ts;
@@ -536,6 +579,23 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       std::cerr << "ImagePredictThread exception: " << e.what() << std::endl;
     }
 
+    if (has_predict_result &&
+        g_aerial_robot_stage.load(std::memory_order_acquire) <
+            ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
+      const int previous_stage =
+          g_aerial_robot_stage.load(std::memory_order_acquire);
+      const int laser_judge_class_id = ResolveLaserJudgeClassId(result);
+      const int stage =
+          aerial_robot_stage_judge.Update(laser_judge_class_id, stage_dt);
+      g_aerial_robot_stage.store(stage, std::memory_order_release);
+      if (stage >= ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
+        pending_stage3_switch = true;
+      }
+      if (stage != previous_stage) {
+        std::cout << "[AerialRobotStage] stage=" << stage << std::endl;
+      }
+    }
+
     std::array<float, 6> tracked_box{};
     bool has_tracked_box = false;
     const auto track_boxes =
@@ -553,6 +613,31 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     } else if (!target_lost_since_initialized) {
       target_lost_since = now;
       target_lost_since_initialized = true;
+    }
+
+    if (pending_stage3_switch && !using_stage3_predictor && !track_alive) {
+      try {
+        g_exposure_controller.RequestExposureTime(
+            Tools::Params().stage3_exposure_time_us);
+        stage3_predictor = std::make_unique<ImageRecognize::ImagePredict>(
+            Tools::Params().stage3_model_path,
+            Tools::Params().openvino_device_name);
+        active_predictor = stage3_predictor.get();
+        using_stage3_predictor = true;
+        pending_stage3_switch = false;
+        target_tracker.Reset();
+        target_motion_predictor.Reset();
+        ClearPendingSend();
+        std::cout << "[AerialRobotStage] switched to stage3 model="
+                  << Tools::Params().stage3_model_path
+                  << " exposure_us="
+                  << Tools::Params().stage3_exposure_time_us << std::endl;
+      } catch (const std::exception &e) {
+        std::cerr << "Failed to switch to stage3 model: " << e.what()
+                  << std::endl;
+        RequestStop();
+      }
+      continue;
     }
 
     if (track_result.has_box) {
