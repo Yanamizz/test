@@ -23,8 +23,7 @@ public:
             params.far_calibration_target_height};
   }
 
-  static void SetCalibrationTargetHeights(float near_height,
-                                          float far_height) {
+  static void SetCalibrationTargetHeights(float near_height, float far_height) {
     std::lock_guard<std::mutex> lk(ParamsMutex());
     auto &params = MutableParams();
     params.near_calibration_target_height = near_height;
@@ -155,14 +154,14 @@ public:
   }
 
   std::pair<float, float> CalculateLaserAngles(float distance, float, float) {
-    // 激光和相机的连线始终垂直于相机视线；激光在上方时，pitch 补偿为 atan(高度
-    // / 距离)。
+    // 激光和相机的连线始终垂直于相机视线；新 pitch 正方向与旧约定相反，
+    // 激光在上方时向下补偿为负值。
     const auto params = Params();
     const float current_pitch = ComputePitchCorrectionDeg(distance);
     const float reference_pitch =
         ComputePitchCorrectionDeg(params.reference_distance_m);
     return {params.fixed_offset_yaw,
-            current_pitch - reference_pitch + params.fixed_offset_pitch};
+            reference_pitch - current_pitch + params.fixed_offset_pitch};
   }
 
 private:
@@ -208,9 +207,11 @@ private:
         0.090f, // laser_height_above_camera_m: 激光在相机上方 0.09m
         18.8f, // reference_distance_m: 用于归零的参考水平距离（米）
         0.1f, // min_valid_distance_m: 仅用于防止接近 0 的距离造成异常角度
-        0.0f, // fixed_offset_yaw: 固定补偿的yaw角（度），正值会让激光整体向右转
-        0.0f, // fixed_offset_pitch:
-              // 固定补偿的pitch角（度），正值会让激光整体向下转
+        // 发送日志里的 offset 仍按旧方向显示；这里填入其反号作为固定补偿。
+        0.0617f, // fixed_offset_yaw:
+                 // 固定补偿的yaw角（度），正值会让激光整体向右转
+        0.0087f, // fixed_offset_pitch:
+                 // 固定补偿的pitch角（度），正值会让激光整体向上转
     };
     return p;
   }

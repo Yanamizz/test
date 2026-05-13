@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <string>
 
 #include "CameraTask/GetImage.hpp"
 #include "ImageRecognize/ImageShow.hpp"
@@ -35,6 +38,95 @@ public:
     std::lock_guard<std::mutex> lk(mutex_);
     ExposureForMode(active_mode_) = NormalizeExposure(exposure_time_us);
     update_pending_ = false;
+  }
+
+  bool
+  LoadRuntimeParams(const std::string &path = "camera_runtime_params.ini") {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+      return false;
+    }
+
+    bool loaded = false;
+    bool loaded_stage12 = false;
+    bool loaded_stage3 = false;
+    bool loaded_legacy = false;
+    double stage12_exposure_time_us = 0.0;
+    double stage3_exposure_time_us = 0.0;
+    double legacy_exposure_time_us = 0.0;
+    std::string line;
+
+    while (std::getline(file, line)) {
+      const std::string trimmed_line = Trim(line);
+      if (trimmed_line.empty() || trimmed_line.front() == '#') {
+        continue;
+      }
+
+      const auto eq_pos = trimmed_line.find('=');
+      if (eq_pos == std::string::npos) {
+        continue;
+      }
+
+      const std::string key = Trim(trimmed_line.substr(0, eq_pos));
+      const std::string value = Trim(trimmed_line.substr(eq_pos + 1));
+
+      try {
+        if (key == "stage12_exposure_time_us") {
+          stage12_exposure_time_us = std::stod(value);
+          loaded_stage12 = true;
+          loaded = true;
+        } else if (key == "stage3_exposure_time_us") {
+          stage3_exposure_time_us = std::stod(value);
+          loaded_stage3 = true;
+          loaded = true;
+        } else if (key == "exposure_time_us") {
+          legacy_exposure_time_us = std::stod(value);
+          loaded_legacy = true;
+          loaded = true;
+        }
+      } catch (...) {
+        std::cerr << "[Camera] invalid runtime param line in " << path << ": "
+                  << line << std::endl;
+      }
+    }
+
+    if (!loaded) {
+      return false;
+    }
+
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (loaded_stage12) {
+      stage12_exposure_time_us_ = NormalizeExposure(stage12_exposure_time_us);
+    }
+    if (loaded_stage3) {
+      stage3_exposure_time_us_ = NormalizeExposure(stage3_exposure_time_us);
+    }
+    if (!loaded_stage12 && !loaded_stage3 && loaded_legacy) {
+      const double normalized_legacy =
+          NormalizeExposure(legacy_exposure_time_us);
+      stage12_exposure_time_us_ = normalized_legacy;
+      stage3_exposure_time_us_ = normalized_legacy;
+    }
+    update_pending_ = false;
+    return true;
+  }
+
+  bool SaveRuntimeParams(
+      const std::string &path = "camera_runtime_params.ini") const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    std::ofstream file(path, std::ios::trunc);
+    if (!file.is_open()) {
+      std::cerr << "[Camera] failed to open runtime params file for write: "
+                << path << std::endl;
+      return false;
+    }
+
+    file << "# Runtime camera parameters\n";
+    file << std::fixed << std::setprecision(1);
+    file << "stage12_exposure_time_us=" << stage12_exposure_time_us_ << '\n';
+    file << "stage3_exposure_time_us=" << stage3_exposure_time_us_ << '\n';
+    file << "exposure_time_us=" << stage12_exposure_time_us_ << '\n';
+    return true;
   }
 
   double GetExposureTime() const {
@@ -156,6 +248,8 @@ private:
     std::lock_guard<std::mutex> lk(mutex_);
     edit_mode_ = edit_mode_ == ExposureMode::Stage12 ? ExposureMode::Stage3
                                                      : ExposureMode::Stage12;
+    active_mode_ = edit_mode_;
+    update_pending_ = true;
     std::cout << "[Camera] exposure edit mode: " << ModeName(edit_mode_)
               << " exposure_time_us=" << ExposureForMode(edit_mode_)
               << std::endl;
@@ -177,6 +271,22 @@ private:
     if (!update_pending_) {
       ExposureForMode(active_mode_) = NormalizeExposure(exposure_time_us);
     }
+  }
+
+  static std::string Trim(const std::string &value) {
+    std::size_t begin = 0;
+    while (begin < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[begin]))) {
+      ++begin;
+    }
+
+    std::size_t end = value.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+      --end;
+    }
+
+    return value.substr(begin, end - begin);
   }
 
   mutable std::mutex mutex_;

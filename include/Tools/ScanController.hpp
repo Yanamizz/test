@@ -132,10 +132,10 @@ private:
 };
 
 inline ScanController::Config::Config()
-    : min_pitch_deg(-268.0f),        // pitch 扫描范围下限（度）
-      max_pitch_deg(-247.0f),        // pitch 扫描起始上限（度）
-      min_yaw_deg(36.0f),            // yaw 扫描起始下限（度）
-      max_yaw_deg(57.0f),            // yaw 扫描起始上限（度）
+    : min_pitch_deg(90.5f),          // pitch 扫描范围下限（度）
+      max_pitch_deg(75.1f),          // pitch 扫描起始上限（度）
+      min_yaw_deg(60.62f),           // yaw 扫描起始下限（度）
+      max_yaw_deg(85.1f),            // yaw 扫描起始上限（度）
       yaw_speed_deg_per_sec(4.0f) {} // yaw 扫描角速度（度/秒）
 
 } // namespace Tools

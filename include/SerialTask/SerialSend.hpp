@@ -16,19 +16,10 @@
 inline constexpr float kDegToRad = 0.01745329251994329577f;
 
 namespace SerialTask {
-// 将度数归一化到 [-180, 180]
-inline float NormalizeDegTo180(float d) {
-  while (d > 180.0f)
-    d -= 360.0f;
-  while (d < -180.0f)
-    d += 360.0f;
-  return d;
-}
-
 inline float NormalizeDegTo360(float d) {
-  while (d > 0.0f)
+  while (d > 360.0f)
     d -= 360.0f;
-  while (d < -360.0f)
+  while (d < 0.0f)
     d += 360.0f;
   return d;
 }
@@ -49,7 +40,7 @@ inline void SerialSend(serial::Serial &serial_port, float absolute_pitch,
   float yaw_relative_angle = absolute_yaw;
 
   pitch_relative_angle = NormalizeDegTo360(pitch_relative_angle);
-  yaw_relative_angle = NormalizeDegTo180(yaw_relative_angle);
+  yaw_relative_angle = NormalizeDegTo360(yaw_relative_angle);
 
   // 在转换为弧度前保存度值以便打印
   pitch_relative_angle *= kDegToRad;
@@ -57,10 +48,9 @@ inline void SerialSend(serial::Serial &serial_port, float absolute_pitch,
   pitch_velocity *= kDegToRad;
   yaw_velocity *= kDegToRad;
 
-  SerialTask::SendAimbotFrame(serial_port, pitch_relative_angle,
-                              yaw_relative_angle, pitch_offset, yaw_offset,
-                              pitch_velocity, yaw_velocity, AimbotState,
-                              AimbotTarget);
+  SerialTask::SendAimbotFrame(
+      serial_port, pitch_relative_angle, yaw_relative_angle, pitch_offset,
+      yaw_offset, pitch_velocity, yaw_velocity, AimbotState, AimbotTarget);
 }
 
 inline void SendAimbotFrame(serial::Serial &serial_port,

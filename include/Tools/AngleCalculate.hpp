@@ -139,9 +139,9 @@ public:
     // 去畸变后的比值
     double rxNew = (pnt.x - cx) / fx;
     double ryNew = (pnt.y - cy) / fy;
-    // 计算偏移角
-    double offset_yaw = -std::atan2(rxNew, 1.0) / kPi * 180.0;
-    double offset_pitch = std::atan2(ryNew, 1.0) / kPi * 180.0;
+    // yaw/pitch 正方向已相对旧云台约定反向：画面右侧为 +yaw，画面下方为 -pitch。
+    double offset_yaw = std::atan2(rxNew, 1.0) / kPi * 180.0;
+    double offset_pitch = -std::atan2(ryNew, 1.0) / kPi * 180.0;
 
     if (std::abs(offset_yaw) > Params().max_offset_deg) {
       offset_yaw = Params().max_offset_deg * (offset_yaw > 0 ? 1.0 : -1.0);
@@ -209,8 +209,8 @@ public:
     const double offset_pitch =
         static_cast<double>(absolutePitch - currentPitch);
 
-    const double rx = -std::tan(offset_yaw * kPi / 180.0);
-    const double ry = std::tan(offset_pitch * kPi / 180.0);
+    const double rx = std::tan(offset_yaw * kPi / 180.0);
+    const double ry = -std::tan(offset_pitch * kPi / 180.0);
 
     const float pred_x = static_cast<float>(cx + fx * rx);
     const float pred_y = static_cast<float>(cy + fy * ry);
@@ -347,9 +347,9 @@ inline const AngleCalculator::TuningParams &AngleCalculator::Params() {
 
       120.0, // oneeuro_freq_hz: OneEuro 采样频率（Hz），通常作为 dt
              // 异常时的回退值
-      4.6,   // oneeuro_min_cutoff_hz: 小幅降稳，压住静止和慢速振荡
-      6.5,   // oneeuro_beta: 降低运动响应增益，减少过度追随造成的振荡
-      2.5    // oneeuro_d_cutoff_hz: 降低导数响应，避免把小抖动当作运动
+      4.6, // oneeuro_min_cutoff_hz: 小幅降稳，压住静止和慢速振荡
+      6.5, // oneeuro_beta: 降低运动响应增益，减少过度追随造成的振荡
+      2.5 // oneeuro_d_cutoff_hz: 降低导数响应，避免把小抖动当作运动
   };
   return p;
 }
