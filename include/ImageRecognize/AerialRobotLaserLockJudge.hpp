@@ -24,7 +24,11 @@ class AerialRobotLaserLockJudge {
     double remaining_seconds = delta_seconds;
 
     while (remaining_seconds > 0.0) {
-      if (!illuminated || IsFinished()) {
+      if (IsFinished()) {
+        break;
+      }
+
+      if (!illuminated) {
         progress_ = std::max(
             0.0, progress_ - kProgressDecayPerSecond * remaining_seconds);
         ResetContinuousIllumination();
@@ -42,7 +46,8 @@ class AerialRobotLaserLockJudge {
 
       judge_accumulator_ = 0.0;
       ++continuous_judge_count_;
-      progress_ += static_cast<double>(continuous_judge_count_);
+      progress_ = std::min(
+          100.0, progress_ + static_cast<double>(continuous_judge_count_));
 
       if (progress_ >= CurrentThreshold()) {
         AdvanceStage();
@@ -77,7 +82,6 @@ class AerialRobotLaserLockJudge {
   void AdvanceStage() {
     progress_ = 0.0;
     stage_ = std::min(stage_ + 1, kFinishedStage);
-    ResetContinuousIllumination();
   }
 
   void ResetContinuousIllumination() {
