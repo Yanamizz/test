@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <string>
 
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
@@ -92,7 +93,8 @@ private:
         ToOffsetSliderValue(offsets.fixed_offset_pitch);
     if (exposure_controller_ != nullptr) {
       exposure_slider_ =
-          ToExposureSliderValue(exposure_controller_->GetExposureTime());
+          ToExposureSliderValue(exposure_controller_->GetEditingExposureTime());
+      exposure_slider_mode_ = exposure_controller_->GetEditMode();
     }
 
     cv::namedWindow(kWindowName, cv::WINDOW_AUTOSIZE);
@@ -135,7 +137,8 @@ private:
         ToOffsetDeg(fixed_offset_pitch_slider_));
 
     if (allow_exposure_update && exposure_controller_ != nullptr) {
-      exposure_controller_->RequestExposureTime(ToExposureUs(exposure_slider_));
+      exposure_controller_->RequestEditingExposureTime(
+          ToExposureUs(exposure_slider_));
     }
   }
 
@@ -157,12 +160,30 @@ private:
   }
 
   static void DrawPanel() {
+    SyncExposureSliderFromController();
     const auto heights = DistanceCalculator::GetCalibrationTargetHeights();
     const auto offsets = LaserAngleCalculator::GetFixedOffsets();
-    const double exposure_us = exposure_controller_ != nullptr
-                                   ? exposure_controller_->GetExposureTime()
-                                   : ToExposureUs(exposure_slider_);
-    cv::Mat panel(178, 500, CV_8UC3, cv::Scalar(28, 30, 32));
+    const double exposure_us =
+        exposure_controller_ != nullptr
+            ? exposure_controller_->GetEditingExposureTime()
+            : ToExposureUs(exposure_slider_);
+    const double stage12_exposure_us =
+        exposure_controller_ != nullptr
+            ? exposure_controller_->GetStage12ExposureTime()
+            : ToExposureUs(exposure_slider_);
+    const double stage3_exposure_us =
+        exposure_controller_ != nullptr
+            ? exposure_controller_->GetStage3ExposureTime()
+            : ToExposureUs(exposure_slider_);
+    const auto edit_mode =
+        exposure_controller_ != nullptr
+            ? exposure_controller_->GetEditMode()
+            : CameraTask::ExposureHotkeyController::ExposureMode::Stage12;
+    const auto active_mode =
+        exposure_controller_ != nullptr
+            ? exposure_controller_->GetActiveMode()
+            : CameraTask::ExposureHotkeyController::ExposureMode::Stage12;
+    cv::Mat panel(266, 560, CV_8UC3, cv::Scalar(28, 30, 32));
     cv::putText(panel,
                 "near_calibration_target_height: " +
                     cv::format("%.5f m",
@@ -186,11 +207,47 @@ private:
                 {12, 126}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
     cv::putText(panel,
-                "exposure_time_us:              " +
+                "editing_exposure_time_us:      " +
                     cv::format("%.0f us", exposure_us),
                 {12, 158}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
+    cv::putText(panel,
+                "exposure_edit_mode:            " +
+                    std::string(CameraTask::ExposureHotkeyController::ModeName(
+                        edit_mode)),
+                {12, 190}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
+    cv::putText(panel,
+                "exposure_active_mode:          " +
+                    std::string(CameraTask::ExposureHotkeyController::ModeName(
+                        active_mode)),
+                {12, 222}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
+    cv::putText(panel,
+                "stage1/2 " + cv::format("%.0f", stage12_exposure_us) +
+                    " us  stage3 " + cv::format("%.0f", stage3_exposure_us) +
+                    " us",
+                {12, 252}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                cv::Scalar(170, 190, 200), 1, cv::LINE_AA);
     cv::imshow(kWindowName, panel);
+  }
+
+  static void SyncExposureSliderFromController() {
+    if (!initialized_ || exposure_controller_ == nullptr) {
+      return;
+    }
+
+    const auto edit_mode = exposure_controller_->GetEditMode();
+    const int desired_slider =
+        ToExposureSliderValue(exposure_controller_->GetEditingExposureTime());
+    if (edit_mode == exposure_slider_mode_ &&
+        desired_slider == exposure_slider_) {
+      return;
+    }
+
+    exposure_slider_mode_ = edit_mode;
+    exposure_slider_ = desired_slider;
+    cv::setTrackbarPos(kExposureTrackbar, kWindowName, exposure_slider_);
   }
 
   inline static bool initialized_ = false;
@@ -199,6 +256,9 @@ private:
   inline static int fixed_offset_yaw_slider_ = 0;
   inline static int fixed_offset_pitch_slider_ = 0;
   inline static int exposure_slider_ = ToExposureSliderValue(1000.0);
+  inline static CameraTask::ExposureHotkeyController::ExposureMode
+      exposure_slider_mode_ =
+          CameraTask::ExposureHotkeyController::ExposureMode::Stage12;
   inline static CameraTask::ExposureHotkeyController *exposure_controller_ =
       nullptr;
 };
