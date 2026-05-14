@@ -12,6 +12,7 @@
 #include <serial/serial.h>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "CameraTask/ExposureHotkeyController.hpp"
 #include "CameraTask/GetImage.hpp"
@@ -71,6 +72,7 @@ static std::atomic<int> g_read_idx{-1}; // 当前可读buffer索引，-1表示�
 
 // 线程间共享的控制输出；图像线程写入，串口线程读取并发送。
 static std::mutex g_pending_send_mutex;
+static std::condition_variable g_pending_send_cv;
 static AimbotSendCommand g_pending_send;
 static bool g_has_pending_send = false;
 static std::atomic<uint8_t> g_aimbot_target{0x00};
@@ -86,19 +88,26 @@ namespace {
 static void RequestStop() {
   g_running.store(false, std::memory_order_release);
   g_frame_cv.notify_all();
+  g_pending_send_cv.notify_all();
 }
 
 static void ClearPendingSend() {
-  std::lock_guard<std::mutex> lk(g_pending_send_mutex);
-  g_send_is_scan.store(false, std::memory_order_release);
-  g_has_pending_send = false;
+  {
+    std::lock_guard<std::mutex> lk(g_pending_send_mutex);
+    g_send_is_scan.store(false, std::memory_order_release);
+    g_has_pending_send = false;
+  }
+  g_pending_send_cv.notify_one();
 }
 
 static void StorePendingSend(const AimbotSendCommand &command) {
-  std::lock_guard<std::mutex> lk(g_pending_send_mutex);
-  g_pending_send = command;
-  g_send_is_scan.store(false, std::memory_order_release);
-  g_has_pending_send = true;
+  {
+    std::lock_guard<std::mutex> lk(g_pending_send_mutex);
+    g_pending_send = command;
+    g_send_is_scan.store(false, std::memory_order_release);
+    g_has_pending_send = true;
+  }
+  g_pending_send_cv.notify_one();
 }
 
 static bool TakePendingSend(AimbotSendCommand *command) {
@@ -113,9 +122,56 @@ static bool TakePendingSend(AimbotSendCommand *command) {
 }
 
 static void StartScanMode() {
-  std::lock_guard<std::mutex> lk(g_pending_send_mutex);
-  g_has_pending_send = false;
-  g_send_is_scan.store(true, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lk(g_pending_send_mutex);
+    g_has_pending_send = false;
+    g_send_is_scan.store(true, std::memory_order_release);
+  }
+  g_pending_send_cv.notify_one();
+}
+
+static double MaxSerialAimbotFrameHz() {
+  constexpr double kBitsPerByteOnSerial = 10.0;
+  constexpr double kSafetyRatio = 0.85;
+  return SerialTask::DEFAULT_BAUD_RATE * kSafetyRatio /
+         (kBitsPerByteOnSerial * sizeof(AimbotFrame_SCM_t));
+}
+
+static double EffectiveScanSendHz() {
+  return std::clamp(Tools::Params().scan_send_hz, 1.0,
+                    MaxSerialAimbotFrameHz());
+}
+
+static std::chrono::milliseconds SerialReconnectInterval() {
+  return std::chrono::milliseconds(1000);
+}
+
+static void WaitForNormalSendWork() {
+  std::unique_lock<std::mutex> lk(g_pending_send_mutex);
+  g_pending_send_cv.wait_for(lk, SerialReconnectInterval(), []() {
+    return !g_running.load(std::memory_order_acquire) || g_has_pending_send ||
+           g_send_is_scan.load(std::memory_order_acquire);
+  });
+}
+
+static void WaitForScanStateChangeFor(std::chrono::milliseconds timeout) {
+  std::unique_lock<std::mutex> lk(g_pending_send_mutex);
+  g_pending_send_cv.wait_for(lk, timeout, []() {
+    return !g_running.load(std::memory_order_acquire) ||
+           !g_send_is_scan.load(std::memory_order_acquire) ||
+           g_has_pending_send ||
+           g_target_visible.load(std::memory_order_acquire);
+  });
+}
+
+static void WaitUntilNextScanSend(std::chrono::steady_clock::time_point time) {
+  std::unique_lock<std::mutex> lk(g_pending_send_mutex);
+  g_pending_send_cv.wait_until(lk, time, []() {
+    return !g_running.load(std::memory_order_acquire) ||
+           !g_send_is_scan.load(std::memory_order_acquire) ||
+           g_has_pending_send ||
+           g_target_visible.load(std::memory_order_acquire);
+  });
 }
 
 static void SendAimbotCommand(serial::Serial &port,
@@ -126,14 +182,18 @@ static void SendAimbotCommand(serial::Serial &port,
       command.aimbot_state, g_aimbot_target.load(std::memory_order_acquire));
 }
 
-static void HandleSerialWriteFailure(serial::Serial &port,
-                                     const std::exception &e) {
-  std::cerr << "Warning: IMU serial write failed, stop sending until restart: "
-            << e.what() << std::endl;
+static void CloseSerialPort(serial::Serial &port) {
   std::lock_guard<std::mutex> lk(g_serial_mutex);
   if (port.isOpen()) {
     port.close();
   }
+}
+
+static void HandleSerialWriteFailure(serial::Serial &port,
+                                     const std::exception &e) {
+  std::cerr << "Warning: IMU serial write failed, stop sending until restart: "
+            << e.what() << std::endl;
+  CloseSerialPort(port);
   ClearPendingSend();
 }
 
@@ -197,8 +257,13 @@ PrintPredictSettings(Tools::FilterType filter_type,
             << (enable_calibration_sliders ? "true" : "false") << std::endl;
   std::cout << "[扫描模式] 启用: " << (enable_scan_mode ? "true" : "false")
             << std::endl;
-  std::cout << "[扫描模式] 发送频率: " << Tools::Params().scan_send_hz << " Hz"
-            << std::endl;
+  const double effective_scan_send_hz = EffectiveScanSendHz();
+  std::cout << "[ScanMode] send_hz: " << effective_scan_send_hz;
+  if (effective_scan_send_hz < Tools::Params().scan_send_hz) {
+    std::cout << " (configured " << Tools::Params().scan_send_hz
+              << ", serial-limited)";
+  }
+  std::cout << " Hz" << std::endl;
   std::cout << "[异常图片保存] 启用: "
             << (enable_save_no_target_images ? "true" : "false") << std::endl;
   std::cout << "[延迟统计] 启用: "
@@ -345,26 +410,20 @@ int main(int argc, char **argv) {
 
   Tools::BindCurrentThreadToAllCores();
 
-  const bool serial_enabled = OpenSerialPort(port);
+  const bool serial_initially_open = OpenSerialPort(port);
+  if (!serial_initially_open) {
+    std::cout << "[IMU] serial unavailable at startup, retrying in background."
+              << std::endl;
+  }
 
   std::thread image_capture(CaptureThread, &camera);
   Tools::ScanController scan_controller;
   std::thread image_predict(ImagePredictThread, std::ref(*predictor),
                             std::ref(scan_controller), command_line_options);
-  std::thread imu_read;
-  std::thread imu_send;
-  std::thread aimbot_target_receive;
-  if (serial_enabled) {
-    // 只有串口可用时才启动云台相关链路。
-    aimbot_target_receive = std::thread(AimbotTargetReceiveThread);
-    imu_read = std::thread(IMUReadThread, std::ref(port));
-    imu_send =
-        std::thread(IMUSendThread, std::ref(port), std::ref(scan_controller),
-                    command_line_options.enable_send_log);
-  } else {
-    std::cout << "[IMU] 串口已禁用，仅运行检测/显示。" << std::endl;
-  }
-
+  std::thread aimbot_target_receive(AimbotTargetReceiveThread);
+  std::thread imu_read(IMUReadThread, std::ref(port));
+  std::thread imu_send(IMUSendThread, std::ref(port), std::ref(scan_controller),
+                       command_line_options.enable_send_log);
   JoinIfNeeded(image_capture);
   JoinIfNeeded(image_predict);
   JoinIfNeeded(imu_read);
@@ -569,7 +628,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
       // 关联最近一次 IMU 状态并记录延迟
       const auto t_imu_match_start = ProfileNow(enable_latency_profile);
-      has_matched_imu = g_imu_buffer.MatchForFrame(frame_ts, &matched_imu);
+      has_matched_imu = g_imu_buffer.MatchForFrame(
+          frame_ts, &matched_imu,
+          std::chrono::milliseconds(Tools::Params().imu_buffer_max_age_ms));
       const auto t_imu_match_end = ProfileNow(enable_latency_profile);
       AddLatencySample(enable_latency_profile, latency_total, latency_window,
                        &LatencyStats::imu_match_ns, t_imu_match_start,
@@ -695,9 +756,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
       const float center_x = tracked_center.x;
       const float center_y = tracked_center.y;
-      const float height = tracked_box[3] - tracked_box[1];
+      const auto &distance_box = track_result.has_box ? track_result.box
+                                                      : tracked_box;
+      const float height = ImageRecognize::BoxHeight(distance_box);
       pixel_height_stats.Add(height);
-      const float distance = distance_calculator.CalculateDistance(height);
+      const float distance = distance_calculator.CalculateDistance(
+          distance_box[0], distance_box[1], distance_box[2], distance_box[3]);
 
       if (has_matched_imu) {
         const auto t_angle_start = ProfileNow(enable_latency_profile);
@@ -855,14 +919,25 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
 void IMUReadThread(serial::Serial &port) {
   Tools::BindCurrentThreadToAuxCore(1);
+  std::vector<uint8_t> imu_read_buffer;
   while (g_running) {
     try {
-      SerialTask::EulerAngles angles;
-      bool read_ok = false;
+      if (!TryReopenSerialPort(port)) {
+        std::this_thread::sleep_for(SerialReconnectInterval());
+        continue;
+      }
+
+      GimbalImuFrame_SCM_t latest_frame{};
+      size_t read_count = 0;
       {
         std::lock_guard<std::mutex> lk(g_serial_mutex);
-        read_ok = SerialTask::ReadIMUData(port, angles);
+        read_count = SerialTask::ReadAvailableIMUBytes(port, imu_read_buffer);
       }
+      SerialTask::EulerAngles angles{};
+      const bool read_ok =
+          SerialTask::ParseLatestIMUFrame(imu_read_buffer.data(), read_count,
+                                          latest_frame) &&
+          SerialTask::TryToEulerAngles(latest_frame, angles);
       if (read_ok) {
         auto ts = std::chrono::steady_clock::now();
         g_imu_buffer.Add(
@@ -874,25 +949,18 @@ void IMUReadThread(serial::Serial &port) {
       }
     } catch (const std::exception &e) {
       std::cerr << "Warning: IMU serial read failed: " << e.what() << std::endl;
-      {
-        std::lock_guard<std::mutex> lk(g_serial_mutex);
-        if (port.isOpen()) {
-          port.close();
-        }
-      }
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(Tools::Params().imu_read_fail_sleep_ms));
+      CloseSerialPort(port);
+      std::this_thread::sleep_for(SerialReconnectInterval());
     }
   }
-  if (port.isOpen())
-    port.close();
+  CloseSerialPort(port);
 }
 
 void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
                    bool enable_send_log) {
   Tools::BindCurrentThreadToAuxCore(2);
   using Clock = std::chrono::steady_clock;
-  const double scan_send_hz = std::max(1.0, Tools::Params().scan_send_hz);
+  const double scan_send_hz = EffectiveScanSendHz();
   const auto scan_send_interval = std::chrono::duration_cast<Clock::duration>(
       std::chrono::duration<double>(1.0 / scan_send_hz));
   const auto scan_origin_hold_duration = std::chrono::milliseconds(
@@ -905,8 +973,7 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
 
   while (g_running) {
     if (!TryReopenSerialPort(port)) {
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(Tools::Params().imu_read_fail_sleep_ms));
+      std::this_thread::sleep_for(SerialReconnectInterval());
       continue;
     }
 
@@ -920,8 +987,6 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
         last_scan_mode = false;
         scan_waiting_at_origin = false;
         next_scan_send_time = Clock::now();
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(Tools::Params().imu_send_idle_sleep_ms));
         continue;
       }
 
@@ -938,13 +1003,13 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
       }
 
       if (now < next_scan_send_time) {
-        std::this_thread::sleep_for(next_scan_send_time - now);
+        WaitUntilNextScanSend(next_scan_send_time);
         continue;
       }
 
       SerialTask::EulerAngles latest_imu{};
       if (!g_imu_buffer.GetLatest(&latest_imu)) {
-        std::this_thread::sleep_for(
+        WaitForScanStateChangeFor(
             std::chrono::milliseconds(Tools::Params().imu_send_idle_sleep_ms));
         continue;
       }
@@ -977,7 +1042,7 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
                                     scan_command.aimbot_state});
       } catch (const std::exception &e) {
         HandleSerialWriteFailure(port, e);
-        std::this_thread::sleep_for(
+        WaitForScanStateChangeFor(
             std::chrono::milliseconds(Tools::Params().imu_send_idle_sleep_ms));
         continue;
       }
@@ -1006,13 +1071,11 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
         SendAimbotCommand(port, command);
       } catch (const std::exception &e) {
         HandleSerialWriteFailure(port, e);
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(Tools::Params().imu_send_idle_sleep_ms));
+        WaitForNormalSendWork();
         continue;
       }
     } else {
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(Tools::Params().imu_send_idle_sleep_ms));
+      WaitForNormalSendWork();
     }
   }
 }

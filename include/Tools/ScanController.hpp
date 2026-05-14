@@ -106,12 +106,13 @@ public:
     current_yaw_deg_ = std::clamp(current_yaw_deg_, min_yaw_deg, max_yaw_deg);
 
     const float normalized_progress =
-        (current_yaw_deg_ - min_yaw_deg) / yaw_span_deg;
-    const float phase_offset = scan_forward_ ? 0.0f : kPi;
+      (current_yaw_deg_ - min_yaw_deg) / yaw_span_deg;
+    const float roundtrip_progress = scan_forward_
+                       ? 0.5f * normalized_progress
+                       : 0.5f + 0.5f * (1.0f - normalized_progress);
     const float scan_pitch_deg =
-        pitch_mid_deg +
-        pitch_amplitude_deg *
-            std::sin(2.0f * kPi * normalized_progress + phase_offset);
+      pitch_mid_deg +
+      pitch_amplitude_deg * std::sin(2.0f * kPi * roundtrip_progress);
 
     command.absolute_yaw_deg = current_yaw_deg_;
     command.absolute_pitch_deg = scan_pitch_deg;
@@ -136,6 +137,6 @@ inline ScanController::Config::Config()
       max_pitch_deg(75.1f),          // pitch 扫描起始上限（度）
       min_yaw_deg(60.62f),           // yaw 扫描起始下限（度）
       max_yaw_deg(85.1f),            // yaw 扫描起始上限（度）
-      yaw_speed_deg_per_sec(4.0f) {} // yaw 扫描角速度（度/秒）
+      yaw_speed_deg_per_sec(8.0f) {} // yaw 扫描角速度（度/秒）
 
 } // namespace Tools

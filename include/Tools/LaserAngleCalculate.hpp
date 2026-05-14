@@ -4,6 +4,7 @@
 #include <cmath>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #include "Tools/CameraData.hpp"
 
@@ -30,13 +31,18 @@ public:
     params.far_calibration_target_height = far_height;
   }
 
-  float CalculateDistance(float edge_a) {
-    const float h_ = edge_a;
-    if (h_ <= 0.0f)
+  float CalculateDistance(float pixel_h) {
+    return CalculateDistanceByPixelHeight(pixel_h);
+  }
+
+  float CalculateDistance(float x1, float y1, float x2, float y2) {
+    const float raw_h = std::abs(y2 - y1);
+    if (!std::isfinite(raw_h) || raw_h <= 0.0f)
       return 0.0f;
 
-    const float raw_distance = EstimateCalibratedDistanceByHeight(h_);
-    return FilterDistance(raw_distance);
+    const float corrected_h = UndistortedBoxHeight(x1, y1, x2, y2);
+    return CalculateDistanceByPixelHeight(corrected_h > 0.0f ? corrected_h
+                                                             : raw_h);
   }
 
 private:
@@ -48,6 +54,35 @@ private:
     float distance_filter_alpha;
     float filter_reset_ratio;
   };
+
+  float CalculateDistanceByPixelHeight(float pixel_h) {
+    if (!std::isfinite(pixel_h) || pixel_h <= 0.0f)
+      return 0.0f;
+
+    const float raw_distance = EstimateCalibratedDistanceByHeight(pixel_h);
+    if (!std::isfinite(raw_distance) || raw_distance <= 0.0f)
+      return 0.0f;
+    return FilterDistance(raw_distance);
+  }
+
+  float UndistortedBoxHeight(float x1, float y1, float x2, float y2) const {
+    if (!std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2) ||
+        !std::isfinite(y2)) {
+      return 0.0f;
+    }
+
+    const float center_x = 0.5f * (x1 + x2);
+    std::vector<cv::Point2f> in{{center_x, y1}, {center_x, y2}};
+    std::vector<cv::Point2f> out;
+    cv::undistortPoints(in, out, camera_data_.cameraMatrix,
+                        camera_data_.distCoeffs, cv::noArray(),
+                        camera_data_.cameraMatrix);
+    if (out.size() != 2) {
+      return 0.0f;
+    }
+
+    return std::abs(out[1].y - out[0].y);
+  }
 
   float EstimateCalibratedDistanceByHeight(float pixel_h) const {
     const auto params = Params();
@@ -68,7 +103,12 @@ private:
   }
 
   float EstimateDistanceByHeight(float target_height, float pixel_h) const {
-    return (target_height * focal_px_) / pixel_h;
+    if (!std::isfinite(target_height) || target_height <= 0.0f ||
+        !std::isfinite(pixel_h) || pixel_h <= 0.0f ||
+        !std::isfinite(focal_y_px_) || focal_y_px_ <= 0.0f) {
+      return 0.0f;
+    }
+    return (target_height * focal_y_px_) / pixel_h;
   }
 
   float FilterDistance(float raw_distance) {
@@ -121,8 +161,8 @@ private:
 
   bool has_filtered_distance_ = false;
   float filtered_distance_ = 0.0f;
-  float focal_px_ =
-      CameraData().cameraMatrix.at<double>(0, 0); // 相机焦距（像素）
+  CameraData camera_data_;
+  float focal_y_px_ = camera_data_.cameraMatrix.at<double>(1, 1);
 };
 
 class LaserAngleCalculator {
@@ -181,7 +221,7 @@ private:
   }
 
   static float SafeDistance(float distance) {
-    if (distance <= 0.0f)
+    if (!std::isfinite(distance) || distance <= 0.0f)
       return Params().reference_distance_m;
     return std::max(distance, Params().min_valid_distance_m);
   }

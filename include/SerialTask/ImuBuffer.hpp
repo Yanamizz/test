@@ -25,8 +25,9 @@ public:
     }
   }
 
-  bool MatchForFrame(Clock::time_point frame_ts,
-                     EulerAngles *matched_imu) const {
+  bool MatchForFrame(Clock::time_point frame_ts, EulerAngles *matched_imu,
+                     std::chrono::milliseconds max_match_age =
+                         std::chrono::milliseconds::max()) const {
     std::lock_guard<std::mutex> lk(mutex_);
     if (entries_.empty()) {
       return false;
@@ -37,15 +38,33 @@ public:
         [](const auto &entry, const auto &ts) { return entry.first < ts; });
 
     if (entries_.size() == 1 || upper_it == entries_.begin()) {
+      if (!IsWithinMaxAge(entries_.front().first, frame_ts, max_match_age)) {
+        return false;
+      }
       *matched_imu = entries_.front().second;
       return true;
     }
     if (upper_it == entries_.end()) {
+      if (!IsWithinMaxAge(entries_.back().first, frame_ts, max_match_age)) {
+        return false;
+      }
       *matched_imu = entries_.back().second;
       return true;
     }
 
     const auto lower_it = std::prev(upper_it);
+    const bool lower_within_age =
+        IsWithinMaxAge(lower_it->first, frame_ts, max_match_age);
+    const bool upper_within_age =
+        IsWithinMaxAge(upper_it->first, frame_ts, max_match_age);
+    if (!lower_within_age && !upper_within_age) {
+      return false;
+    }
+    if (!lower_within_age || !upper_within_age) {
+      *matched_imu = lower_within_age ? lower_it->second : upper_it->second;
+      return true;
+    }
+
     const auto span_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              upper_it->first - lower_it->first)
                              .count();
@@ -100,6 +119,18 @@ public:
   }
 
 private:
+  static bool IsWithinMaxAge(Clock::time_point sample_ts,
+                             Clock::time_point frame_ts,
+                             std::chrono::milliseconds max_match_age) {
+    if (max_match_age == std::chrono::milliseconds::max()) {
+      return true;
+    }
+
+    const auto delta = sample_ts > frame_ts ? sample_ts - frame_ts
+                                            : frame_ts - sample_ts;
+    return delta <= max_match_age;
+  }
+
   static float NormalizeDeltaDeg(float delta) {
     while (delta > 180.0f) {
       delta -= 360.0f;
