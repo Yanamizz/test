@@ -515,6 +515,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   PixelHeightStats pixel_height_stats;
   std::uint64_t ui_frame_counter = 0;
   const auto scan_trigger_delay = std::chrono::milliseconds(500);
+  const auto stage3_switch_target_lost_delay = std::chrono::milliseconds(
+      std::max(0, Tools::Params().stage3_switch_target_lost_delay_ms));
   std::chrono::steady_clock::time_point target_lost_since{};
   bool target_lost_since_initialized = false;
   bool infer_inflight = false;
@@ -535,6 +537,66 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   ImageRecognize::ImagePredict *active_predictor = &predictor;
   bool using_stage3_predictor = false;
   bool pending_stage3_switch = false;
+
+  const auto reset_tracking_state = [&]() {
+    target_tracker.Reset();
+    target_motion_predictor.Reset();
+    distance_calculator.ResetFilter();
+    ClearPendingSend();
+  };
+
+  const auto switch_to_stage3_predictor = [&](const char *reason) -> bool {
+    if (using_stage3_predictor) {
+      return true;
+    }
+
+    try {
+      g_exposure_controller.SetActiveMode(
+          CameraTask::ExposureHotkeyController::ExposureMode::Stage3);
+      Tools::DistanceCalculator::SetActiveStage(Tools::CalibrationStage::Stage3);
+      Tools::LaserAngleCalculator::SetActiveStage(
+          Tools::CalibrationStage::Stage3);
+      if (!stage3_predictor) {
+        stage3_predictor = std::make_unique<ImageRecognize::ImagePredict>(
+            Tools::Params().stage3_model_path,
+            Tools::Params().openvino_device_name);
+      }
+      active_predictor = stage3_predictor.get();
+      using_stage3_predictor = true;
+      pending_stage3_switch = false;
+      reset_tracking_state();
+      std::cout << "[AerialRobotStage] switched to stage3 model="
+                << Tools::Params().stage3_model_path
+                << " exposure_us=" << Tools::Params().stage3_exposure_time_us
+                << " reason=" << reason << std::endl;
+      return true;
+    } catch (const std::exception &e) {
+      std::cerr << "Failed to switch to stage3 model: " << e.what()
+                << std::endl;
+      RequestStop();
+      return false;
+    }
+  };
+
+  const auto switch_to_stage12_predictor = [&](const char *reason) {
+    if (!using_stage3_predictor) {
+      return;
+    }
+
+    g_exposure_controller.SetActiveMode(
+        CameraTask::ExposureHotkeyController::ExposureMode::Stage12);
+    Tools::DistanceCalculator::SetActiveStage(Tools::CalibrationStage::Stage12);
+    Tools::LaserAngleCalculator::SetActiveStage(
+        Tools::CalibrationStage::Stage12);
+    active_predictor = &predictor;
+    using_stage3_predictor = false;
+    pending_stage3_switch = false;
+    reset_tracking_state();
+    std::cout << "[AerialRobotStage] switched to stage1/2 model="
+              << Tools::Params().stage12_model_path
+              << " exposure_us=" << Tools::Params().stage12_exposure_time_us
+              << " reason=" << reason << std::endl;
+  };
 
   while (g_running) {
     if (!infer_inflight) {
@@ -653,8 +715,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           previous_stage <
               ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
         pending_stage3_switch = true;
-        std::cout << "[AerialRobotStage] stage=3, wait target lost before "
-                     "switching model"
+        std::cout << "[AerialRobotStage] stage=3, wait target lost for "
+                  << stage3_switch_target_lost_delay.count()
+                  << "ms before switching model"
                   << std::endl;
       }
     }
@@ -678,28 +741,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       target_lost_since_initialized = true;
     }
 
-    if (pending_stage3_switch && !using_stage3_predictor && !track_alive) {
-      try {
-        g_exposure_controller.SetActiveMode(
-            CameraTask::ExposureHotkeyController::ExposureMode::Stage3);
-        stage3_predictor = std::make_unique<ImageRecognize::ImagePredict>(
-            Tools::Params().stage3_model_path,
-            Tools::Params().openvino_device_name);
-        active_predictor = stage3_predictor.get();
-        using_stage3_predictor = true;
-        pending_stage3_switch = false;
-        target_tracker.Reset();
-        target_motion_predictor.Reset();
-        ClearPendingSend();
-        std::cout << "[AerialRobotStage] switched to stage3 model="
-                  << Tools::Params().stage3_model_path
-                  << " exposure_us=" << Tools::Params().stage3_exposure_time_us
-                  << std::endl;
-      } catch (const std::exception &e) {
-        std::cerr << "Failed to switch to stage3 model: " << e.what()
-                  << std::endl;
-        RequestStop();
-      }
+    const bool stage3_switch_target_lost_long_enough =
+        target_lost_since_initialized &&
+        (now - target_lost_since) >= stage3_switch_target_lost_delay;
+    if (pending_stage3_switch && !using_stage3_predictor && !track_alive &&
+        stage3_switch_target_lost_long_enough) {
+      switch_to_stage3_predictor("stage3_target_lost");
       continue;
     }
 
@@ -861,6 +908,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     ++ui_frame_counter;
 
     if (do_display) {
+      ImageRecognize::ImageShow::ShowLockProgress(
+          frame, g_aerial_robot_stage.load(std::memory_order_acquire),
+          aerial_robot_stage_judge.Progress(),
+          aerial_robot_stage_judge.CurrentThreshold());
       ImageRecognize::ImageShow::ShowNow(frame, result, fps);
       if (enable_calibration_sliders) {
         Tools::CalibrationSliderPanel::Show(&g_exposure_controller);
@@ -876,9 +927,21 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     }
 
     // 处理 GUI 事件并允许按键退出
-    const bool should_exit =
-        do_gui_poll && g_exposure_controller.HandleGuiKey(
-                           ImageRecognize::ImageShow::PollKey());
+    bool should_exit = false;
+    if (do_gui_poll) {
+      const auto previous_exposure_mode = g_exposure_controller.GetActiveMode();
+      should_exit = g_exposure_controller.HandleGuiKey(
+          ImageRecognize::ImageShow::PollKey());
+      const auto current_exposure_mode = g_exposure_controller.GetActiveMode();
+      if (!should_exit && current_exposure_mode != previous_exposure_mode) {
+        if (current_exposure_mode ==
+            CameraTask::ExposureHotkeyController::ExposureMode::Stage3) {
+          switch_to_stage3_predictor("exposure_debug_stage3");
+        } else {
+          switch_to_stage12_predictor("exposure_debug_stage12");
+        }
+      }
+    }
     if (should_exit) {
       RequestStop();
       const auto t_render_end = ProfileNow(enable_latency_profile);

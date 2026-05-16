@@ -74,6 +74,15 @@ public:
                 cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 0}, 2);
   }
 
+  static void ShowLockProgress(cv::Mat &frame, int stage, double progress,
+                               int threshold) {
+    const std::string text =
+        "Stage: " + std::to_string(stage) + "  P: " +
+        cv::format("%.1f/%d", progress, threshold);
+    cv::putText(frame, text, {10, 90}, cv::FONT_HERSHEY_SIMPLEX, 0.85,
+                {0, 255, 255}, 2);
+  }
+
   /**
    * @brief 等待按键退出
    *@ return true 如果按q或ESC退出 */

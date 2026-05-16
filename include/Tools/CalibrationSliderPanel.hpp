@@ -24,13 +24,23 @@ private:
   static constexpr const char *kWindowName = "Calibration Sliders";
   static constexpr const char *kNearHeightTrackbar = "near target height";
   static constexpr const char *kFarHeightTrackbar = "far target height";
-  static constexpr const char *kFixedYawTrackbar = "fixed yaw x0.01";
-  static constexpr const char *kFixedPitchTrackbar = "fixed pitch x0.01";
+  static constexpr const char *kNearPitchDistTrackbar = "near pitch dist x0.1";
+  static constexpr const char *kNearPitchCompTrackbar = "near pitch comp x0.01";
+  static constexpr const char *kFarPitchDistTrackbar = "far pitch dist x0.1";
+  static constexpr const char *kFarPitchCompTrackbar = "far pitch comp x0.01";
   static constexpr const char *kExposureTrackbar = "exposure x100us";
   static constexpr int kHeightScale = 100000;
-  static constexpr int kMinHeightTicks = 5500;
-  static constexpr int kMaxHeightTicks = 7000;
-  static constexpr int kHeightSliderMax = kMaxHeightTicks - kMinHeightTicks;
+  static constexpr int kStage12MinHeightTicks = 5500;
+  static constexpr int kStage12MaxHeightTicks = 7000;
+  static constexpr int kStage3MinHeightTicks = 4000;
+  static constexpr int kStage3MaxHeightTicks = 5500;
+  static constexpr int kHeightSliderMax =
+      kStage12MaxHeightTicks - kStage12MinHeightTicks;
+  static constexpr int kDistanceScale = 10;
+  static constexpr int kMinDistanceTicks = 80;
+  static constexpr int kMaxDistanceTicks = 250;
+  static constexpr int kDistanceSliderMax =
+      kMaxDistanceTicks - kMinDistanceTicks;
   static constexpr int kOffsetScale = 100;
   static constexpr int kMinOffsetTicks = -100;
   static constexpr int kMaxOffsetTicks = 100;
@@ -41,15 +51,52 @@ private:
   static constexpr int kExposureSliderMax =
       (kExposureMaxUs - kExposureMinUs) / kExposureStepUs;
 
-  static int ToSliderValue(float height_m) {
-    const int ticks = static_cast<int>(height_m * kHeightScale + 0.5f);
-    return std::clamp(ticks - kMinHeightTicks, 0, kHeightSliderMax);
+  struct HeightSliderRange {
+    int min_ticks;
+    int max_ticks;
+  };
+
+  enum class HeightCalibrationPoint {
+    Near,
+    Far,
+  };
+
+  static HeightSliderRange HeightRange(CalibrationStage stage,
+                                       HeightCalibrationPoint point) {
+    if (stage == CalibrationStage::Stage3 &&
+        point == HeightCalibrationPoint::Near) {
+      return {kStage3MinHeightTicks, kStage3MaxHeightTicks};
+    }
+    return {kStage12MinHeightTicks, kStage12MaxHeightTicks};
   }
 
-  static float ToHeightMeters(int slider_value) {
+  static int ToSliderValue(float height_m, CalibrationStage stage,
+                           HeightCalibrationPoint point) {
+    const auto range = HeightRange(stage, point);
+    const int ticks = static_cast<int>(height_m * kHeightScale + 0.5f);
+    return std::clamp(ticks - range.min_ticks, 0,
+                      range.max_ticks - range.min_ticks);
+  }
+
+  static float ToHeightMeters(int slider_value, CalibrationStage stage,
+                              HeightCalibrationPoint point) {
+    const auto range = HeightRange(stage, point);
+    const int slider_max = range.max_ticks - range.min_ticks;
     const int ticks =
-        kMinHeightTicks + std::clamp(slider_value, 0, kHeightSliderMax);
+        range.min_ticks + std::clamp(slider_value, 0, slider_max);
     return static_cast<float>(ticks) / static_cast<float>(kHeightScale);
+  }
+
+  static int ToDistanceSliderValue(float distance_m) {
+    const int ticks = static_cast<int>(distance_m * kDistanceScale +
+                                      (distance_m >= 0.0f ? 0.5f : -0.5f));
+    return std::clamp(ticks - kMinDistanceTicks, 0, kDistanceSliderMax);
+  }
+
+  static float ToDistanceMeters(int slider_value) {
+    const int ticks =
+        kMinDistanceTicks + std::clamp(slider_value, 0, kDistanceSliderMax);
+    return static_cast<float>(ticks) / static_cast<float>(kDistanceScale);
   }
 
   static int ToOffsetSliderValue(float offset_deg) {
@@ -77,43 +124,63 @@ private:
         std::clamp(slider_value, 0, kExposureSliderMax) * kExposureStepUs);
   }
 
+  static CalibrationStage ToCalibrationStage(
+      CameraTask::ExposureHotkeyController::ExposureMode mode) {
+    return mode == CameraTask::ExposureHotkeyController::ExposureMode::Stage3
+               ? CalibrationStage::Stage3
+               : CalibrationStage::Stage12;
+  }
+
+  static CalibrationStage CurrentEditCalibrationStage() {
+    if (exposure_controller_ == nullptr) {
+      return CalibrationStage::Stage12;
+    }
+    return ToCalibrationStage(exposure_controller_->GetEditMode());
+  }
+
+  static const char *CalibrationStageName(CalibrationStage stage) {
+    return stage == CalibrationStage::Stage3 ? "stage3" : "stage1/2";
+  }
+
   static void EnsureInitialized() {
     if (initialized_) {
       return;
     }
 
-    const auto heights = DistanceCalculator::GetCalibrationTargetHeights();
-    near_height_slider_ =
-        ToSliderValue(heights.near_calibration_target_height);
-    far_height_slider_ = ToSliderValue(heights.far_calibration_target_height);
-    const auto offsets = LaserAngleCalculator::GetFixedOffsets();
-    fixed_offset_yaw_slider_ =
-        ToOffsetSliderValue(offsets.fixed_offset_yaw);
-    fixed_offset_pitch_slider_ =
-        ToOffsetSliderValue(offsets.fixed_offset_pitch);
     if (exposure_controller_ != nullptr) {
       exposure_slider_ =
           ToExposureSliderValue(exposure_controller_->GetEditingExposureTime());
       exposure_slider_mode_ = exposure_controller_->GetEditMode();
     }
 
+    SyncCalibrationSlidersFromStage(
+        ToCalibrationStage(exposure_slider_mode_), false);
+
     cv::namedWindow(kWindowName, cv::WINDOW_AUTOSIZE);
     cv::createTrackbar(kNearHeightTrackbar, kWindowName, nullptr,
                        kHeightSliderMax, OnTrackbar);
     cv::createTrackbar(kFarHeightTrackbar, kWindowName, nullptr,
                        kHeightSliderMax, OnTrackbar);
-    cv::createTrackbar(kFixedYawTrackbar, kWindowName, nullptr,
+    cv::createTrackbar(kNearPitchDistTrackbar, kWindowName, nullptr,
+                       kDistanceSliderMax, OnTrackbar);
+    cv::createTrackbar(kNearPitchCompTrackbar, kWindowName, nullptr,
                        kOffsetSliderMax, OnTrackbar);
-    cv::createTrackbar(kFixedPitchTrackbar, kWindowName, nullptr,
+    cv::createTrackbar(kFarPitchDistTrackbar, kWindowName, nullptr,
+                       kDistanceSliderMax, OnTrackbar);
+    cv::createTrackbar(kFarPitchCompTrackbar, kWindowName, nullptr,
                        kOffsetSliderMax, OnTrackbar);
     cv::createTrackbar(kExposureTrackbar, kWindowName, nullptr,
                        kExposureSliderMax, OnTrackbar);
     cv::setTrackbarPos(kNearHeightTrackbar, kWindowName, near_height_slider_);
     cv::setTrackbarPos(kFarHeightTrackbar, kWindowName, far_height_slider_);
-    cv::setTrackbarPos(kFixedYawTrackbar, kWindowName,
-                       fixed_offset_yaw_slider_);
-    cv::setTrackbarPos(kFixedPitchTrackbar, kWindowName,
-                       fixed_offset_pitch_slider_);
+    cv::setTrackbarPos(kNearPitchDistTrackbar, kWindowName,
+                       near_pitch_distance_slider_);
+    cv::setTrackbarPos(kNearPitchCompTrackbar, kWindowName,
+                       near_pitch_comp_slider_);
+    cv::setTrackbarPos(kFarPitchDistTrackbar, kWindowName,
+                       far_pitch_distance_slider_);
+    cv::setTrackbarPos(kFarPitchCompTrackbar, kWindowName,
+                       far_pitch_comp_slider_);
     cv::setTrackbarPos(kExposureTrackbar, kWindowName, exposure_slider_);
 
     initialized_ = true;
@@ -121,7 +188,7 @@ private:
   }
 
   static void OnTrackbar(int, void *) {
-    if (!initialized_) {
+    if (!initialized_ || syncing_sliders_) {
       return;
     }
 
@@ -130,11 +197,18 @@ private:
 
   static void ApplySliderValues(bool allow_exposure_update) {
     ReadSliderValues();
+    const auto stage = CurrentEditCalibrationStage();
     DistanceCalculator::SetCalibrationTargetHeights(
-        ToHeightMeters(near_height_slider_), ToHeightMeters(far_height_slider_));
-    LaserAngleCalculator::SetFixedOffsets(
-        ToOffsetDeg(fixed_offset_yaw_slider_),
-        ToOffsetDeg(fixed_offset_pitch_slider_));
+        stage,
+        ToHeightMeters(near_height_slider_, stage,
+                       HeightCalibrationPoint::Near),
+        ToHeightMeters(far_height_slider_, stage, HeightCalibrationPoint::Far));
+    LaserAngleCalculator::SetPitchDistanceCompensation(
+        stage,
+        ToDistanceMeters(near_pitch_distance_slider_),
+        ToOffsetDeg(near_pitch_comp_slider_),
+        ToDistanceMeters(far_pitch_distance_slider_),
+        ToOffsetDeg(far_pitch_comp_slider_));
 
     if (allow_exposure_update && exposure_controller_ != nullptr) {
       exposure_controller_->RequestEditingExposureTime(
@@ -151,18 +225,25 @@ private:
         cv::getTrackbarPos(kNearHeightTrackbar, kWindowName);
     far_height_slider_ =
         cv::getTrackbarPos(kFarHeightTrackbar, kWindowName);
-    fixed_offset_yaw_slider_ =
-        cv::getTrackbarPos(kFixedYawTrackbar, kWindowName);
-    fixed_offset_pitch_slider_ =
-        cv::getTrackbarPos(kFixedPitchTrackbar, kWindowName);
+    near_pitch_distance_slider_ =
+        cv::getTrackbarPos(kNearPitchDistTrackbar, kWindowName);
+    near_pitch_comp_slider_ =
+        cv::getTrackbarPos(kNearPitchCompTrackbar, kWindowName);
+    far_pitch_distance_slider_ =
+        cv::getTrackbarPos(kFarPitchDistTrackbar, kWindowName);
+    far_pitch_comp_slider_ =
+        cv::getTrackbarPos(kFarPitchCompTrackbar, kWindowName);
     exposure_slider_ =
         cv::getTrackbarPos(kExposureTrackbar, kWindowName);
   }
 
   static void DrawPanel() {
     SyncExposureSliderFromController();
-    const auto heights = DistanceCalculator::GetCalibrationTargetHeights();
-    const auto offsets = LaserAngleCalculator::GetFixedOffsets();
+    const auto edit_stage = CurrentEditCalibrationStage();
+    const auto heights = DistanceCalculator::GetCalibrationTargetHeights(
+        edit_stage);
+    const auto pitch_comp =
+        LaserAngleCalculator::GetPitchDistanceCompensation(edit_stage);
     const double exposure_us =
         exposure_controller_ != nullptr
             ? exposure_controller_->GetEditingExposureTime()
@@ -183,7 +264,7 @@ private:
         exposure_controller_ != nullptr
             ? exposure_controller_->GetActiveMode()
             : CameraTask::ExposureHotkeyController::ExposureMode::Stage12;
-    cv::Mat panel(266, 560, CV_8UC3, cv::Scalar(28, 30, 32));
+    cv::Mat panel(350, 620, CV_8UC3, cv::Scalar(28, 30, 32));
     cv::putText(panel,
                 "near_calibration_target_height: " +
                     cv::format("%.5f m",
@@ -197,13 +278,17 @@ private:
                 {12, 62}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
     cv::putText(panel,
-                "fixed_offset_yaw:              " +
-                    cv::format("%.2f deg", offsets.fixed_offset_yaw),
+                "pitch_comp_near:               " +
+                    cv::format("%.1f m  %.2f deg",
+                               pitch_comp.near_distance_m,
+                               pitch_comp.near_pitch_offset_deg),
                 {12, 94}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
     cv::putText(panel,
-                "fixed_offset_pitch:            " +
-                    cv::format("%.2f deg", offsets.fixed_offset_pitch),
+                "pitch_comp_far:                " +
+                    cv::format("%.1f m  %.2f deg",
+                               pitch_comp.far_distance_m,
+                               pitch_comp.far_pitch_offset_deg),
                 {12, 126}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
     cv::putText(panel,
@@ -224,10 +309,19 @@ private:
                 {12, 222}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
     cv::putText(panel,
+                "calibration_edit_stage:        " +
+                    std::string(CalibrationStageName(edit_stage)),
+                {12, 254}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
+    cv::putText(panel,
                 "stage1/2 " + cv::format("%.0f", stage12_exposure_us) +
                     " us  stage3 " + cv::format("%.0f", stage3_exposure_us) +
                     " us",
-                {12, 252}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                {12, 284}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                cv::Scalar(170, 190, 200), 1, cv::LINE_AA);
+    cv::putText(panel,
+                "pitch comp: positive value moves laser upward",
+                {12, 314}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
                 cv::Scalar(170, 190, 200), 1, cv::LINE_AA);
     cv::imshow(kWindowName, panel);
   }
@@ -240,21 +334,69 @@ private:
     const auto edit_mode = exposure_controller_->GetEditMode();
     const int desired_slider =
         ToExposureSliderValue(exposure_controller_->GetEditingExposureTime());
-    if (edit_mode == exposure_slider_mode_ &&
-        desired_slider == exposure_slider_) {
+    const bool edit_mode_changed = edit_mode != exposure_slider_mode_;
+    if (!edit_mode_changed && desired_slider == exposure_slider_) {
       return;
     }
 
     exposure_slider_mode_ = edit_mode;
     exposure_slider_ = desired_slider;
+    syncing_sliders_ = true;
     cv::setTrackbarPos(kExposureTrackbar, kWindowName, exposure_slider_);
+    if (edit_mode_changed) {
+      SyncCalibrationSlidersFromStage(ToCalibrationStage(edit_mode), true);
+    }
+    syncing_sliders_ = false;
+    if (edit_mode_changed) {
+      ApplySliderValues(false);
+    }
+  }
+
+  static void SyncCalibrationSlidersFromStage(CalibrationStage stage,
+                                              bool update_trackbars) {
+    const auto heights = DistanceCalculator::GetCalibrationTargetHeights(stage);
+    near_height_slider_ =
+        ToSliderValue(heights.near_calibration_target_height, stage,
+                      HeightCalibrationPoint::Near);
+    far_height_slider_ =
+        ToSliderValue(heights.far_calibration_target_height, stage,
+                      HeightCalibrationPoint::Far);
+
+    const auto pitch_comp =
+        LaserAngleCalculator::GetPitchDistanceCompensation(stage);
+    near_pitch_distance_slider_ =
+        ToDistanceSliderValue(pitch_comp.near_distance_m);
+    near_pitch_comp_slider_ =
+        ToOffsetSliderValue(pitch_comp.near_pitch_offset_deg);
+    far_pitch_distance_slider_ =
+        ToDistanceSliderValue(pitch_comp.far_distance_m);
+    far_pitch_comp_slider_ =
+        ToOffsetSliderValue(pitch_comp.far_pitch_offset_deg);
+
+    if (!update_trackbars) {
+      return;
+    }
+
+    cv::setTrackbarPos(kNearHeightTrackbar, kWindowName, near_height_slider_);
+    cv::setTrackbarPos(kFarHeightTrackbar, kWindowName, far_height_slider_);
+    cv::setTrackbarPos(kNearPitchDistTrackbar, kWindowName,
+                       near_pitch_distance_slider_);
+    cv::setTrackbarPos(kNearPitchCompTrackbar, kWindowName,
+                       near_pitch_comp_slider_);
+    cv::setTrackbarPos(kFarPitchDistTrackbar, kWindowName,
+                       far_pitch_distance_slider_);
+    cv::setTrackbarPos(kFarPitchCompTrackbar, kWindowName,
+                       far_pitch_comp_slider_);
   }
 
   inline static bool initialized_ = false;
+  inline static bool syncing_sliders_ = false;
   inline static int near_height_slider_ = 0;
   inline static int far_height_slider_ = 0;
-  inline static int fixed_offset_yaw_slider_ = 0;
-  inline static int fixed_offset_pitch_slider_ = 0;
+  inline static int near_pitch_distance_slider_ = 0;
+  inline static int near_pitch_comp_slider_ = 0;
+  inline static int far_pitch_distance_slider_ = 0;
+  inline static int far_pitch_comp_slider_ = 0;
   inline static int exposure_slider_ = ToExposureSliderValue(1000.0);
   inline static CameraTask::ExposureHotkeyController::ExposureMode
       exposure_slider_mode_ =
