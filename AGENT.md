@@ -150,3 +150,51 @@ build/bin/ImagePredict
 3. 是否误改 `third_lib/` 外部代码。
 4. 是否保留并解释了必要日志，移除了调试临时代码。
 5. `git status` 检查变更范围是否只覆盖本次任务目标。
+
+## 11. 当前会话交接摘要（2026-05-18）
+
+详细 handoff 文件：
+
+- `/tmp/handoff-oOAMUY.md`
+
+本轮关键新增：
+
+1. `AimbotTarget` 语义已在主流程、网络、串口、示例统一：
+   - 收到网络 `1` 计数 +1（上限 3）
+   - stage 变化计数 -1（下限 0）
+   - 串口按 `>=1` 二值发送
+2. 网络默认配置已集中：
+   - `NetworkTask::kDefaultTcpPort`
+   - `NetworkTask::kDefaultPeerIp`
+3. `ImagePredict.cc` 第一层拆分已做：
+   - `UpdateAerialRobotStageAndSwitchFlag`
+   - `UpdateTargetVisibleAndLostSince`
+   - `Stage3SwitchTargetLostLongEnough`
+4. 延迟统计关键修复已完成：
+   - stage3 切换 `continue` 前补 `loop_ns + frame`
+   - `loop_ns` 计时覆盖 `isAsyncReady` 等待
+5. 开关优先级已统一：
+   - 静态开关 + CLI 同时有效
+   - CLI 冲突优先
+6. 曝光配置文件已统一到同一路径机制：
+   - 显式 path > 环境变量 `ANTIDRONE_RUNTIME_PARAMS_PATH` > 编译期项目根路径
+   - `run/test` 均显式注入同一路径
+
+注意事项：
+
+1. 用户明确 `Antidrone Run.desktop` / `Antidrone Test.desktop` 的删除是主动行为，不要恢复。
+2. 工作区非干净，`third_lib/*` 存在本地状态，后续不要误回滚。
+
+建议下一步：
+
+1. 给延迟统计增加 bucket 覆盖率计数（避免“部分路径记账”的均值误导）。
+2. 继续 `ImagePredict.cc` 轻拆分（发送决策块、渲染块再抽 helper，不改线程模型）。
+3. 曝光加载/保存时增加实际路径打印（debug 级），便于现场确认读取来源。
+
+建议技能顺序：
+
+1. `zoom-out`
+2. `diagnose`
+3. `grill-me`
+4. `improve-codebase-architecture`
+5. `caveman`
