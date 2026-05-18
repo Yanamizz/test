@@ -1,3 +1,8 @@
+/**
+ * @file    include/NetworkTask/DeviceBClient.hpp
+ * @brief   提供 TCP 客户端连接服务端的基础能力。
+ */
+
 #pragma once
 
 #include <cstdint>

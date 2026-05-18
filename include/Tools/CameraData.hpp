@@ -1,3 +1,8 @@
+/**
+ * @file    include/Tools/CameraData.hpp
+ * @brief   保存相机内参与畸变参数，供角度和距离计算模块复用。
+ */
+
 #pragma once
 
 #include <opencv2/opencv.hpp>

@@ -1,3 +1,8 @@
+/**
+ * @file    include/NetworkTask/AimbotTargetReceiver.hpp
+ * @brief   提供瞄准目标标志位的网络接收与解析逻辑。
+ */
+
 #pragma once
 
 #include <algorithm>

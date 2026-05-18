@@ -1,3 +1,8 @@
+/**
+ * @file    include/CameraTask/ExposureHotkeyController.hpp
+ * @brief   管理多阶段曝光参数、热键切换状态以及运行时曝光配置读写。
+ */
+
 #pragma once
 
 #include <algorithm>

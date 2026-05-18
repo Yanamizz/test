@@ -1,15 +1,11 @@
 /**
- * @file    include\SerialTask\SerialRead.hpp
- * @brief   串口 IMU 数据读取与四元数转欧拉角
- * @brief   输入串口字节流，输出目标侧欧拉角帧（Roll，Pitch, Yaw）
- *
- * @date    2026-01-23
+ * @file    include/SerialTask/SerialRead.hpp
+ * @brief   提供 IMU 串口帧解析、四元数转欧拉角与姿态读取能力。
  */
 
 #pragma once
 
 #include "SerialTask/Common.hpp"
-#include "SerialTask/SerialConfig.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -54,12 +50,6 @@ inline bool TryToEulerAngles(const GimbalImuFrame_SCM_t &frame,
                           1.0f - 2.0f * (q2 * q2 + q3 * q3)) *
                kRadToDeg;
   return true;
-}
-
-inline EulerAngles ToEulerAngles(const GimbalImuFrame_SCM_t &frame) {
-  EulerAngles angles{};
-  TryToEulerAngles(frame, angles);
-  return angles;
 }
 
 inline bool ParseLatestIMUFrame(const uint8_t *data, size_t data_size,

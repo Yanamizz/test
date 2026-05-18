@@ -6,7 +6,7 @@
 #include <string>
 #include <thread>
 
-#include "NetworkTask/DeviceBClient.hpp"
+#include "NetworkTask/NetworkTask.hpp"
 
 namespace {
 

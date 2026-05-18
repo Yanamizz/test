@@ -1,7 +1,11 @@
+/**
+ * @file    include/ImageRecognize/ImageShow.hpp
+ * @brief   提供检测框、预测点、距离和锁定进度等图像可视化绘制能力。
+ */
+
 #pragma once
 
 #include "OutputDataProcess.hpp"
-#include "opencv2/highgui.hpp"
 #include <array>
 #include <opencv2/opencv.hpp>
 #include <string>

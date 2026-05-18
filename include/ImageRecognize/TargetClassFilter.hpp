@@ -1,3 +1,8 @@
+/**
+ * @file    include/ImageRecognize/TargetClassFilter.hpp
+ * @brief   根据阵营模式筛选可跟踪目标类别并输出过滤后的检测框。
+ */
+
 #pragma once
 
 #include <algorithm>

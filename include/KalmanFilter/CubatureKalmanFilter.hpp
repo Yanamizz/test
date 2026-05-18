@@ -1,3 +1,8 @@
+/**
+ * @file    include/KalmanFilter/CubatureKalmanFilter.hpp
+ * @brief   实现用于角度与角速度估计的 Cubature Kalman Filter。
+ */
+
 #pragma once
 
 #include <algorithm>
@@ -160,8 +165,5 @@ class CubatureKalmanFilter {
   double R;
   int n;
 };
-
-// Optional short alias.
-using CKF = CubatureKalmanFilter;
 
 }  // namespace Tools

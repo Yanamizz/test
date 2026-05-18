@@ -1,17 +1,12 @@
 /**
- * @file include/SerialTask/SerialSend.hpp
- *
- * @brief 串口 发送 云台需要转动的欧拉角（Pitch, Yaw）和角速度数据
- *
- *
+ * @file    include/SerialTask/SerialSend.hpp
+ * @brief   提供云台控制指令的串口封包、角度转换与发送能力。
  */
 #pragma once
 
 #include "Common.hpp"
 #include <cstddef>
 #include <cmath>
-#include <iomanip>
-#include <iostream>
 #include <serial/serial.h>
 #include <stdexcept>
 

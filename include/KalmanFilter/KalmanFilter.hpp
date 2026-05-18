@@ -1,3 +1,8 @@
+/**
+ * @file    include/KalmanFilter/KalmanFilter.hpp
+ * @brief   实现基于线性角度模型的 Kalman Filter 角度估计器。
+ */
+
 #pragma once
 
 #include "KalmanFilter/AngleKalmanModels.hpp"

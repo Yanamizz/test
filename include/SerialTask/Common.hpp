@@ -1,6 +1,6 @@
 /**
- * @file Common.hpp
- * @brief 公共结构体定义
+ * @file    include/SerialTask/Common.hpp
+ * @brief   定义串口通信协议中使用的公共帧结构与常量。
  */
 #pragma once
 

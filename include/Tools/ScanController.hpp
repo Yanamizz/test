@@ -1,28 +1,15 @@
+/**
+ * @file    include/Tools/ScanController.hpp
+ * @brief   生成云台扫描模式下的绝对角度与相对偏移控制指令。
+ */
+
 #pragma once
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <iostream>
-
 namespace Tools {
-
-enum class ScanAxis {
-  Yaw,
-  Pitch,
-};
-
-inline const char *ToString(ScanAxis axis) {
-  switch (axis) {
-  case ScanAxis::Yaw:
-    return "yaw";
-  case ScanAxis::Pitch:
-    return "pitch";
-  default:
-    return "unknown";
-  }
-}
 
 struct ScanCommand {
   float absolute_yaw_deg = 0.0f;
@@ -49,17 +36,15 @@ public:
   explicit ScanController(const Config &config) : config_(config) { Reset(); }
 
   void Reset() {
-    current_yaw_deg_ = std::min(config_.min_yaw_deg, config_.max_yaw_deg);
+    current_yaw_deg_ = OriginYawDeg_();
     scan_forward_ = true;
     last_update_time_ = Clock::now();
   }
 
   ScanCommand BuildOriginCommand(float imu_yaw_deg, float imu_pitch_deg) const {
     ScanCommand command{};
-    const float origin_yaw_deg =
-        std::min(config_.min_yaw_deg, config_.max_yaw_deg);
-    const float origin_pitch_deg =
-        0.5f * (config_.min_pitch_deg + config_.max_pitch_deg);
+    const float origin_yaw_deg = OriginYawDeg_();
+    const float origin_pitch_deg = OriginPitchDeg_();
     command.absolute_yaw_deg = origin_yaw_deg;
     command.absolute_pitch_deg = origin_pitch_deg;
     command.offset_yaw_deg = origin_yaw_deg - imu_yaw_deg;
@@ -126,7 +111,15 @@ private:
   using Clock = std::chrono::steady_clock;
   static constexpr float kPi = 3.14159265358979323846f;
 
-  Config config_{};
+  float OriginYawDeg_() const {
+    return std::min(config_.min_yaw_deg, config_.max_yaw_deg);
+  }
+
+  float OriginPitchDeg_() const {
+    return 0.5f * (config_.min_pitch_deg + config_.max_pitch_deg);
+  }
+
+  Config config_{};  
   float current_yaw_deg_ = 0.0f;
   bool scan_forward_ = true;
   Clock::time_point last_update_time_{Clock::now()};

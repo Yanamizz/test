@@ -1,3 +1,8 @@
+/**
+ * @file    include/Tools/RuntimeParams.hpp
+ * @brief   定义图像识别主流程使用的默认运行参数集合。
+ */
+
 #pragma once
 
 #include <string>

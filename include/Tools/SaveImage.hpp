@@ -1,3 +1,8 @@
+/**
+ * @file    include/Tools/SaveImage.hpp
+ * @brief   在无目标场景下按间隔保存图像，便于问题回溯与样本收集。
+ */
+
 #pragma once
 
 #include <algorithm>

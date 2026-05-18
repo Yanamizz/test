@@ -1,3 +1,7 @@
+/**
+ * @file    include/CameraTask/GetImage.hpp
+ * @brief   封装 Galaxy 相机的打开、取流、参数设置与运行时曝光配置能力。
+ */
 
 #pragma once
 

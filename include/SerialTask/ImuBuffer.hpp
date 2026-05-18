@@ -1,3 +1,8 @@
+/**
+ * @file    include/SerialTask/ImuBuffer.hpp
+ * @brief   提供 IMU 姿态序列缓存、插值匹配与速度估计能力。
+ */
+
 #pragma once
 
 #include <algorithm>

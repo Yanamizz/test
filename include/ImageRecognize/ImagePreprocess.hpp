@@ -1,10 +1,6 @@
 /**
  * @file    include/ImageRecognize/ImagePreprocess.hpp
- * @brief   图像预处理：resize、颜色转换、归一化与 HWC→CHW 重排。
- *
- * @details
- * - 将 `cv::Mat`（BGR，HWC）调整为模型期望尺寸（默认 640×640）。
- * - 转换为 RGB，归一化到 [0,1]，并展平为 NCHW 连续向量。
+ * @brief   执行图像缩放、颜色转换、归一化和张量重排等推理前预处理。
  */
 
 #pragma once

@@ -1,3 +1,8 @@
+/**
+ * @file    include/Tools/AngleCalculate.hpp
+ * @brief   根据图像目标位置计算云台绝对角度，并集成多种角度滤波策略。
+ */
+
 #pragma once
 #include <chrono>
 #include <cmath>
@@ -6,11 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "KalmanFilter/CubatureKalmanFilter.hpp"
-#include "KalmanFilter/ExtendedKalmanFilter.hpp"
-#include "KalmanFilter/KalmanFilter.hpp"
-#include "KalmanFilter/OneEuroFilter.hpp"
-#include "KalmanFilter/UnscentedKalmanFilter.hpp"
+#include "KalmanFilter/KalmanFilters.hpp"
 #include "Tools/CameraData.hpp"
 
 inline constexpr double kPi = 3.1415926;
@@ -51,14 +52,6 @@ inline float NormalizeDeltaDeg(float delta) {
   while (delta < -180.0f)
     delta += 360.0f;
   return delta;
-}
-
-inline float InterpolateAngleDeg(float from_deg, float to_deg, float alpha) {
-  if (alpha < 0.0f)
-    alpha = 0.0f;
-  if (alpha > 1.0f)
-    alpha = 1.0f;
-  return from_deg + NormalizeDeltaDeg(to_deg - from_deg) * alpha;
 }
 
 struct AngleCommand {

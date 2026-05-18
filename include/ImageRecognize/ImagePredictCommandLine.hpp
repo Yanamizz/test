@@ -1,3 +1,8 @@
+/**
+ * @file    include/ImageRecognize/ImagePredictCommandLine.hpp
+ * @brief   解析图像识别主程序的命令行开关并生成运行选项。
+ */
+
 #pragma once
 
 #include <optional>

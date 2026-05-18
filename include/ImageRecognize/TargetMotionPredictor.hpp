@@ -1,3 +1,8 @@
+/**
+ * @file    include/ImageRecognize/TargetMotionPredictor.hpp
+ * @brief   根据历史观测框估计目标运动趋势并预测下一时刻位置。
+ */
+
 #pragma once
 
 #include <algorithm>

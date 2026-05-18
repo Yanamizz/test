@@ -1,12 +1,6 @@
 /**
  * @file    include/ImageRecognize/ImagePredict_OPENVINO.hpp
- * @brief   OpenVINO 推理入口：加载 IR/ONNX 模型并执行单张图像推理。
- *
- * @details
- * - 复用 `ImagePreprocess` 执行图像预处理（NCHW float）。
- * - 使用 OpenVINO `ov::Core` + `CompiledModel` + `InferRequest` 执行推理。
- * - 在本文件内完成与 `OutputDataProcess` 等价的后处理，返回同一
- *   `PredictResult`。
+ * @brief   提供基于 OpenVINO 的目标检测推理、异步推理与结果后处理能力。
  */
 
 #pragma once

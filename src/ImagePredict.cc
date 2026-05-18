@@ -14,19 +14,13 @@
 #include <thread>
 #include <vector>
 
-#include "CameraTask/ExposureHotkeyController.hpp"
-#include "CameraTask/GetImage.hpp"
-#include "ImageRecognize/AerialRobotLaserLockJudge.hpp"
+#include "CameraTask/CameraTask.hpp"
 #include "ImageRecognize/ImagePredictCommandLine.hpp"
 #include "ImageRecognize/ImagePredict_OPENVINO.hpp"
 #include "ImageRecognize/ImageShow.hpp"
-#include "ImageRecognize/TargetAssociation.hpp"
-#include "ImageRecognize/TargetClassFilter.hpp"
-#include "ImageRecognize/TargetMotionPredictor.hpp"
-#include "NetworkTask/AimbotTargetReceiver.hpp"
-#include "SerialTask/ImuBuffer.hpp"
-#include "SerialTask/SerialRead.hpp"
-#include "SerialTask/SerialSend.hpp"
+#include "ImageRecognize/TargetTracking.hpp"
+#include "NetworkTask/NetworkTask.hpp"
+#include "SerialTask/SerialTask.hpp"
 #include "Tools/AngleCalculate.hpp"
 #include "Tools/CalibrationSliderPanel.hpp"
 #include "Tools/CpuAffinity.hpp"

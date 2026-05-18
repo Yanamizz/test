@@ -1,3 +1,8 @@
+/**
+ * @file    include/NetworkTask/DeviceAServer.hpp
+ * @brief   提供 TCP 监听套接字创建与客户端接入能力。
+ */
+
 #pragma once
 
 #include <cstdint>

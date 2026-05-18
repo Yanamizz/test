@@ -1,3 +1,8 @@
+/**
+ * @file    include/Tools/CalibrationSliderPanel.hpp
+ * @brief   提供用于距离、俯仰补偿和曝光调参的可视化滑块面板。
+ */
+
 #pragma once
 
 #include <algorithm>

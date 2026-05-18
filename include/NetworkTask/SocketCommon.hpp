@@ -1,3 +1,8 @@
+/**
+ * @file    include/NetworkTask/SocketCommon.hpp
+ * @brief   封装跨平台套接字初始化、收发、关闭与等待等公共操作。
+ */
+
 #pragma once
 
 #include <cstdlib>

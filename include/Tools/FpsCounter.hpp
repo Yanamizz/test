@@ -1,3 +1,8 @@
+/**
+ * @file    include/Tools/FpsCounter.hpp
+ * @brief   提供固定时间窗口下的实时帧率统计能力。
+ */
+
 #pragma once
 
 #include <chrono>

@@ -1,6 +1,6 @@
 /**
  * @file    include/ImageRecognize/OutputDataProcess.hpp
- * @brief   共享的检测结果类型定义。
+ * @brief   定义图像识别模块共享的检测结果数据结构。
  */
 
 #pragma once

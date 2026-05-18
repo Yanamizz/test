@@ -6,9 +6,7 @@
 
 #include <serial/serial.h>
 
-#include "SerialTask/SerialConfig.hpp"
-#include "SerialTask/SerialRead.hpp"
-#include "SerialTask/SerialSend.hpp"
+#include "SerialTask/SerialTask.hpp"
 
 int main(int argc, char **argv) {
   try {

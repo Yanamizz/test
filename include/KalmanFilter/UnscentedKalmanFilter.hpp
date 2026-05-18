@@ -1,3 +1,8 @@
+/**
+ * @file    include/KalmanFilter/UnscentedKalmanFilter.hpp
+ * @brief   实现用于角度与角速度估计的 Unscented Kalman Filter。
+ */
+
 #pragma once
 
 #include "KalmanFilter/AngleKalmanModels.hpp"

@@ -1,9 +1,6 @@
 /**
- * @file   include/SerialTask/SerialConfig.hpp
- *
- * @brief  初始化串口配置参数
-
- *
+ * @file    include/SerialTask/SerialConfig.hpp
+ * @brief   提供串口默认端口、波特率与超时等基础配置。
  */
 
 #pragma once

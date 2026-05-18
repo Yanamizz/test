@@ -4,7 +4,7 @@
 #include <iostream>
 #include <string>
 
-#include "NetworkTask/DeviceAServer.hpp"
+#include "NetworkTask/NetworkTask.hpp"
 
 namespace {
 

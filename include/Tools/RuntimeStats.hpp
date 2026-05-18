@@ -1,3 +1,8 @@
+/**
+ * @file    include/Tools/RuntimeStats.hpp
+ * @brief   定义主循环延迟与像素高度统计数据及其打印辅助函数。
+ */
+
 #pragma once
 
 #include <algorithm>

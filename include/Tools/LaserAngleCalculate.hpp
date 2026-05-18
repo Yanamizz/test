@@ -1,3 +1,8 @@
+/**
+ * @file    include/Tools/LaserAngleCalculate.hpp
+ * @brief   提供目标距离估计与激光打击角度补偿计算能力。
+ */
+
 #pragma once
 
 #include <algorithm>

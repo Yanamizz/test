@@ -1,3 +1,8 @@
+/**
+ * @file    include/KalmanFilter/OneEuroFilter.hpp
+ * @brief   实现适合实时角度平滑的 One Euro Filter。
+ */
+
 #pragma once
 
 #include <algorithm>

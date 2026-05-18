@@ -1,10 +1,14 @@
+/**
+ * @file    include/Tools/CpuAffinity.hpp
+ * @brief   提供线程 CPU 亲和性设置与 CPU 拓扑查询辅助能力。
+ */
+
 #pragma once
 
 #include <sched.h>
 #include <unistd.h>
 
 #include <algorithm>
-#include <cctype>
 #include <fstream>
 #include <iostream>
 #include <map>

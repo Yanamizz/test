@@ -55,3 +55,7 @@ __pycache__/
 
 .cache/
 .build/
+
+*.desktop
+*.ini
+

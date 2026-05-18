@@ -1,3 +1,8 @@
+/**
+ * @file    include/ImageRecognize/AerialRobotLaserLockJudge.hpp
+ * @brief   根据目标类别连续观测结果判断空中机器人激光锁定阶段。
+ */
+
 #pragma once
 
 #include <algorithm>

@@ -1,3 +1,8 @@
+/**
+ * @file    include/KalmanFilter/AngleKalmanModels.hpp
+ * @brief   定义角度滤波所需的状态、观测以及系统和量测模型。
+ */
+
 #pragma once
 
 #include "kalman/LinearizedMeasurementModel.hpp"
