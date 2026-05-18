@@ -14,9 +14,9 @@
 #include "KalmanFilter/KalmanFilters.hpp"
 #include "Tools/CameraData.hpp"
 
-inline constexpr double kPi = 3.1415926;
-
 namespace Tools {
+
+inline constexpr double kPi = 3.1415926;
 
 enum class FilterType {
   NONE,

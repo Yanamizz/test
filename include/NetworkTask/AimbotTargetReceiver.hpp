@@ -13,6 +13,7 @@
 #include <string>
 
 #include "NetworkTask/DeviceAServer.hpp"
+#include "SerialTask/Common.hpp"
 
 namespace NetworkTask {
 
@@ -27,11 +28,11 @@ inline bool ParseAimbotTargetMessage(const std::string &message,
   }
 
   if (text == "0" || text == "00" || text == "0X00") {
-    target = 0x00;
+    target = SerialTask::kAimbotTargetMin;
     return true;
   }
   if (text == "1" || text == "01" || text == "0X01") {
-    target = 0x01;
+    target = SerialTask::kAimbotTargetActiveThreshold;
     return true;
   }
   if (!text.empty() && std::all_of(text.begin(), text.end(), [](char c) {
@@ -39,16 +40,18 @@ inline bool ParseAimbotTargetMessage(const std::string &message,
       })) {
     for (auto it = text.rbegin(); it != text.rend(); ++it) {
       if (*it == '0' || *it == '1') {
-        target = (*it == '1') ? 0x01 : 0x00;
+        target = (*it == '1') ? SerialTask::kAimbotTargetActiveThreshold
+                              : SerialTask::kAimbotTargetMin;
         return true;
       }
     }
   }
 
   bool found_binary_target = false;
-  uint8_t binary_target = 0x00;
+  uint8_t binary_target = SerialTask::kAimbotTargetMin;
   for (unsigned char c : message) {
-    if (c == 0x00 || c == 0x01) {
+    if (c == SerialTask::kAimbotTargetMin ||
+        c == SerialTask::kAimbotTargetActiveThreshold) {
       binary_target = c;
       found_binary_target = true;
     }
@@ -64,7 +67,18 @@ inline bool ParseAimbotTargetMessage(const std::string &message,
 template <typename RunningPredicate>
 inline void RunAimbotTargetReceiver(std::atomic<uint8_t> &aimbot_target,
                                     RunningPredicate is_running,
-                                    int port = 5000) {
+                                    int port = kDefaultTcpPort) {
+  const auto saturating_increment = [&aimbot_target]() {
+    uint8_t old_value = aimbot_target.load(std::memory_order_acquire);
+    while (old_value < SerialTask::kAimbotTargetMax) {
+      if (aimbot_target.compare_exchange_weak(
+              old_value, static_cast<uint8_t>(old_value + 1),
+              std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return;
+      }
+    }
+  };
+
   socket_t listen_fd = kInvalidSocketFd;
   if (!CreateListeningSocket(listen_fd, port)) {
     std::cerr << "[Network] AimbotTarget 监听端口 " << port << " 失败"
@@ -105,15 +119,21 @@ inline void RunAimbotTargetReceiver(std::atomic<uint8_t> &aimbot_target,
         break;
       }
 
-      uint8_t target = 0x00;
+      uint8_t target = SerialTask::kAimbotTargetMin;
       if (!ParseAimbotTargetMessage(received_content, target)) {
         std::cerr << "[Network] 忽略非法 AimbotTarget 数据" << std::endl;
         continue;
       }
 
-      aimbot_target.store(target, std::memory_order_release);
-      std::cout << "[Network] AimbotTarget=" << static_cast<int>(target)
-                << std::endl;
+      if (target == SerialTask::kAimbotTargetActiveThreshold) {
+        saturating_increment();
+      }
+
+      const uint8_t current_target =
+          aimbot_target.load(std::memory_order_acquire);
+      std::cout << "[Network] AimbotTarget(raw)="
+                << static_cast<int>(current_target)
+                << " (rx=" << static_cast<int>(target) << ")" << std::endl;
     }
 
     CloseSocket(client_fd);

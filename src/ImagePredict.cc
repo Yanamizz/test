@@ -69,7 +69,7 @@ static std::mutex g_pending_send_mutex;
 static std::condition_variable g_pending_send_cv;
 static AimbotSendCommand g_pending_send;
 static bool g_has_pending_send = false;
-static std::atomic<uint8_t> g_aimbot_target{0x00};
+static std::atomic<uint8_t> g_aimbot_target{SerialTask::kAimbotTargetMin};
 static std::atomic<bool> g_send_is_scan{false};
 static std::mutex g_scan_controller_mutex;
 static std::atomic<bool> g_target_visible{false};
@@ -122,6 +122,17 @@ static void StartScanMode() {
     g_send_is_scan.store(true, std::memory_order_release);
   }
   g_pending_send_cv.notify_one();
+}
+
+static void DecrementAimbotTargetSaturated() {
+  uint8_t old_value = g_aimbot_target.load(std::memory_order_acquire);
+  while (old_value > SerialTask::kAimbotTargetMin) {
+    if (g_aimbot_target.compare_exchange_weak(
+            old_value, static_cast<uint8_t>(old_value - 1),
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+      return;
+    }
+  }
 }
 
 static double MaxSerialAimbotFrameHz() {
@@ -320,6 +331,59 @@ NormalizeStage3PredictResult(ImageRecognize::PredictResult *result) {
   }
 }
 
+static void UpdateAerialRobotStageAndSwitchFlag(
+    bool has_predict_result, const ImageRecognize::PredictResult &result,
+    double stage_dt, ImageRecognize::AerialRobotLaserLockJudge *stage_judge,
+    bool *pending_stage3_switch,
+    const std::chrono::milliseconds &stage3_switch_target_lost_delay) {
+  if (!has_predict_result ||
+      g_aerial_robot_stage.load(std::memory_order_acquire) >=
+          ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
+    return;
+  }
+
+  const int previous_stage = g_aerial_robot_stage.load(std::memory_order_acquire);
+  const int laser_judge_class_id = ResolveLaserJudgeClassId(result);
+  const int stage = stage_judge->Update(laser_judge_class_id, stage_dt);
+  g_aerial_robot_stage.store(stage, std::memory_order_release);
+  if (stage != previous_stage) {
+    DecrementAimbotTargetSaturated();
+  }
+  if (stage >= ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage &&
+      previous_stage <
+          ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
+    *pending_stage3_switch = true;
+    std::cout << "[AerialRobotStage] stage=3, wait target lost for "
+              << stage3_switch_target_lost_delay.count()
+              << "ms before switching model" << std::endl;
+  }
+}
+
+static void UpdateTargetVisibleAndLostSince(
+    bool track_alive, const std::chrono::steady_clock::time_point &now,
+    std::chrono::steady_clock::time_point *target_lost_since,
+    bool *target_lost_since_initialized) {
+  g_target_visible.store(track_alive, std::memory_order_release);
+  if (track_alive) {
+    *target_lost_since_initialized = false;
+    return;
+  }
+
+  if (!*target_lost_since_initialized) {
+    *target_lost_since = now;
+    *target_lost_since_initialized = true;
+  }
+}
+
+static bool Stage3SwitchTargetLostLongEnough(
+    bool target_lost_since_initialized,
+    const std::chrono::steady_clock::time_point &now,
+    const std::chrono::steady_clock::time_point &target_lost_since,
+    const std::chrono::milliseconds &stage3_switch_target_lost_delay) {
+  return target_lost_since_initialized &&
+         (now - target_lost_since) >= stage3_switch_target_lost_delay;
+}
+
 // 等待相机线程交付下一帧；raw_frame 保留给未命中保存逻辑使用。
 static bool SnapshotLatestFrame(
     bool has_last_submitted_frame_ts,
@@ -416,8 +480,11 @@ int main(int argc, char **argv) {
                             std::ref(scan_controller), command_line_options);
   std::thread aimbot_target_receive(AimbotTargetReceiveThread);
   std::thread imu_read(IMUReadThread, std::ref(port));
+  const bool enable_send_log =
+      ResolveOption(command_line_options.enable_send_log,
+                    Tools::Params().enable_send_log);
   std::thread imu_send(IMUSendThread, std::ref(port), std::ref(scan_controller),
-                       command_line_options.enable_send_log);
+                       enable_send_log);
   JoinIfNeeded(image_capture);
   JoinIfNeeded(image_predict);
   JoinIfNeeded(imu_read);
@@ -477,9 +544,15 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           Tools::Params().angle_filter_type);
   static const ImageRecognize::TargetCampMode target_camp_mode =
       ImageRecognize::ParseTargetCampMode(Tools::Params().target_camp_mode);
-  const bool enable_display = command_line_options.enable_display;
+  const bool enable_display =
+      ResolveOption(command_line_options.enable_display,
+                    Tools::Params().enable_display);
   const bool enable_calibration_sliders =
-      command_line_options.enable_calibration_sliders;
+      ResolveOption(command_line_options.enable_calibration_sliders,
+                    Tools::Params().enable_calibration_sliders);
+  const bool enable_send_log =
+      ResolveOption(command_line_options.enable_send_log,
+                    Tools::Params().enable_send_log);
   const bool enable_motion_prediction =
       ResolveOption(command_line_options.enable_motion_prediction,
                     Tools::Params().enable_motion_prediction);
@@ -495,7 +568,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   PrintPredictSettings(
       filter_type, target_camp_mode, enable_display, enable_motion_prediction,
       enable_scan_mode, enable_save_no_target_images, enable_latency_profile,
-      enable_calibration_sliders, command_line_options.enable_send_log);
+      enable_calibration_sliders, enable_send_log);
   static std::unique_ptr<Tools::SaveImageOnNoTarget> no_target_saver;
   if (enable_save_no_target_images && !no_target_saver) {
     no_target_saver =
@@ -634,6 +707,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       continue;
     }
 
+    // loop 计时从等待异步结果前开始，包含 isAsyncReady 等待开销。
+    const auto t_loop_start = ProfileNow(enable_latency_profile);
     while (g_running && !active_predictor->isAsyncReady()) {
       std::unique_lock<std::mutex> lk(g_frame_mutex);
       g_frame_cv.wait_for(lk, std::chrono::milliseconds(1),
@@ -643,7 +718,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       break;
     }
 
-    const auto t_loop_start = ProfileNow(enable_latency_profile);
     cv::Mat frame = enable_display ? inflight_frame.clone() : inflight_frame;
     cv::Mat raw_frame = inflight_raw_frame;
     const auto frame_ts = inflight_frame_ts;
@@ -696,25 +770,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       std::cerr << "ImagePredictThread exception: " << e.what() << std::endl;
     }
 
-    if (has_predict_result &&
-        g_aerial_robot_stage.load(std::memory_order_acquire) <
-            ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
-      const int previous_stage =
-          g_aerial_robot_stage.load(std::memory_order_acquire);
-      const int laser_judge_class_id = ResolveLaserJudgeClassId(result);
-      const int stage =
-          aerial_robot_stage_judge.Update(laser_judge_class_id, stage_dt);
-      g_aerial_robot_stage.store(stage, std::memory_order_release);
-      if (stage >= ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage &&
-          previous_stage <
-              ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
-        pending_stage3_switch = true;
-        std::cout << "[AerialRobotStage] stage=3, wait target lost for "
-                  << stage3_switch_target_lost_delay.count()
-                  << "ms before switching model"
-                  << std::endl;
-      }
-    }
+    UpdateAerialRobotStageAndSwitchFlag(
+        has_predict_result, result, stage_dt, &aerial_robot_stage_judge,
+        &pending_stage3_switch, stage3_switch_target_lost_delay);
 
     std::array<float, 6> tracked_box{};
     bool has_tracked_box = false;
@@ -726,21 +784,20 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     const bool track_alive =
         track_result.has_box || target_tracker.HasRecentLock();
     const auto now = std::chrono::steady_clock::now();
-    g_target_visible.store(track_alive, std::memory_order_release);
-
-    if (track_alive) {
-      target_lost_since_initialized = false;
-    } else if (!target_lost_since_initialized) {
-      target_lost_since = now;
-      target_lost_since_initialized = true;
-    }
+    UpdateTargetVisibleAndLostSince(track_alive, now, &target_lost_since,
+                                    &target_lost_since_initialized);
 
     const bool stage3_switch_target_lost_long_enough =
-        target_lost_since_initialized &&
-        (now - target_lost_since) >= stage3_switch_target_lost_delay;
+        Stage3SwitchTargetLostLongEnough(target_lost_since_initialized, now,
+                                         target_lost_since,
+                                         stage3_switch_target_lost_delay);
     if (pending_stage3_switch && !using_stage3_predictor && !track_alive &&
         stage3_switch_target_lost_long_enough) {
       switch_to_stage3_predictor("stage3_target_lost");
+      const auto t_loop_end = ProfileNow(enable_latency_profile);
+      AddLatencySample(enable_latency_profile, latency_total, latency_window,
+                       &LatencyStats::loop_ns, t_loop_start, t_loop_end);
+      AddLatencyFrame(enable_latency_profile, latency_total, latency_window);
       continue;
     }
 

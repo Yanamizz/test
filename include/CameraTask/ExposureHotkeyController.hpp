@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -47,7 +48,8 @@ public:
 
   bool
   LoadRuntimeParams(const std::string &path = "camera_runtime_params.ini") {
-    std::ifstream file(path);
+    const std::string resolved_path = ResolveRuntimeParamsPath(path);
+    std::ifstream file(resolved_path);
     if (!file.is_open()) {
       return false;
     }
@@ -90,8 +92,8 @@ public:
           loaded = true;
         }
       } catch (...) {
-        std::cerr << "[Camera] invalid runtime param line in " << path << ": "
-                  << line << std::endl;
+        std::cerr << "[Camera] invalid runtime param line in "
+                  << resolved_path << ": " << line << std::endl;
       }
     }
 
@@ -118,11 +120,12 @@ public:
 
   bool SaveRuntimeParams(
       const std::string &path = "camera_runtime_params.ini") const {
+    const std::string resolved_path = ResolveRuntimeParamsPath(path);
     std::lock_guard<std::mutex> lk(mutex_);
-    std::ofstream file(path, std::ios::trunc);
+    std::ofstream file(resolved_path, std::ios::trunc);
     if (!file.is_open()) {
       std::cerr << "[Camera] failed to open runtime params file for write: "
-                << path << std::endl;
+                << resolved_path << std::endl;
       return false;
     }
 
@@ -223,6 +226,24 @@ public:
   }
 
 private:
+  static std::string ResolveRuntimeParamsPath(const std::string &path) {
+    if (path != kDefaultRuntimeParamsPath) {
+      return path;
+    }
+
+    const char *env_path = std::getenv("ANTIDRONE_RUNTIME_PARAMS_PATH");
+    if (env_path != nullptr && env_path[0] != '\0') {
+      return std::string(env_path);
+    }
+#ifdef ANTIDRONE_PROJECT_ROOT
+    return std::string(ANTIDRONE_PROJECT_ROOT) + "/" + path;
+#endif
+    return path;
+  }
+
+  static constexpr const char *kDefaultRuntimeParamsPath =
+      "camera_runtime_params.ini";
+
   static constexpr double kExposureStepUs = 100.0;
 
   static double NormalizeExposure(double exposure_time_us) {

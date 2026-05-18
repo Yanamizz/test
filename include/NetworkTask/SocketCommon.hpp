@@ -24,6 +24,9 @@
 
 namespace NetworkTask {
 
+inline constexpr int kDefaultTcpPort = 5000;
+inline constexpr const char *kDefaultPeerIp = "192.168.10.2";
+
 #ifdef _WIN32
 using socket_t = SOCKET;
 constexpr socket_t kInvalidSocketFd = INVALID_SOCKET;

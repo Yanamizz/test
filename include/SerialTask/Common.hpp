@@ -12,7 +12,7 @@ typedef struct __attribute__((packed)) {
   uint8_t _SOF;        ///< 包头 0x55
   uint8_t ID;          ///< 接收 id 0x02
   uint8_t AimbotState; ///< 0x00 无目标，0x01 有目标
-  uint8_t AimbotTarget;
+  uint8_t AimbotTarget; ///< 串口线协议中按二值发送：0x00/0x01
   float PitchRelativeAngle; ///< Pitch (rad)
   float YawRelativeAngle;   ///< Yaw   (rad)
   float PitchOffset;        ///< Pitch 偏差角 (rad)
@@ -43,4 +43,15 @@ typedef struct __attribute__((packed)) {
 static_assert(sizeof(GimbalImuFrame_SCM_t) == 25,
               "GimbalImuFrame_SCM_t wire size changed.");
 
+namespace SerialTask {
+
 inline constexpr uint8_t IMU_DATA_SEND_ID = 0x03;
+
+// AimbotTarget 内部计数与串口发送语义：
+// - 计数范围 [kAimbotTargetMin, kAimbotTargetMax]
+// - 串口发送时，>= kAimbotTargetActiveThreshold 统一按 1 发送
+inline constexpr uint8_t kAimbotTargetMin = 0x00;
+inline constexpr uint8_t kAimbotTargetActiveThreshold = 0x01;
+inline constexpr uint8_t kAimbotTargetMax = 0x03;
+
+} // namespace SerialTask

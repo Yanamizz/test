@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+
+#include "Tools/AngleCalculate.hpp"
 namespace Tools {
 
 struct ScanCommand {
@@ -109,7 +111,6 @@ public:
 
 private:
   using Clock = std::chrono::steady_clock;
-  static constexpr float kPi = 3.14159265358979323846f;
 
   float OriginYawDeg_() const {
     return std::min(config_.min_yaw_deg, config_.max_yaw_deg);

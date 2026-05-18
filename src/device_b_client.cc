@@ -5,6 +5,7 @@
 #include <string>
 
 #include "NetworkTask/NetworkTask.hpp"
+#include "SerialTask/Common.hpp"
 
 namespace {
 
@@ -16,7 +17,8 @@ bool ParseAimbotTarget(const std::string &content, uint8_t &target) {
   bool has_target = false;
 
   for (unsigned char data : content) {
-    if (data == 0x00 || data == 0x01) {
+    if (data == SerialTask::kAimbotTargetMin ||
+        data == SerialTask::kAimbotTargetActiveThreshold) {
       target = data;
       has_target = true;
     } else if (data == '0' || data == '1') {
@@ -34,15 +36,17 @@ int main() {
   std::signal(SIGINT, HandleSignal);
 
   NetworkTask::socket_t listen_fd = NetworkTask::kInvalidSocketFd;
-  if (!NetworkTask::CreateListeningSocket(listen_fd, 5000)) {
+  if (!NetworkTask::CreateListeningSocket(listen_fd,
+                                          NetworkTask::kDefaultTcpPort)) {
     std::cerr << "设备 B 创建监听 socket 失败\n";
     return 1;
   }
 
-  std::cout << "设备 B 接收端已启动，监听端口：5000\n";
+  std::cout << "设备 B 接收端已启动，监听端口："
+            << NetworkTask::kDefaultTcpPort << "\n";
   std::cout << "等待设备 A 连接，按 Ctrl+C 退出。\n";
 
-  uint8_t aimbot_target = 0x00;
+  uint8_t aimbot_target = SerialTask::kAimbotTargetMin;
   while (g_running.load()) {
     NetworkTask::socket_t client_fd = NetworkTask::kInvalidSocketFd;
     std::string client_ip;

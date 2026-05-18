@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Antidrone Run
-Comment=Run antidrone low-latency tracker
-Exec=/home/nuc/antidrone/run
-Path=/home/nuc/antidrone
-Terminal=false
-Categories=Utility;

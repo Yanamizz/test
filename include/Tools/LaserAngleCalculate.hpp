@@ -14,7 +14,9 @@
 #include "Tools/CameraData.hpp"
 
 namespace Tools {
-constexpr float kPi = 3.1415926f;
+inline constexpr float kLaserAnglePi = 3.1415926f;
+inline constexpr float kLinearInterpEpsilon = 1e-6f;
+inline constexpr float kRadToDeg = 180.0f / kLaserAnglePi;
 
 enum class CalibrationStage {
   Stage12,
@@ -136,7 +138,8 @@ private:
     const float far_pixel = params.far_pixel;
 
     if (near_pixel <= 0.0f || far_pixel <= 0.0f || near_height <= 0.0f ||
-        far_height <= 0.0f || std::abs(far_pixel - near_pixel) <= 1e-6f) {
+        far_height <= 0.0f ||
+        std::abs(far_pixel - near_pixel) <= kLinearInterpEpsilon) {
       return EstimateDistanceByHeight(far_height, pixel_h);
     }
 
@@ -324,7 +327,7 @@ private:
     const float safe_distance = SafeDistance(distance);
     const float laser_pitch_rad =
         std::atan2(laser_height_above_camera_m, safe_distance);
-    return laser_pitch_rad * 180.0f / kPi;
+    return laser_pitch_rad * kRadToDeg;
   }
 
   static float ComputeDistancePitchOffsetDeg(float distance,
@@ -337,7 +340,7 @@ private:
     if (!std::isfinite(distance) || !std::isfinite(near_distance) ||
         !std::isfinite(far_distance) || !std::isfinite(near_offset) ||
         !std::isfinite(far_offset) ||
-        std::abs(far_distance - near_distance) <= 1e-6f) {
+        std::abs(far_distance - near_distance) <= kLinearInterpEpsilon) {
       return 0.0f;
     }
 

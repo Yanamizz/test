@@ -27,12 +27,12 @@ inline void EnsureFinite(float value) {
 
 inline void SendAimbotFrame(serial::Serial &serial_port, float pitch_relative_angle, float yaw_relative_angle,
                             float pitch_offset, float yaw_offset, float pitch_velocity, float yaw_velocity,
-                            uint8_t AimbotState, uint8_t AimbotTarget = 0x01);
+                            uint8_t AimbotState, uint8_t AimbotTarget = kAimbotTargetActiveThreshold);
 
 // 重载：使用已知的当前角度发送，不再从串口读取（适用于接收线程在外部运行时）
 inline void SerialSend(serial::Serial &serial_port, float absolute_pitch, float absolute_yaw, float pitch_offset,
                        float yaw_offset, float pitch_velocity, float yaw_velocity, uint8_t AimbotState,
-                       uint8_t AimbotTarget = 0x01) {
+                       uint8_t AimbotTarget = kAimbotTargetActiveThreshold) {
   EnsureFinite(absolute_pitch);
   EnsureFinite(absolute_yaw);
   EnsureFinite(pitch_offset);
@@ -66,10 +66,14 @@ inline void SendAimbotFrame(serial::Serial &serial_port, float pitch_relative_an
   }
 
   AimbotFrame_SCM_t aimbot_frame{};
+  const uint8_t normalized_aimbot_target =
+      (AimbotTarget >= kAimbotTargetActiveThreshold)
+          ? kAimbotTargetActiveThreshold
+          : kAimbotTargetMin;
   aimbot_frame._SOF = 0x55;                // 包头
   aimbot_frame.ID = 0x02;                  // 发送 ID
   aimbot_frame.AimbotState = AimbotState;  ///< 0x00 无目标，0x01 有目标
-  aimbot_frame.AimbotTarget = AimbotTarget;
+  aimbot_frame.AimbotTarget = normalized_aimbot_target;
   aimbot_frame.PitchRelativeAngle = pitch_relative_angle;
   aimbot_frame.YawRelativeAngle = yaw_relative_angle;
   aimbot_frame.PitchOffset = pitch_offset;

@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "NetworkTask/NetworkTask.hpp"
+#include "SerialTask/Common.hpp"
 
 namespace {
 
@@ -30,11 +31,11 @@ bool ConnectWithRetry(NetworkTask::socket_t &fd, const char *server_ip,
 
 bool ParseInputTarget(const std::string &input, uint8_t &target) {
   if (input == "0" || input == "0x00" || input == "0X00") {
-    target = 0x00;
+    target = SerialTask::kAimbotTargetMin;
     return true;
   }
   if (input == "1" || input == "0x01" || input == "0X01") {
-    target = 0x01;
+    target = SerialTask::kAimbotTargetActiveThreshold;
     return true;
   }
   return false;
@@ -50,8 +51,8 @@ bool SendAimbotTarget(NetworkTask::socket_t fd, uint8_t target) {
 int main(int argc, char **argv) {
   std::signal(SIGINT, HandleSignal);
 
-  const char *receiver_ip = argc > 1 ? argv[1] : "192.168.10.2";
-  constexpr int kReceiverPort = 5000;
+  const char *receiver_ip = argc > 1 ? argv[1] : NetworkTask::kDefaultPeerIp;
+  constexpr int kReceiverPort = NetworkTask::kDefaultTcpPort;
 
   NetworkTask::socket_t fd = NetworkTask::kInvalidSocketFd;
   if (!ConnectWithRetry(fd, receiver_ip, kReceiverPort)) {
@@ -61,7 +62,8 @@ int main(int argc, char **argv) {
 
   std::cout << "设备 A 已连接设备 B：" << receiver_ip << ":" << kReceiverPort
             << "\n";
-  std::cout << "输入 0 发送 0x00，输入 1 发送 0x01，输入 quit 退出。\n";
+  std::cout << "输入 0 发送 kAimbotTargetMin，输入 1 发送 "
+               "kAimbotTargetActiveThreshold，输入 quit 退出。\n";
 
   std::string input;
   while (g_running.load() && std::getline(std::cin, input)) {
@@ -69,7 +71,7 @@ int main(int argc, char **argv) {
       break;
     }
 
-    uint8_t target = 0x00;
+    uint8_t target = SerialTask::kAimbotTargetMin;
     if (!ParseInputTarget(input, target)) {
       std::cout << "无效输入，只能输入 0、1 或 quit。\n";
       continue;

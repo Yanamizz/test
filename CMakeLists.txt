@@ -65,6 +65,9 @@ file(GLOB_RECURSE SRCS CONFIGURE_DEPENDS ${SRC_ROOT}/*.cc)
 foreach(src ${SRCS})
     get_filename_component(name_we ${src} NAME_WE)
     add_executable(${name_we} ${src})
+    target_compile_definitions(${name_we}
+        PRIVATE ANTIDRONE_PROJECT_ROOT="${PROJECT_SOURCE_DIR}"
+    )
     target_link_libraries(${name_we}
         ${OpenCV_LIBS}
         ${SERIAL_LIB}

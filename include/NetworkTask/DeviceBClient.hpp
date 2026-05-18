@@ -13,8 +13,8 @@
 namespace NetworkTask {
 
 inline bool ConnectToServer(socket_t &fd,
-                            const char *server_ip = "192.168.10.2",
-                            int port = 5000) {
+                            const char *server_ip = kDefaultPeerIp,
+                            int port = kDefaultTcpPort) {
   if (!PrepareSocketRuntime()) {
     return false;
   }

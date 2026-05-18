@@ -11,9 +11,9 @@
 namespace ImageRecognize {
 
 struct ImagePredictCommandLineOptions {
-  bool enable_display = true;
-  bool enable_calibration_sliders = true;
-  bool enable_send_log = true;
+  std::optional<bool> enable_display;
+  std::optional<bool> enable_calibration_sliders;
+  std::optional<bool> enable_send_log;
   std::optional<bool> enable_latency_profile;
   std::optional<bool> enable_motion_prediction;
   std::optional<bool> enable_scan_mode;

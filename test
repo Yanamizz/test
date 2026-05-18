@@ -5,12 +5,14 @@ ROOT_DIR="/home/nuc/antidrone"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
 TARGET="${BUILD_DIR}/bin/ImagePredict"
 JOBS="${JOBS:-$(nproc)}"
+RUNTIME_PARAMS_PATH="${RUNTIME_PARAMS_PATH:-${ROOT_DIR}/camera_runtime_params.ini}"
 
 if [[ ! -d "${BUILD_DIR}" ]]; then
   cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}"
 fi
 cmake --build "${BUILD_DIR}" --target ImagePredict -j"${JOBS}"
 
+ANTIDRONE_RUNTIME_PARAMS_PATH="${RUNTIME_PARAMS_PATH}" \
 "${TARGET}" \
   --display \
   --calibration-sliders \

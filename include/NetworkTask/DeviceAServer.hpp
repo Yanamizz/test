@@ -12,7 +12,8 @@
 
 namespace NetworkTask {
 
-inline bool CreateListeningSocket(socket_t &listen_fd, int port = 5000) {
+inline bool CreateListeningSocket(socket_t &listen_fd,
+                                  int port = kDefaultTcpPort) {
   if (!PrepareSocketRuntime()) {
     return false;
   }

@@ -7,7 +7,7 @@ IP 地址规划
 | 设备   |     IP 地址   | 子网掩码       |  网关  | 
 | 设备 A | 192.168.10.1 | 255.255.255.0 | 可不填 |  （发）
 | 设备 B | 192.168.10.2 | 255.255.255.0 | 可不填 |  （收）
-TCP 端口使用 5000。
+TCP 端口默认使用 `NetworkTask::kDefaultTcpPort`（当前为 `5000`）。
 
 然后在设备 A 上测试：
 ```bash
@@ -30,9 +30,11 @@ B 收方使用 `DeviceAServer.hpp` 创建监听 socket。`ReceiveText` 是阻塞
 
 ```cpp
 #include "NetworkTask/DeviceAServer.hpp"
+#include "SerialTask/Common.hpp"
 
 NetworkTask::socket_t listen_fd = NetworkTask::kInvalidSocketFd;
-if (!NetworkTask::CreateListeningSocket(listen_fd, 5000)) {
+if (!NetworkTask::CreateListeningSocket(
+        listen_fd, NetworkTask::kDefaultTcpPort)) {
   // 处理错误
 }
 
@@ -47,7 +49,7 @@ while (running) {
   }
 }
 
-uint8_t aimbot_target = 0x00;
+uint8_t aimbot_target = 0x00;  // 计数值，范围 [kAimbotTargetMin, kAimbotTargetMax]
 while (running) {
   if (!NetworkTask::WaitForReadable(client_fd, 100)) {
     continue;
@@ -59,8 +61,11 @@ while (running) {
   }
 
   for (unsigned char data : received_content) {
-    if (data == 0x00 || data == 0x01) {
-      aimbot_target = data;
+    if (data == SerialTask::kAimbotTargetActiveThreshold) {
+      // 收到一次 1 则 +1，最大值 kAimbotTargetMax(=3)。
+      if (aimbot_target < SerialTask::kAimbotTargetMax) {
+        ++aimbot_target;
+      }
     }
   }
 }
@@ -69,7 +74,7 @@ NetworkTask::CloseSocket(client_fd);
 NetworkTask::CloseSocket(listen_fd);
 ```
 
-如果发送方发的是文本形式，也可以按 `"0"`、`"1"`、`"0x00"`、`"0x01"` 解析；如果发的是原始字节，直接判断 `0x00 / 0x01` 即可。
+如果发送方发的是文本形式，也可以按 `"0"`、`"1"`、`"0x00"`、`"0x01"` 解析；如果发的是原始字节，直接判断 `0x00 / 0x01` 即可。当前主程序的接收逻辑是“仅 `1` 会触发计数 +1（上限 3）”；`0` 不会清零。后续每次锁定流程 stage 发生变化时，计数会 -1（下限 0）。
 
 
 2. 启动顺序不确定时：发方循环重连
@@ -81,10 +86,12 @@ NetworkTask::CloseSocket(listen_fd);
 #include <thread>
 
 #include "NetworkTask/DeviceBClient.hpp"
+#include "SerialTask/Common.hpp"
 
 NetworkTask::socket_t fd = NetworkTask::kInvalidSocketFd;
 while (running) {
-  if (NetworkTask::ConnectToServer(fd, "192.168.10.2", 5000)) {
+  if (NetworkTask::ConnectToServer(
+          fd, NetworkTask::kDefaultPeerIp, NetworkTask::kDefaultTcpPort)) {
     break;
   }
 
@@ -105,7 +112,7 @@ NetworkTask::ShutdownSocket(fd);
 NetworkTask::CloseSocket(fd);
 ```
 
-如果要持续发送，只需要在判断条件变化时更新 `target`，再调用 `SendText`。如果使用 `ConnectToServer(fd)` 的默认参数，默认连接 IP 为 `192.168.10.2:5000`。
+如果要持续发送，只需要在判断条件变化时更新 `target`，再调用 `SendText`。如果使用 `ConnectToServer(fd)` 默认参数，则使用 `NetworkTask::kDefaultPeerIp:kDefaultTcpPort`（当前 `192.168.10.2:5000`）。
 
 
 

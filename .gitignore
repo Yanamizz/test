@@ -59,3 +59,8 @@ __pycache__/
 *.desktop
 *.ini
 
+.github/
+.vscode/
+.cache/
+
+thirdlib/**
