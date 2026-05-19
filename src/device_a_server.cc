@@ -9,6 +9,10 @@
 #include "NetworkTask/NetworkTask.hpp"
 #include "SerialTask/Common.hpp"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace {
 
 std::atomic<bool> g_running{true};
@@ -49,6 +53,12 @@ bool SendAimbotTarget(NetworkTask::socket_t fd, uint8_t target) {
 } // namespace
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+  // Ensure UTF-8 output in Windows terminal to avoid mojibake.
+  SetConsoleOutputCP(CP_UTF8);
+  SetConsoleCP(CP_UTF8);
+#endif
+
   std::signal(SIGINT, HandleSignal);
 
   const char *receiver_ip = argc > 1 ? argv[1] : NetworkTask::kDefaultPeerIp;
@@ -60,7 +70,7 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  std::cout << "设备 A 已连接设备 B：" << receiver_ip << ":" << kReceiverPort
+  std::cout << "设备 A 已连接设备 B: " << receiver_ip << ":" << kReceiverPort
             << "\n";
   std::cout << "输入 0 发送 kAimbotTargetMin，输入 1 发送 "
                "kAimbotTargetActiveThreshold，输入 quit 退出。\n";
