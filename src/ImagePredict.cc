@@ -29,6 +29,7 @@
 #include "Tools/RuntimeParams.hpp"
 #include "Tools/RuntimeStats.hpp"
 #include "Tools/SaveImage.hpp"
+#include "Tools/SaveVideo.hpp"
 #include "Tools/ScanController.hpp"
 
 namespace {
@@ -248,7 +249,8 @@ static void
 PrintPredictSettings(Tools::FilterType filter_type,
                      ImageRecognize::TargetCampMode target_camp_mode,
                      bool enable_display, bool enable_scan_mode,
-                     bool enable_save_no_target_images, bool enable_latency_profile,
+                     bool enable_save_no_target_images,
+                     bool /*enable_save_target_videos*/, bool enable_latency_profile,
                      bool enable_calibration_sliders, bool enable_send_log) {
   std::cout << "[角度滤波] 类型: " << Tools::ToString(filter_type) << std::endl;
   std::cout << "[跟踪阵营] 模式: " << ImageRecognize::ToString(target_camp_mode)
@@ -550,18 +552,24 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   const bool enable_save_no_target_images =
       ResolveOption(command_line_options.enable_save_no_target_images,
                     Tools::Params().enable_save_no_target_images);
+  const bool enable_save_target_videos = Tools::Params().enable_save_target_videos;
   const bool enable_latency_profile =
       ResolveOption(command_line_options.enable_latency_profile,
                     Tools::Params().enable_latency_profile);
 
   PrintPredictSettings(filter_type, target_camp_mode, enable_display,
                        enable_scan_mode, enable_save_no_target_images,
-                       enable_latency_profile, enable_calibration_sliders,
-                       enable_send_log);
+                       enable_save_target_videos, enable_latency_profile,
+                       enable_calibration_sliders, enable_send_log);
   static std::unique_ptr<Tools::SaveImageOnNoTarget> no_target_saver;
+  static std::unique_ptr<Tools::SaveVideoOnTarget> target_video_saver;
   if (enable_save_no_target_images && !no_target_saver) {
     no_target_saver =
         std::make_unique<Tools::SaveImageOnNoTarget>(5, "captures");
+  }
+  if (enable_save_target_videos && !target_video_saver) {
+    target_video_saver = std::make_unique<Tools::SaveVideoOnTarget>(
+        Tools::Params().target_video_fps, "target_videos");
   }
 
   std::chrono::steady_clock::time_point prev_frame_ts{};
@@ -927,6 +935,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     if (enable_save_no_target_images && no_target_saver) {
       raw_frame = inflight_frame.clone();
       no_target_saver->Update(raw_frame, result.boxes.size() != 1);
+    }
+    if (enable_save_target_videos && target_video_saver) {
+      const cv::Mat &video_frame = do_display ? frame : inflight_frame;
+      target_video_saver->Update(video_frame, has_tracked_box);
     }
 
     // 处理 GUI 事件并允许按键退出
