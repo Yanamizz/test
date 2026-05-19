@@ -91,13 +91,6 @@ public:
     async_inflight_ = true;
   }
 
-  bool isAsyncReady() {
-    if (!async_inflight_) {
-      return false;
-    }
-    return infer_request_.wait_for(std::chrono::milliseconds(0));
-  }
-
   PredictResult getAsyncResult() {
     if (!async_inflight_) {
       throw std::runtime_error("No async inference result is pending.");
@@ -117,7 +110,7 @@ private:
   };
 
   struct TunableParams {
-    int hw_threads_reserved;
+    int latency_threads_cap;
     int streams_num;
     float score_thresh;
     int min_channel_dim;
@@ -241,11 +234,10 @@ private:
   ov::CompiledModel compileModel_(const std::shared_ptr<ov::Model> &model) {
     const unsigned int hw_threads =
         std::max(1u, std::thread::hardware_concurrency());
-    const unsigned int infer_threads = std::max(
-        1u, hw_threads > static_cast<unsigned int>(Params().hw_threads_reserved)
-                ? (hw_threads -
-                   static_cast<unsigned int>(Params().hw_threads_reserved))
-                : hw_threads);
+    const unsigned int latency_threads_cap = static_cast<unsigned int>(
+        std::max(6, std::max(1, Params().latency_threads_cap)));
+    const unsigned int infer_threads = std::min(
+        hw_threads, latency_threads_cap);
 
     std::vector<std::string> available_devices;
     try {

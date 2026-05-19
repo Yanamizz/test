@@ -18,7 +18,6 @@ struct LatencyStats {
   std::uint64_t infer_ns = 0;
   std::uint64_t imu_match_ns = 0;
   std::uint64_t select_box_ns = 0;
-  std::uint64_t motion_predict_ns = 0;
   std::uint64_t angle_calc_ns = 0;
   std::uint64_t control_calc_ns = 0;
   std::uint64_t render_ns = 0;
@@ -80,13 +79,11 @@ inline void PrintLatencyStats(const LatencyStats &s, const char *tag) {
             << " 推理=" << ns2ms(s.infer_ns)
             << " IMU匹配=" << ns2ms(s.imu_match_ns)
             << " 选框=" << ns2ms(s.select_box_ns)
-            << " 运动预测=" << ns2ms(s.motion_predict_ns)
             << " 角度=" << ns2ms(s.angle_calc_ns)
             << " 控制=" << ns2ms(s.control_calc_ns)
             << " 渲染=" << ns2ms(s.render_ns) << " 循环=" << ns2ms(s.loop_ns)
             << " | 微秒 IMU匹配=" << ns2us(s.imu_match_ns)
             << " 选框=" << ns2us(s.select_box_ns)
-            << " 运动预测=" << ns2us(s.motion_predict_ns)
             << " 控制=" << ns2us(s.control_calc_ns) << std::endl;
 }
 

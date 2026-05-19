@@ -15,7 +15,6 @@ struct ImagePredictCommandLineOptions {
   std::optional<bool> enable_calibration_sliders;
   std::optional<bool> enable_send_log;
   std::optional<bool> enable_latency_profile;
-  std::optional<bool> enable_motion_prediction;
   std::optional<bool> enable_scan_mode;
   std::optional<bool> enable_save_no_target_images;
 };
@@ -51,7 +50,6 @@ ParseImagePredictCommandLine(int argc, char **argv) {
   constexpr std::string_view kCalibrationSlidersPrefix =
       "--calibration-sliders=";
   constexpr std::string_view kLatencyProfilePrefix = "--latency-profile=";
-  constexpr std::string_view kMotionPredictionPrefix = "--motion-prediction=";
   constexpr std::string_view kScanModePrefix = "--scan-mode=";
   constexpr std::string_view kSaveNoTargetImagesPrefix =
       "--save-no-target-images=";
@@ -115,24 +113,6 @@ ParseImagePredictCommandLine(int argc, char **argv) {
       options.enable_latency_profile = detail::ParseBoolValue(
           arg.substr(kLatencyProfilePrefix.size()),
           options.enable_latency_profile);
-      continue;
-    }
-
-    if (arg == "--motion-prediction" || arg == "--enable-motion-prediction") {
-      options.enable_motion_prediction = true;
-      continue;
-    }
-
-    if (arg == "--no-motion-prediction" ||
-        arg == "--disable-motion-prediction") {
-      options.enable_motion_prediction = false;
-      continue;
-    }
-
-    if (detail::StartsWith(arg, kMotionPredictionPrefix)) {
-      options.enable_motion_prediction = detail::ParseBoolValue(
-          arg.substr(kMotionPredictionPrefix.size()),
-          options.enable_motion_prediction);
       continue;
     }
 

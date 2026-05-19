@@ -9,8 +9,6 @@
 #include <cmath>
 #include <mutex>
 #include <utility>
-#include <vector>
-
 #include "Tools/CameraData.hpp"
 
 namespace Tools {
@@ -80,9 +78,7 @@ public:
     if (!std::isfinite(raw_h) || raw_h <= 0.0f)
       return 0.0f;
 
-    const float corrected_h = UndistortedBoxHeight(x1, y1, x2, y2);
-    return CalculateDistanceByPixelHeight(corrected_h > 0.0f ? corrected_h
-                                                             : raw_h);
+    return CalculateDistanceByPixelHeight(raw_h);
   }
 
 private:
@@ -109,25 +105,6 @@ private:
     if (!std::isfinite(raw_distance) || raw_distance <= 0.0f)
       return 0.0f;
     return FilterDistance(raw_distance);
-  }
-
-  float UndistortedBoxHeight(float x1, float y1, float x2, float y2) const {
-    if (!std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2) ||
-        !std::isfinite(y2)) {
-      return 0.0f;
-    }
-
-    const float center_x = 0.5f * (x1 + x2);
-    std::vector<cv::Point2f> in{{center_x, y1}, {center_x, y2}};
-    std::vector<cv::Point2f> out;
-    cv::undistortPoints(in, out, camera_data_.cameraMatrix,
-                        camera_data_.distCoeffs, cv::noArray(),
-                        camera_data_.cameraMatrix);
-    if (out.size() != 2) {
-      return 0.0f;
-    }
-
-    return std::abs(out[1].y - out[0].y);
   }
 
   float EstimateCalibratedDistanceByHeight(float pixel_h) const {

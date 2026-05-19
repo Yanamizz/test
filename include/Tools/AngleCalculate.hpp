@@ -6,10 +6,8 @@
 #pragma once
 #include <chrono>
 #include <cmath>
-#include <opencv2/opencv.hpp>
 #include <string>
 #include <utility>
-#include <vector>
 
 #include "KalmanFilter/KalmanFilters.hpp"
 #include "Tools/CameraData.hpp"
@@ -116,22 +114,12 @@ public:
       is_initialized = true;
     }
 
-    // 去畸变并计算偏移角
     double fx = cameraData.cameraMatrix.at<double>(0, 0);
     double fy = cameraData.cameraMatrix.at<double>(1, 1);
     double cx = cameraData.cameraMatrix.at<double>(0, 2);
     double cy = cameraData.cameraMatrix.at<double>(1, 2);
-    cv::Point2f pnt;
-    std::vector<cv::Point2f> in;
-    std::vector<cv::Point2f> out;
-    in.push_back(cv::Point2f(targetX, targetY));
-    // 对像素点去畸变
-    cv::undistortPoints(in, out, cameraData.cameraMatrix, cameraData.distCoeffs,
-                        cv::noArray(), cameraData.cameraMatrix);
-    pnt = out.front();
-    // 去畸变后的比值
-    double rxNew = (pnt.x - cx) / fx;
-    double ryNew = (pnt.y - cy) / fy;
+    const double rxNew = (static_cast<double>(targetX) - cx) / fx;
+    const double ryNew = (static_cast<double>(targetY) - cy) / fy;
     // yaw/pitch 正方向已相对旧云台约定反向：画面右侧为 +yaw，画面下方为 -pitch。
     double offset_yaw = std::atan2(rxNew, 1.0) / kPi * 180.0;
     double offset_pitch = -std::atan2(ryNew, 1.0) / kPi * 180.0;

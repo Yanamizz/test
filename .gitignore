@@ -57,10 +57,9 @@ __pycache__/
 .build/
 
 *.desktop
-*.ini
 
 .github/
 .vscode/
 .cache/
 
-thirdlib/**
+third_lib/

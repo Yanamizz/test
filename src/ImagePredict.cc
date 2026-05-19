@@ -247,13 +247,10 @@ static void JoinIfNeeded(std::thread &thread) {
 static void
 PrintPredictSettings(Tools::FilterType filter_type,
                      ImageRecognize::TargetCampMode target_camp_mode,
-                     bool enable_display, bool enable_motion_prediction,
-                     bool enable_scan_mode, bool enable_save_no_target_images,
-                     bool enable_latency_profile,
+                     bool enable_display, bool enable_scan_mode,
+                     bool enable_save_no_target_images, bool enable_latency_profile,
                      bool enable_calibration_sliders, bool enable_send_log) {
   std::cout << "[角度滤波] 类型: " << Tools::ToString(filter_type) << std::endl;
-  std::cout << "[运动预测] 启用: "
-            << (enable_motion_prediction ? "true" : "false") << std::endl;
   std::cout << "[跟踪阵营] 模式: " << ImageRecognize::ToString(target_camp_mode)
             << std::endl;
   std::cout << "[显示窗口] 启用: " << (enable_display ? "true" : "false")
@@ -388,8 +385,7 @@ static bool Stage3SwitchTargetLostLongEnough(
 static bool SnapshotLatestFrame(
     bool has_last_submitted_frame_ts,
     const std::chrono::steady_clock::time_point &last_submitted_frame_ts,
-    cv::Mat *frame, cv::Mat *raw_frame,
-    std::chrono::steady_clock::time_point *frame_ts, bool keep_raw_frame) {
+    cv::Mat *frame, std::chrono::steady_clock::time_point *frame_ts) {
   std::unique_lock<std::mutex> lk(g_frame_mutex);
   const auto has_new_frame = [&]() {
     const int read_idx = g_read_idx.load(std::memory_order_acquire);
@@ -414,11 +410,6 @@ static bool SnapshotLatestFrame(
   *frame_ts = g_frame_buffers[read_idx].ts;
   if (frame->empty()) {
     return false;
-  }
-  if (keep_raw_frame) {
-    *raw_frame = frame->clone();
-  } else {
-    raw_frame->release();
   }
   return true;
 }
@@ -466,8 +457,10 @@ int main(int argc, char **argv) {
     return -2;
   }
 
-  Tools::BindCurrentThreadToAllCores();
+  // 初始化结束后主线程转移到辅助核，避免与推理关键路径争抢性能核。
+  Tools::BindCurrentThreadToAuxCores();
 
+  Tools::BindCurrentThreadToAuxCores();
   const bool serial_initially_open = OpenSerialPort(port);
   if (!serial_initially_open) {
     std::cout << "[IMU] serial unavailable at startup, retrying in background."
@@ -537,7 +530,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   static Tools::LaserAngleCalculator laser_angle_calculator;
   static Tools::DistanceCalculator distance_calculator;
   static ImageRecognize::CrossFrameTargetTracker target_tracker;
-  static ImageRecognize::TargetMotionPredictor target_motion_predictor;
   static ImageRecognize::AerialRobotLaserLockJudge aerial_robot_stage_judge;
   static const Tools::FilterType filter_type =
       Tools::AngleCalculator::ParseFilterType(
@@ -553,9 +545,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   const bool enable_send_log =
       ResolveOption(command_line_options.enable_send_log,
                     Tools::Params().enable_send_log);
-  const bool enable_motion_prediction =
-      ResolveOption(command_line_options.enable_motion_prediction,
-                    Tools::Params().enable_motion_prediction);
   const bool enable_scan_mode = ResolveOption(
       command_line_options.enable_scan_mode, Tools::Params().enable_scan_mode);
   const bool enable_save_no_target_images =
@@ -565,10 +554,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       ResolveOption(command_line_options.enable_latency_profile,
                     Tools::Params().enable_latency_profile);
 
-  PrintPredictSettings(
-      filter_type, target_camp_mode, enable_display, enable_motion_prediction,
-      enable_scan_mode, enable_save_no_target_images, enable_latency_profile,
-      enable_calibration_sliders, enable_send_log);
+  PrintPredictSettings(filter_type, target_camp_mode, enable_display,
+                       enable_scan_mode, enable_save_no_target_images,
+                       enable_latency_profile, enable_calibration_sliders,
+                       enable_send_log);
   static std::unique_ptr<Tools::SaveImageOnNoTarget> no_target_saver;
   if (enable_save_no_target_images && !no_target_saver) {
     no_target_saver =
@@ -589,7 +578,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   bool infer_inflight = false;
   bool has_last_submitted_frame_ts = false;
   cv::Mat inflight_frame;
-  cv::Mat inflight_raw_frame;
   std::chrono::steady_clock::time_point inflight_frame_ts{};
   std::chrono::steady_clock::time_point inflight_infer_start{};
   const double max_infer_fps = Tools::Params().max_infer_fps;
@@ -607,7 +595,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
   const auto reset_tracking_state = [&]() {
     target_tracker.Reset();
-    target_motion_predictor.Reset();
     distance_calculator.ResetFilter();
     ClearPendingSend();
   };
@@ -679,11 +666,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       }
 
       cv::Mat next_frame;
-      cv::Mat next_raw_frame;
       std::chrono::steady_clock::time_point next_frame_ts{};
       if (!SnapshotLatestFrame(has_last_submitted_frame_ts, inflight_frame_ts,
-                               &next_frame, &next_raw_frame, &next_frame_ts,
-                               enable_save_no_target_images)) {
+                               &next_frame, &next_frame_ts)) {
         continue;
       }
 
@@ -691,7 +676,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         inflight_infer_start = ProfileNow(enable_latency_profile);
         active_predictor->startAsync(next_frame);
         inflight_frame = std::move(next_frame);
-        inflight_raw_frame = std::move(next_raw_frame);
         inflight_frame_ts = next_frame_ts;
         infer_inflight = true;
         has_last_submitted_frame_ts = true;
@@ -709,17 +693,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
     // loop 计时从等待异步结果前开始，包含 isAsyncReady 等待开销。
     const auto t_loop_start = ProfileNow(enable_latency_profile);
-    while (g_running && !active_predictor->isAsyncReady()) {
-      std::unique_lock<std::mutex> lk(g_frame_mutex);
-      g_frame_cv.wait_for(lk, std::chrono::milliseconds(1),
-                          [] { return !g_running; });
-    }
     if (!g_running) {
       break;
     }
 
-    cv::Mat frame = enable_display ? inflight_frame.clone() : inflight_frame;
-    cv::Mat raw_frame = inflight_raw_frame;
+    cv::Mat frame = inflight_frame;
+    cv::Mat raw_frame;
     const auto frame_ts = inflight_frame_ts;
 
     ImageRecognize::PredictResult result;
@@ -802,40 +781,11 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     }
 
     if (track_result.has_box) {
-      if (enable_motion_prediction) {
-        const auto t_motion_predict_start = ProfileNow(enable_latency_profile);
-        const auto motion_prediction =
-            target_motion_predictor.ObserveAndPredict(track_result.box,
-                                                      frame_dt, frame.size());
-        const auto t_motion_predict_end = ProfileNow(enable_latency_profile);
-        AddLatencySample(enable_latency_profile, latency_total, latency_window,
-                         &LatencyStats::motion_predict_ns,
-                         t_motion_predict_start, t_motion_predict_end);
-        tracked_box =
-            motion_prediction.valid ? motion_prediction.box : track_result.box;
-      } else {
-        target_motion_predictor.Reset();
-        tracked_box = track_result.box;
-      }
+      tracked_box = track_result.box;
       has_tracked_box = true;
       AddLatencySample(enable_latency_profile, latency_total, latency_window,
                        &LatencyStats::select_box_ns, t_select_start,
                        t_select_end);
-    } else if (enable_motion_prediction && track_alive &&
-               target_motion_predictor.HasState()) {
-      const auto t_motion_predict_start = ProfileNow(enable_latency_profile);
-      const auto motion_prediction =
-          target_motion_predictor.Predict(frame_dt, frame.size());
-      const auto t_motion_predict_end = ProfileNow(enable_latency_profile);
-      AddLatencySample(enable_latency_profile, latency_total, latency_window,
-                       &LatencyStats::motion_predict_ns, t_motion_predict_start,
-                       t_motion_predict_end);
-      if (motion_prediction.valid) {
-        tracked_box = motion_prediction.box;
-        has_tracked_box = true;
-      }
-    } else {
-      target_motion_predictor.Reset();
     }
 
     if (has_tracked_box) {
@@ -959,6 +909,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     ++ui_frame_counter;
 
     if (do_display) {
+      frame = inflight_frame.clone();
       ImageRecognize::ImageShow::ShowLockProgress(
           frame, g_aerial_robot_stage.load(std::memory_order_acquire),
           aerial_robot_stage_judge.Progress(),
@@ -974,6 +925,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
     // 当检测框数量不是 1 个时，按间隔保存画框前原图
     if (enable_save_no_target_images && no_target_saver) {
+      raw_frame = inflight_frame.clone();
       no_target_saver->Update(raw_frame, result.boxes.size() != 1);
     }
 

@@ -1,6 +1,6 @@
 /**
  * @file    include/Tools/CpuAffinity.hpp
- * @brief   提供线程 CPU 亲和性设置与 CPU 拓扑查询辅助能力。
+ * @brief   提供线程 CPU 亲和性设置与 CPU 拓扑查询能力。
  */
 
 #pragma once
@@ -34,24 +34,38 @@ inline bool readLongFile(const std::string &path, long &value) {
   return file.good();
 }
 
+inline std::vector<int> fallbackAllCores(int cpu_count);
+
 inline std::vector<int> detectBigCoresByType(int cpu_count) {
-  std::vector<int> big_cores;
-  bool any_type = false;
+  std::vector<std::pair<int, int>> typed_cores;
+  typed_cores.reserve(cpu_count);
   for (int cpu = 0; cpu < cpu_count; ++cpu) {
     int core_type = -1;
-    const std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/core_type";
+    const std::string path = "/sys/devices/system/cpu/cpu" +
+                             std::to_string(cpu) + "/topology/core_type";
     if (readIntFile(path, core_type)) {
-      any_type = true;
-      if (core_type >= 1) {
-        big_cores.push_back(cpu);
-      }
+      typed_cores.emplace_back(core_type, cpu);
     }
   }
-  if (!any_type) return {};
+  if (typed_cores.empty()) return {};
+
+  // core_type 编号在不同平台语义不完全一致，取最大类型值作为性能核组。
+  const int max_core_type =
+      std::max_element(typed_cores.begin(), typed_cores.end(),
+                       [](const auto &lhs, const auto &rhs) {
+                         return lhs.first < rhs.first;
+                       })
+          ->first;
+
+  std::vector<int> big_cores;
+  big_cores.reserve(typed_cores.size());
+  for (const auto &[core_type, cpu] : typed_cores) {
+    if (core_type == max_core_type) {
+      big_cores.push_back(cpu);
+    }
+  }
   return big_cores;
 }
-
-inline std::vector<int> fallbackAllCores(int cpu_count);
 
 inline std::vector<int> detectBigCoresByFreq(int cpu_count) {
   struct CpuTopologyInfo {
@@ -71,8 +85,9 @@ inline std::vector<int> detectBigCoresByFreq(int cpu_count) {
     bool any_field = false;
 
     int package_id = -1;
-    const std::string package_path =
-        "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/physical_package_id";
+    const std::string package_path = "/sys/devices/system/cpu/cpu" +
+                                     std::to_string(cpu) +
+                                     "/topology/physical_package_id";
     if (readIntFile(package_path, package_id)) {
       info.package_id = package_id;
       info.has_package_id = true;
@@ -80,7 +95,8 @@ inline std::vector<int> detectBigCoresByFreq(int cpu_count) {
     }
 
     int core_id = -1;
-    const std::string core_path = "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/core_id";
+    const std::string core_path = "/sys/devices/system/cpu/cpu" +
+                                  std::to_string(cpu) + "/topology/core_id";
     if (readIntFile(core_path, core_id)) {
       info.core_id = core_id;
       info.has_core_id = true;
@@ -88,7 +104,9 @@ inline std::vector<int> detectBigCoresByFreq(int cpu_count) {
     }
 
     long freq = -1;
-    const std::string freq_path = "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/cpufreq/cpuinfo_max_freq";
+    const std::string freq_path = "/sys/devices/system/cpu/cpu" +
+                                  std::to_string(cpu) +
+                                  "/cpufreq/cpuinfo_max_freq";
     if (readLongFile(freq_path, freq)) {
       info.max_freq = freq;
       info.has_max_freq = true;
@@ -120,10 +138,12 @@ inline std::vector<int> detectBigCoresByFreq(int cpu_count) {
     }
     if (freqs.empty()) return {};
 
-    std::sort(freqs.begin(), freqs.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+    std::sort(freqs.begin(), freqs.end(),
+              [](const auto &a, const auto &b) { return a.first > b.first; });
     const long max_freq = freqs.front().first;
     const long min_freq = freqs.back().first;
-    if (max_freq <= 0 || min_freq <= 0 || (max_freq - min_freq) < 200000 || max_freq * 100 <= min_freq * 110) {
+    if (max_freq <= 0 || min_freq <= 0 || (max_freq - min_freq) < 200000 ||
+        max_freq * 100 <= min_freq * 110) {
       return fallbackAllCores(cpu_count);
     }
 
@@ -160,14 +180,16 @@ inline std::vector<int> detectBigCoresByFreq(int cpu_count) {
     representative_cores.push_back(entry.second);
   }
 
-  std::sort(representative_cores.begin(), representative_cores.end(), [](const auto &a, const auto &b) {
-    if (a.max_freq != b.max_freq) return a.max_freq > b.max_freq;
-    return a.cpu < b.cpu;
-  });
+  std::sort(representative_cores.begin(), representative_cores.end(),
+            [](const auto &a, const auto &b) {
+              if (a.max_freq != b.max_freq) return a.max_freq > b.max_freq;
+              return a.cpu < b.cpu;
+            });
 
   const long max_freq = representative_cores.front().max_freq;
   const long min_freq = representative_cores.back().max_freq;
-  if (max_freq <= 0 || min_freq <= 0 || (max_freq - min_freq) < 200000 || max_freq * 100 <= min_freq * 110) {
+  if (max_freq <= 0 || min_freq <= 0 || (max_freq - min_freq) < 200000 ||
+      max_freq * 100 <= min_freq * 110) {
     return fallbackAllCores(cpu_count);
   }
 
@@ -194,7 +216,6 @@ inline int detectCpuCount() {
   return cpu_count > 0 ? cpu_count : 0;
 }
 
-// 核心拓扑在进程生命周期内通常不会变化，缓存一次即可避免重复扫描 /sys。
 inline const std::vector<int> &cachedBigCores() {
   static const std::vector<int> cores = [] {
     const int cpu_count = detectCpuCount();
@@ -242,7 +263,8 @@ inline const std::vector<int> &cachedAuxCores() {
     std::vector<int> aux_cores;
     aux_cores.reserve(all_cores.size());
     for (int cpu : all_cores) {
-      if (std::find(big_cores.begin(), big_cores.end(), cpu) == big_cores.end()) {
+      if (std::find(big_cores.begin(), big_cores.end(), cpu) ==
+          big_cores.end()) {
         aux_cores.push_back(cpu);
       }
     }
@@ -273,7 +295,8 @@ inline bool BindCurrentThreadToBigCores() {
   const auto &cores = detail::cachedBigCores();
   const bool ok = BindCurrentThreadToCores(cores);
   if (!ok) {
-    std::cerr << "[CpuAffinity] Failed to bind current thread to big cores." << std::endl;
+    std::cerr << "[CpuAffinity] Failed to bind current thread to big cores."
+              << std::endl;
   }
   return ok;
 }
@@ -282,7 +305,19 @@ inline bool BindCurrentThreadToAllCores() {
   const auto &cores = detail::cachedAllCores();
   const bool ok = BindCurrentThreadToCores(cores);
   if (!ok) {
-    std::cerr << "[CpuAffinity] Failed to bind current thread to all cores." << std::endl;
+    std::cerr << "[CpuAffinity] Failed to bind current thread to all cores."
+              << std::endl;
+  }
+  return ok;
+}
+
+inline bool BindCurrentThreadToAuxCores() {
+  const auto &cores = detail::cachedAuxCores();
+  const bool ok = BindCurrentThreadToCores(cores);
+  if (!ok) {
+    std::cerr
+        << "[CpuAffinity] Failed to bind current thread to auxiliary cores."
+        << std::endl;
   }
   return ok;
 }
@@ -291,11 +326,14 @@ inline bool BindCurrentThreadToAuxCore(size_t index) {
   const auto &cores = detail::cachedAuxCores();
   if (cores.empty()) return false;
 
-  const size_t selected_index = index < cores.size() ? index : (cores.size() - 1);
+  const size_t selected_index =
+      index < cores.size() ? index : (cores.size() - 1);
   const std::vector<int> selected_core{cores[selected_index]};
   const bool ok = BindCurrentThreadToCores(selected_core);
   if (!ok) {
-    std::cerr << "[CpuAffinity] Failed to bind current thread to auxiliary core." << std::endl;
+    std::cerr
+        << "[CpuAffinity] Failed to bind current thread to auxiliary core."
+        << std::endl;
   }
   return ok;
 }
