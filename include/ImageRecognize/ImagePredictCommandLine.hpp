@@ -6,6 +6,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace ImageRecognize {
@@ -17,6 +18,7 @@ struct ImagePredictCommandLineOptions {
   std::optional<bool> enable_latency_profile;
   std::optional<bool> enable_scan_mode;
   std::optional<bool> enable_save_no_target_images;
+  std::optional<std::string> video_path;
 };
 
 namespace detail {
@@ -54,6 +56,7 @@ ParseImagePredictCommandLine(int argc, char **argv) {
   constexpr std::string_view kSaveNoTargetImagesPrefix =
       "--save-no-target-images=";
   constexpr std::string_view kSendLogPrefix = "--send-log=";
+  constexpr std::string_view kVideoPrefix = "--video=";
 
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg = argv[i] != nullptr ? argv[i] : "";
@@ -164,6 +167,19 @@ ParseImagePredictCommandLine(int argc, char **argv) {
     if (detail::StartsWith(arg, kSendLogPrefix)) {
       options.enable_send_log = detail::ParseBoolValue(
           arg.substr(kSendLogPrefix.size()), options.enable_send_log);
+      continue;
+    }
+
+    if (arg == "--video") {
+      if (i + 1 < argc && argv[i + 1] != nullptr) {
+        options.video_path = argv[i + 1];
+        ++i;
+      }
+      continue;
+    }
+
+    if (detail::StartsWith(arg, kVideoPrefix)) {
+      options.video_path = std::string(arg.substr(kVideoPrefix.size()));
       continue;
     }
   }

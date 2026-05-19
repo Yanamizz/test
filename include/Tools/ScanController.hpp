@@ -18,6 +18,8 @@ struct ScanCommand {
   float absolute_pitch_deg = 0.0f;
   float offset_yaw_deg = 0.0f;
   float offset_pitch_deg = 0.0f;
+  float yaw_velocity_deg_per_sec = 0.0f;
+  float pitch_velocity_deg_per_sec = 0.0f;
   uint8_t aimbot_state = 0x01;
 };
 
@@ -38,8 +40,7 @@ public:
   explicit ScanController(const Config &config) : config_(config) { Reset(); }
 
   void Reset() {
-    current_yaw_deg_ = OriginYawDeg_();
-    scan_forward_ = true;
+    scan_phase_rad_ = -0.5f * static_cast<float>(kPi);
     last_update_time_ = Clock::now();
   }
 
@@ -51,6 +52,8 @@ public:
     command.absolute_pitch_deg = origin_pitch_deg;
     command.offset_yaw_deg = origin_yaw_deg - imu_yaw_deg;
     command.offset_pitch_deg = origin_pitch_deg - imu_pitch_deg;
+    command.yaw_velocity_deg_per_sec = 0.0f;
+    command.pitch_velocity_deg_per_sec = 0.0f;
     command.aimbot_state = 0x01;
     return command;
   }
@@ -62,6 +65,8 @@ public:
     const float max_yaw_deg =
         std::max(config_.min_yaw_deg, config_.max_yaw_deg);
     const float yaw_span_deg = std::max(max_yaw_deg - min_yaw_deg, 1e-3f);
+    const float yaw_mid_deg = 0.5f * (min_yaw_deg + max_yaw_deg);
+    const float yaw_amplitude_deg = 0.5f * yaw_span_deg;
     const float pitch_mid_deg =
         0.5f * (config_.min_pitch_deg + config_.max_pitch_deg);
     const float pitch_amplitude_deg =
@@ -73,38 +78,33 @@ public:
                            .count());
     last_update_time_ = now;
 
-    const float yaw_delta =
-        std::max(config_.yaw_speed_deg_per_sec, 1e-4f) * dt_sec;
-    if (scan_forward_) {
-      current_yaw_deg_ += yaw_delta;
-      if (current_yaw_deg_ >= max_yaw_deg) {
-        const float overshoot = current_yaw_deg_ - max_yaw_deg;
-        current_yaw_deg_ = max_yaw_deg - overshoot;
-        scan_forward_ = false;
-      }
-    } else {
-      current_yaw_deg_ -= yaw_delta;
-      if (current_yaw_deg_ <= min_yaw_deg) {
-        const float overshoot = min_yaw_deg - current_yaw_deg_;
-        current_yaw_deg_ = min_yaw_deg + overshoot;
-        scan_forward_ = true;
-      }
-    }
-    current_yaw_deg_ = std::clamp(current_yaw_deg_, min_yaw_deg, max_yaw_deg);
+    const float omega_rad_per_sec =
+        std::max(config_.yaw_speed_deg_per_sec, 1e-4f) /
+        std::max(yaw_amplitude_deg, 1e-3f);
+    scan_phase_rad_ += omega_rad_per_sec * dt_sec;
+    scan_phase_rad_ =
+        std::fmod(scan_phase_rad_, 2.0f * static_cast<float>(kPi));
 
-    const float normalized_progress =
-      (current_yaw_deg_ - min_yaw_deg) / yaw_span_deg;
-    const float roundtrip_progress = scan_forward_
-                       ? 0.5f * normalized_progress
-                       : 0.5f + 0.5f * (1.0f - normalized_progress);
+    const float sin_phase = std::sin(scan_phase_rad_);
+    const float cos_phase = std::cos(scan_phase_rad_);
+
+    const float scan_yaw_deg = yaw_mid_deg + yaw_amplitude_deg * sin_phase;
     const float scan_pitch_deg =
-      pitch_mid_deg +
-      pitch_amplitude_deg * std::sin(2.0f * kPi * roundtrip_progress);
+        pitch_mid_deg +
+        pitch_amplitude_deg *
+            std::sin(scan_phase_rad_ + 0.5f * static_cast<float>(kPi));
+    const float scan_yaw_velocity_deg_per_sec =
+        yaw_amplitude_deg * omega_rad_per_sec * cos_phase;
+    const float scan_pitch_velocity_deg_per_sec =
+        pitch_amplitude_deg * omega_rad_per_sec *
+        std::cos(scan_phase_rad_ + 0.5f * static_cast<float>(kPi));
 
-    command.absolute_yaw_deg = current_yaw_deg_;
+    command.absolute_yaw_deg = scan_yaw_deg;
     command.absolute_pitch_deg = scan_pitch_deg;
-    command.offset_yaw_deg = current_yaw_deg_ - imu_yaw_deg;
+    command.offset_yaw_deg = scan_yaw_deg - imu_yaw_deg;
     command.offset_pitch_deg = scan_pitch_deg - imu_pitch_deg;
+    command.yaw_velocity_deg_per_sec = scan_yaw_velocity_deg_per_sec;
+    command.pitch_velocity_deg_per_sec = scan_pitch_velocity_deg_per_sec;
     command.aimbot_state = 0x01;
     return command;
   }
@@ -121,8 +121,7 @@ private:
   }
 
   Config config_{};  
-  float current_yaw_deg_ = 0.0f;
-  bool scan_forward_ = true;
+  float scan_phase_rad_ = -0.5f * static_cast<float>(kPi);
   Clock::time_point last_update_time_{Clock::now()};
 };
 

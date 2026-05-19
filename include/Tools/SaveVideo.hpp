@@ -102,7 +102,7 @@ class SaveVideoOnTarget {
     }
 
     const auto file_path = run_folder_ / BuildSegmentName();
-    constexpr int kFourCC = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+    const int kFourCC = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
 
     if (!writer_.open(file_path.string(), kFourCC, fps_, size, true)) {
       std::cerr << "[SaveVideo] open writer failed: " << file_path

@@ -31,6 +31,7 @@
 #include "Tools/SaveImage.hpp"
 #include "Tools/SaveVideo.hpp"
 #include "Tools/ScanController.hpp"
+#include "Tools/VideoInput.hpp"
 
 namespace {
 using ImageRecognize::ImagePredictCommandLineOptions;
@@ -418,7 +419,8 @@ static bool SnapshotLatestFrame(
 
 } // namespace
 
-void CaptureThread(CameraTask::GalaxyCamera *camera);
+void CaptureThread(CameraTask::GalaxyCamera *camera,
+                   std::optional<std::string> video_path);
 void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
                         Tools::ScanController &scan_controller,
                         ImagePredictCommandLineOptions command_line_options);
@@ -469,7 +471,8 @@ int main(int argc, char **argv) {
               << std::endl;
   }
 
-  std::thread image_capture(CaptureThread, &camera);
+  std::thread image_capture(CaptureThread, &camera,
+                            command_line_options.video_path);
   Tools::ScanController scan_controller;
   std::thread image_predict(ImagePredictThread, std::ref(*predictor),
                             std::ref(scan_controller), command_line_options);
@@ -492,8 +495,86 @@ int main(int argc, char **argv) {
   return 0;
 }
 
-void CaptureThread(CameraTask::GalaxyCamera *camera) {
+void CaptureThread(CameraTask::GalaxyCamera *camera,
+                   std::optional<std::string> video_path) {
   Tools::BindCurrentThreadToAuxCore(0);
+  if (video_path.has_value()) {
+    const std::string normalized_video_path =
+        Tools::NormalizeVideoPathFromCli(*video_path);
+    cv::VideoCapture video_capture;
+    std::string open_error;
+    if (!Tools::OpenVideoCaptureFromPath(normalized_video_path, &video_capture,
+                                         &open_error)) {
+      std::cerr << "Failed to open video input: " << open_error << std::endl;
+      RequestStop();
+      return;
+    }
+
+    double source_fps = video_capture.get(cv::CAP_PROP_FPS);
+    if (!std::isfinite(source_fps) || source_fps <= 1.0) {
+      source_fps = 30.0;
+      std::cout << "[VideoInput] invalid source fps, fallback to " << source_fps
+                << std::endl;
+    }
+    const auto frame_interval = std::chrono::duration<double>(1.0 / source_fps);
+    auto next_frame_time = std::chrono::steady_clock::now();
+
+    std::cout << "[VideoInput] enabled: " << normalized_video_path
+              << " (loop=true, fps=" << source_fps << ")" << std::endl;
+    while (g_running) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now < next_frame_time) {
+        std::this_thread::sleep_until(next_frame_time);
+        if (!g_running) {
+          break;
+        }
+      }
+
+      cv::Mat frame;
+      if (!video_capture.read(frame) || frame.empty()) {
+        video_capture.set(cv::CAP_PROP_POS_FRAMES, 0.0);
+        cv::Mat retry_frame;
+        if (!video_capture.read(retry_frame) || retry_frame.empty()) {
+          video_capture.release();
+          if (!Tools::OpenVideoCaptureFromPath(normalized_video_path,
+                                               &video_capture, &open_error)) {
+            std::cerr << "Failed to reopen loop video: " << open_error
+                      << std::endl;
+            RequestStop();
+            break;
+          }
+          source_fps = video_capture.get(cv::CAP_PROP_FPS);
+          if (!std::isfinite(source_fps) || source_fps <= 1.0) {
+            source_fps = 30.0;
+          }
+          std::cout << "[VideoInput] loop reopen success: " << normalized_video_path
+                    << " (fps=" << source_fps << ")" << std::endl;
+          continue;
+        }
+        frame = std::move(retry_frame);
+        std::cout << "[VideoInput] loop to beginning." << std::endl;
+      }
+
+      int write_idx = g_write_idx.load(std::memory_order_relaxed);
+      g_frame_buffers[write_idx].frame = std::move(frame);
+      g_frame_buffers[write_idx].ts = std::chrono::steady_clock::now();
+
+      int next_write = 1 - write_idx;
+      g_write_idx.store(next_write, std::memory_order_release);
+      g_read_idx.store(write_idx, std::memory_order_release);
+      g_frame_cv.notify_one();
+
+      next_frame_time +=
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+              frame_interval);
+      if (next_frame_time < std::chrono::steady_clock::now() - frame_interval) {
+        next_frame_time = std::chrono::steady_clock::now();
+      }
+    }
+    video_capture.release();
+    return;
+  }
+
   if (!camera->open()) {
     std::cerr << "Failed to open camera." << std::endl;
     RequestStop();
@@ -1092,11 +1173,6 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
         continue;
       }
 
-      float gimbal_pitch_velocity = 0.0f;
-      float gimbal_yaw_velocity = 0.0f;
-      g_imu_buffer.GetLatestVelocity(&gimbal_pitch_velocity,
-                                     &gimbal_yaw_velocity);
-
       Tools::ScanCommand scan_command{};
       {
         std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
@@ -1116,7 +1192,8 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
                                     scan_command.absolute_yaw_deg,
                                     scan_command.offset_pitch_deg,
                                     scan_command.offset_yaw_deg,
-                                    gimbal_pitch_velocity, gimbal_yaw_velocity,
+                                    scan_command.pitch_velocity_deg_per_sec,
+                                    scan_command.yaw_velocity_deg_per_sec,
                                     scan_command.aimbot_state});
       } catch (const std::exception &e) {
         HandleSerialWriteFailure(port, e);

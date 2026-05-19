@@ -65,3 +65,5 @@ __pycache__/
 .cache/
 
 third_lib/
+
+src/Vedio/**
