@@ -14,12 +14,13 @@ struct RuntimeParams {
   std::string stage3_model_path; // stage3 使用的 OpenVINO 模型路径（xml）
   std::string openvino_device_name; // OpenVINO 设备名，如 CPU/GPU/AUTO
   std::string angle_filter_type; // 角度滤波器类型，如 ONE_EURO/KF/UKF
-  std::string target_camp_mode; // 目标阵营筛选模式，如 RED/BLUE/ALL
+  std::string target_camp_mode;  // 目标阵营筛选模式，如 RED/BLUE/ALL
 
-  int capture_timeout_ms; // 相机抓帧超时时间（毫秒）
+  int capture_timeout_ms;          // 相机抓帧超时时间（毫秒）
   double stage12_exposure_time_us; // stage1/2 默认曝光时间（微秒）
-  double stage3_exposure_time_us; // stage3 默认曝光时间（微秒）
-  int stage3_switch_target_lost_delay_ms; // 满足 stage3 后，丢目标持续多久再切模型（毫秒）
+  double stage3_exposure_time_us;  // stage3 默认曝光时间（微秒）
+  int stage3_switch_target_lost_delay_ms; // 满足 stage3
+                                          // 后，丢目标持续多久再切模型（毫秒）
   int capture_empty_sleep_ms; // 相机空帧时休眠时长（毫秒）
   int imu_read_fail_sleep_ms; // IMU 读取失败时休眠时长（毫秒）
   int imu_send_idle_sleep_ms; // 发送线程空闲/等待时休眠时长（毫秒）
@@ -30,22 +31,22 @@ struct RuntimeParams {
   double dt_max_sec; // 帧间 dt 的有效上限，超过则视为异常（秒）
   float pitch_abs_limit; // 单次发送 pitch 偏角绝对值上限（度）
 
-  bool enable_latency_profile; // 是否开启时延统计
+  bool enable_latency_profile;       // 是否开启时延统计
   int latency_print_interval_frames; // 时延统计打印间隔（帧）
 
-  bool enable_scan_mode; // 是否启用丢目标后扫描模式
+  bool enable_scan_mode;             // 是否启用丢目标后扫描模式
   bool enable_save_no_target_images; // 是否保存“无目标”样本图
-  bool enable_save_target_videos; // 是否保存“有目标”视频片段
-  bool enable_display; // 是否启用可视化窗口
-  bool enable_calibration_sliders; // 是否启用标定滑块 UI
-  bool enable_send_log; // 是否打印串口发送日志
+  bool enable_save_target_videos;    // 是否保存“有目标”视频片段
+  bool enable_display;               // 是否启用可视化窗口
+  bool enable_calibration_sliders;   // 是否启用标定滑块 UI
+  bool enable_send_log;              // 是否打印串口发送日志
 
   int scan_origin_hold_ms; // 扫描模式起始时在原点保持时长（毫秒）
-  double max_infer_fps; // 推理提交帧率上限；<=0 表示不限速
-  double scan_send_hz; // 扫描模式串口发送频率（Hz）
-  int display_every_n_frames; // 每 N 帧刷新一次显示
+  double max_infer_fps;        // 推理提交帧率上限；<=0 表示不限速
+  double scan_send_hz;         // 扫描模式串口发送频率（Hz）
+  int display_every_n_frames;  // 每 N 帧刷新一次显示
   int gui_poll_every_n_frames; // 每 N 帧轮询一次 GUI 按键事件
-  int target_video_fps; // 目标视频保存帧率（fps）
+  int target_video_fps;        // 目标视频保存帧率（fps）
 };
 
 inline const RuntimeParams &Params() {
@@ -61,11 +62,11 @@ inline const RuntimeParams &Params() {
       1000,   // capture_timeout_ms: 相机抓帧超时 1000ms
       1000.0, // stage12_exposure_time_us: stage1/2 默认曝光 1000us
       4000.0, // stage3_exposure_time_us: stage3 默认曝光 4000us
-      500,    // stage3_switch_target_lost_delay_ms: stage3 后丢目标 500ms 再切模型
-      5,      // capture_empty_sleep_ms: 空帧休眠 5ms
-      2,      // imu_read_fail_sleep_ms: IMU 读失败休眠 2ms
-      1,      // imu_send_idle_sleep_ms: 发送线程空闲休眠 1ms
-      100,    // imu_buffer_max_age_ms: IMU/图像最大匹配窗口 100ms
+      500, // stage3_switch_target_lost_delay_ms: stage3 后丢目标 500ms 再切模型
+      5,   // capture_empty_sleep_ms: 空帧休眠 5ms
+      2,   // imu_read_fail_sleep_ms: IMU 读失败休眠 2ms
+      1,   // imu_send_idle_sleep_ms: 发送线程空闲休眠 1ms
+      100, // imu_buffer_max_age_ms: IMU/图像最大匹配窗口 100ms
 
       0.0f,  // minimum_angle_deg: 控制死区 0 度（不抑制微小偏角）
       10.0f, // max_send_delta_deg: yaw 单次最大发送偏角 10 度

@@ -70,7 +70,7 @@ public:
     const float pitch_mid_deg =
         0.5f * (config_.min_pitch_deg + config_.max_pitch_deg);
     const float pitch_amplitude_deg =
-        0.125f * std::abs(config_.max_pitch_deg - config_.min_pitch_deg);
+        0.25f * std::abs(config_.max_pitch_deg - config_.min_pitch_deg);
     const auto now = Clock::now();
     const float dt_sec =
         std::max(0.0f, std::chrono::duration_cast<std::chrono::duration<float>>(
@@ -120,7 +120,7 @@ private:
     return 0.5f * (config_.min_pitch_deg + config_.max_pitch_deg);
   }
 
-  Config config_{};  
+  Config config_{};
   float scan_phase_rad_ = -0.5f * static_cast<float>(kPi);
   Clock::time_point last_update_time_{Clock::now()};
 };
