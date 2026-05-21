@@ -12,7 +12,7 @@ namespace SerialTask {
 // ===== 手动配置区（统一放在文件末尾）=====
 inline constexpr const char *DEFAULT_PORT = "/dev/ttyACM0";  // 串口默认设备路径
 inline constexpr int DEFAULT_BAUD_RATE = 115200;             // 串口默认波特率
-inline constexpr int DEFAULT_TIMEOUT_MS = 100;               // 串口默认读取超时（毫秒）
+inline constexpr int DEFAULT_TIMEOUT_MS = 8;                 // 串口默认读取超时（毫秒）
 
 /**
  * @brief 默认构造函数，初始化默认串口配置参数

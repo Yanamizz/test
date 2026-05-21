@@ -81,12 +81,12 @@ inline void RunAimbotTargetReceiver(std::atomic<uint8_t> &aimbot_target,
 
   socket_t listen_fd = kInvalidSocketFd;
   if (!CreateListeningSocket(listen_fd, port)) {
-    std::cerr << "[Network] AimbotTarget 监听端口 " << port << " 失败"
+    std::cerr << "[网络] AimbotTarget 监听端口 " << port << " 失败"
               << std::endl;
     return;
   }
 
-  std::cout << "[Network] AimbotTarget 接收端已启动，监听端口：" << port
+  std::cout << "[网络] AimbotTarget 接收端已启动，监听端口：" << port
             << std::endl;
 
   while (is_running()) {
@@ -105,7 +105,7 @@ inline void RunAimbotTargetReceiver(std::atomic<uint8_t> &aimbot_target,
       break;
     }
 
-    std::cout << "[Network] AimbotTarget 发送端已连接，IP：" << client_ip
+    std::cout << "[网络] AimbotTarget 发送端已连接，IP：" << client_ip
               << std::endl;
 
     while (is_running()) {
@@ -115,13 +115,13 @@ inline void RunAimbotTargetReceiver(std::atomic<uint8_t> &aimbot_target,
 
       std::string received_content;
       if (!ReceiveText(client_fd, received_content)) {
-        std::cout << "[Network] AimbotTarget 发送端已断开" << std::endl;
+        std::cout << "[网络] AimbotTarget 发送端已断开" << std::endl;
         break;
       }
 
       uint8_t target = SerialTask::kAimbotTargetMin;
       if (!ParseAimbotTargetMessage(received_content, target)) {
-        std::cerr << "[Network] 忽略非法 AimbotTarget 数据" << std::endl;
+        std::cerr << "[网络] 忽略非法 AimbotTarget 数据" << std::endl;
         continue;
       }
 
@@ -131,7 +131,7 @@ inline void RunAimbotTargetReceiver(std::atomic<uint8_t> &aimbot_target,
 
       const uint8_t current_target =
           aimbot_target.load(std::memory_order_acquire);
-      std::cout << "[Network] AimbotTarget(raw)="
+      std::cout << "[网络] AimbotTarget(原始累积值)="
                 << static_cast<int>(current_target)
                 << " (rx=" << static_cast<int>(target) << ")" << std::endl;
     }

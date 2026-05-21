@@ -17,4 +17,7 @@ ANTIDRONE_RUNTIME_PARAMS_PATH="${RUNTIME_PARAMS_PATH}" \
   --display \
   --calibration-sliders \
   --no-scan-mode \
+  --no-latency-profile \
+  --no-save-no-target-images \
+  --no-send-log \
   "$@"

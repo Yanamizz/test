@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 
 /**
@@ -16,18 +17,24 @@
 class FPSCounter {
  public:
   explicit FPSCounter(int interval_ms = 500)
-      : interval_ms_ms_(interval_ms), frame_count_(0), fps_(0.0), last_time_(std::chrono::steady_clock::now()) {}
+      : interval_ms_ms_(std::max(1, interval_ms)),
+        frame_count_(0),
+        fps_(0.0),
+        last_time_(std::chrono::steady_clock::now()) {}
 
-  // 每帧调用一次
-  void tick() {
+  // 每帧调用一次；返回值表示本次是否刷新了 fps_。
+  bool tick() {
     ++frame_count_;
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_time_).count();
-    if (elapsed >= interval_ms_ms_) {
-      fps_ = static_cast<double>(frame_count_) * 1000.0 / static_cast<double>(elapsed);
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed_ms =
+        std::chrono::duration<double, std::milli>(now - last_time_).count();
+    if (elapsed_ms >= static_cast<double>(interval_ms_ms_)) {
+      fps_ = static_cast<double>(frame_count_) * 1000.0 / elapsed_ms;
       frame_count_ = 0;
       last_time_ = now;
+      return true;
     }
+    return false;
   }
 
   double get() const { return fps_; }

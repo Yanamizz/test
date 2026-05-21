@@ -28,13 +28,16 @@
 - Ubuntu 24.04 LTS（推荐）
 - CMake >= 3.10
 - C++17 编译器（g++/clang++）
-- OpenCV 4.x（`videoio/imgcodecs/imgproc/core/dnn/highgui/calib3d`）
-- Eigen3（CMake 包：`find_package(Eigen3 REQUIRED)`）
-- 串口库 `serial`（系统安装或使用仓库内 `third_lib/serial` 回退）
-- 大恒相机 SDK（`gxiapi`，`ImagePredict` 目标链接需要）
-- OpenVINO（可选）
-  - `ImagePredict`/`OpenvinoTest` 在未找到 OpenVINO 时仍可编译，但运行会走报错路径
-
+- OpenCV 4.x（'sudo apt install -y libopencv-dev'）
+- Eigen3（'sudo apt install libeigen3-dev'）
+- third_lib
+  - 串口库 `serial`（<https://github.com/wjwwood/serial.git>）
+  - 大恒相机 SDK（<https://www.daheng-imaging.com/downloads/>）
+  - kalman (<https://github.com/mherb/kalman.git>)
+  - OneEuroFilter (<https://github.com/casiez/OneEuroFilter.git>)
+  - OpenVINO（可选）
+    - `ImagePredict`/`OpenvinoTest` 在未找到 OpenVINO 时仍可编译，但运行会走报错路径
+    - <https://www.intel.cn/content/www/cn/zh/developer/tools/openvino-toolkit/overview.html>
 ## 构建
 
 首次配置并构建：

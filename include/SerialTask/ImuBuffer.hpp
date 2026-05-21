@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "SerialTask/SerialRead.hpp"
+#include "Tools/AngleUtils.hpp"
 
 namespace SerialTask {
 
@@ -117,9 +118,9 @@ public:
 
     const float dt_sec = static_cast<float>(dt_ns) * 1e-9f;
     *pitch_velocity_deg_per_sec =
-        NormalizeDeltaDeg(curr.second.pitch - prev.second.pitch) / dt_sec;
+        Tools::NormalizeDeltaDeg(curr.second.pitch - prev.second.pitch) / dt_sec;
     *yaw_velocity_deg_per_sec =
-        NormalizeDeltaDeg(curr.second.yaw - prev.second.yaw) / dt_sec;
+        Tools::NormalizeDeltaDeg(curr.second.yaw - prev.second.yaw) / dt_sec;
     return true;
   }
 
@@ -136,16 +137,6 @@ private:
     return delta <= max_match_age;
   }
 
-  static float NormalizeDeltaDeg(float delta) {
-    while (delta > 180.0f) {
-      delta -= 360.0f;
-    }
-    while (delta < -180.0f) {
-      delta += 360.0f;
-    }
-    return delta;
-  }
-
   static float InterpolateAngleDeg(float from_deg, float to_deg, float alpha) {
     if (alpha < 0.0f) {
       alpha = 0.0f;
@@ -153,7 +144,7 @@ private:
     if (alpha > 1.0f) {
       alpha = 1.0f;
     }
-    return from_deg + NormalizeDeltaDeg(to_deg - from_deg) * alpha;
+    return from_deg + Tools::NormalizeDeltaDeg(to_deg - from_deg) * alpha;
   }
 
   static EulerAngles InterpolateEulerAngles(const EulerAngles &lower,

@@ -41,79 +41,93 @@ public:
   explicit ImagePreprocess(cv::Size inputSize) : inputSize_(inputSize) {}
 
   /**
-   * @brief 对输入图像执行预处理并返回张量化结果。
-   * @param[in] input  输入图像（BGR，HWC）。
-   * @returns          CHW
-   * 顺序数据与对应形状；若输入为空则返回空数据与默认形状。
+   * @brief 对输入图像执行预处理并写入输出结果（就地复用 out->data 容量）。
    */
-  PreprocessResult run(const cv::Mat &input) const {
-    PreprocessResult result{};
-    result.shape = {1, 3, inputSize_.height, inputSize_.width};
+  void run(const cv::Mat &input, PreprocessResult *out) {
+    if (out == nullptr) {
+      return;
+    }
+
+    out->shape = {1, 3, inputSize_.height, inputSize_.width};
+    out->scale = 1.0f;
+    out->pad_x = 0;
+    out->pad_y = 0;
+    out->content_width = 0;
+    out->content_height = 0;
 
     if (input.empty()) {
-      return result;
+      out->data.clear();
+      return;
     }
 
     const float scale_x =
         static_cast<float>(inputSize_.width) / static_cast<float>(input.cols);
     const float scale_y =
         static_cast<float>(inputSize_.height) / static_cast<float>(input.rows);
-    result.scale = std::min(scale_x, scale_y);
+    out->scale = std::min(scale_x, scale_y);
 
-    result.content_width = std::max(
-        1, static_cast<int>(std::round(input.cols * result.scale)));
-    result.content_height = std::max(
-        1, static_cast<int>(std::round(input.rows * result.scale)));
-    result.content_width = std::min(result.content_width, inputSize_.width);
-    result.content_height = std::min(result.content_height, inputSize_.height);
+    out->content_width = std::max(
+        1, static_cast<int>(std::round(input.cols * out->scale)));
+    out->content_height = std::max(
+        1, static_cast<int>(std::round(input.rows * out->scale)));
+    out->content_width = std::min(out->content_width, inputSize_.width);
+    out->content_height = std::min(out->content_height, inputSize_.height);
 
-    result.pad_x = (inputSize_.width - result.content_width) / 2;
-    result.pad_y = (inputSize_.height - result.content_height) / 2;
+    out->pad_x = (inputSize_.width - out->content_width) / 2;
+    out->pad_y = (inputSize_.height - out->content_height) / 2;
 
-    cv::Mat resized_;
     cv::resize(input, resized_,
-               cv::Size(result.content_width, result.content_height));
+               cv::Size(out->content_width, out->content_height));
 
-    cv::Mat letterboxed_(inputSize_, input.type(), cv::Scalar(114, 114, 114));
+    if (letterboxed_.size() != inputSize_ || letterboxed_.type() != input.type()) {
+      letterboxed_ = cv::Mat(inputSize_, input.type());
+    }
+    letterboxed_.setTo(cv::Scalar(114, 114, 114));
     resized_.copyTo(letterboxed_(
-        cv::Rect(result.pad_x, result.pad_y, result.content_width,
-                 result.content_height)));
+        cv::Rect(out->pad_x, out->pad_y, out->content_width,
+                 out->content_height)));
 
-    cv::Mat rgbImage_;
     cv::cvtColor(letterboxed_, rgbImage_, cv::COLOR_BGR2RGB); // BGR -> RGB
+    rgbImage_.convertTo(floatImage_, CV_32F, 1.0 / 255.0);    // 归一化到 [0,1]
 
-    cv::Mat floatImage_;
-    rgbImage_.convertTo(floatImage_, CV_32F, 1.0 / 255.0); // 归一化到 [0,1]
-
-    const int channels_ = 3;
-    const int height_ = floatImage_.rows;
-    const int width_ = floatImage_.cols;
-    const int plane_size_ = height_ * width_;
-
-    result.data.resize(static_cast<size_t>(channels_ * height_ * width_));
-    float *output = result.data.data();
+    constexpr int kChannels = 3;
+    const int height = floatImage_.rows;
+    const int width = floatImage_.cols;
+    const int plane_size = height * width;
+    const std::size_t total_values =
+        static_cast<std::size_t>(kChannels * height * width);
+    out->data.resize(total_values);
+    float *output = out->data.data();
 
     // 低延迟优先：避免并行调度开销，直接按行顺序写入 CHW 缓冲区。
-    for (int h = 0; h < height_; ++h) {
+    for (int h = 0; h < height; ++h) {
       const cv::Vec3f *src_row = floatImage_.ptr<cv::Vec3f>(h);
-      float *dst_r = output + 0 * plane_size_ + h * width_;
-      float *dst_g = output + 1 * plane_size_ + h * width_;
-      float *dst_b = output + 2 * plane_size_ + h * width_;
+      float *dst_r = output + h * width;
+      float *dst_g = output + plane_size + h * width;
+      float *dst_b = output + 2 * plane_size + h * width;
 
-      for (int w = 0; w < width_; ++w) {
+      for (int w = 0; w < width; ++w) {
         const cv::Vec3f &pixel = src_row[w];
         dst_r[w] = pixel[0];
         dst_g[w] = pixel[1];
         dst_b[w] = pixel[2];
       }
     }
+  }
 
+  PreprocessResult run(const cv::Mat &input) {
+    PreprocessResult result{};
+    run(input, &result);
     return result;
   }
 
 private:
   static cv::Size DefaultInputSize();
 
+  cv::Mat resized_;
+  cv::Mat letterboxed_;
+  cv::Mat rgbImage_;
+  cv::Mat floatImage_;
   cv::Size inputSize_; ///< 模型期望的输入尺寸
 };
 

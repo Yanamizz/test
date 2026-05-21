@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "KalmanFilter/KalmanFilters.hpp"
+#include "Tools/AngleUtils.hpp"
 #include "Tools/CameraData.hpp"
 
 namespace Tools {
@@ -42,14 +43,6 @@ inline const char *ToString(FilterType type) {
   default:
     return "UNKNOWN";
   }
-}
-
-inline float NormalizeDeltaDeg(float delta) {
-  while (delta > 180.0f)
-    delta -= 360.0f;
-  while (delta < -180.0f)
-    delta += 360.0f;
-  return delta;
 }
 
 struct AngleCommand {

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -47,23 +48,18 @@ public:
     init_(model_path, device_name);
   }
 
-  PredictResult run(const cv::Mat &origin_image_,
-                    std::string model_path_) const {
-    ImagePredict tmp_predictor(model_path_, device_name_);
-    return tmp_predictor.run(origin_image_);
-  }
-
   PredictResult run(const cv::Mat &origin_image_) {
     if (!initialized_) {
       throw std::runtime_error("OpenVINO session not initialized. Use "
                                "ImagePredict(model_path) constructor.");
     }
 
-    const auto preprocessed = preprocessor_.run(origin_image_);
+    PreprocessResult preprocessed{};
+    preprocessor_.run(origin_image_, &preprocessed);
     ov::Tensor input_tensor(
         ov::element::f32,
         {1, 3, static_cast<size_t>(height_), static_cast<size_t>(width_)},
-        const_cast<float *>(preprocessed.data.data()));
+        preprocessed.data.data());
     infer_request_.set_input_tensor(input_tensor);
     infer_request_.infer();
 
@@ -80,7 +76,7 @@ public:
       throw std::runtime_error("Async inference already in flight.");
     }
 
-    async_preprocessed_ = preprocessor_.run(origin_image_);
+    preprocessor_.run(origin_image_, &async_preprocessed_);
     async_original_size_ = origin_image_.size();
     ov::Tensor input_tensor(
         ov::element::f32,
@@ -112,6 +108,7 @@ private:
   struct TunableParams {
     int latency_threads_cap;
     int streams_num;
+    std::size_t pre_merge_top_k;
     float score_thresh;
     int min_channel_dim;
     float merge_iou_thresh;
@@ -235,7 +232,7 @@ private:
     const unsigned int hw_threads =
         std::max(1u, std::thread::hardware_concurrency());
     const unsigned int latency_threads_cap = static_cast<unsigned int>(
-        std::max(6, std::max(1, Params().latency_threads_cap)));
+        std::max(1, Params().latency_threads_cap));
     const unsigned int infer_threads = std::min(
         hw_threads, latency_threads_cap);
 
@@ -394,6 +391,20 @@ private:
       appendNmsBox_(result, cx - 0.5f * w, cy - 0.5f * h, cx + 0.5f * w,
                     cy + 0.5f * h, best_score, class_id, preprocess_meta,
                     original_image_size);
+    }
+
+    if (!result.boxes.empty()) {
+      const std::size_t top_k =
+          std::max<std::size_t>(1, Params().pre_merge_top_k);
+      if (result.boxes.size() > top_k) {
+        std::partial_sort(
+            result.boxes.begin(),
+            result.boxes.begin() + static_cast<std::ptrdiff_t>(top_k),
+            result.boxes.end(),
+            [](const std::array<float, 6> &lhs,
+               const std::array<float, 6> &rhs) { return lhs[4] > rhs[4]; });
+        result.boxes.resize(top_k);
+      }
     }
 
     result.boxes = mergeAndFilterBoxes_(result.boxes);
@@ -703,8 +714,9 @@ private:
 
 inline const ImagePredict::TunableParams &ImagePredict::Params() {
   static const TunableParams p{
-      2, // hw_threads_reserved: 预留给系统/其他线程的 CPU 线程数
+      3, // latency_threads_cap: 低延迟优先，12900H 建议先从 2~4 线程 A/B
       1, // streams_num: OpenVINO 推理流数量（低延迟建议 1）
+      32, // pre_merge_top_k: 融合前仅保留高分候选，降低 O(n^2) 开销
       0.7f,  // score_thresh: 置信度阈值
       5,     // min_channel_dim: 原始检测头最少应为 cx,cy,w,h,cls0
       0.45f, // merge_iou_thresh: 同类高重叠框做融合

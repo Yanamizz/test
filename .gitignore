@@ -64,6 +64,4 @@ __pycache__/
 .vscode/
 .cache/
 
-third_lib/
-
 src/Vedio/**
