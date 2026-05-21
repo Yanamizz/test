@@ -7,6 +7,10 @@
 #include "NetworkTask/NetworkTask.hpp"
 #include "SerialTask/Common.hpp"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace {
 
 std::atomic<bool> g_running{true};
@@ -33,6 +37,12 @@ bool ParseAimbotTarget(const std::string &content, uint8_t &target) {
 } // namespace
 
 int main() {
+#ifdef _WIN32
+  // Ensure UTF-8 output in Windows terminal to avoid mojibake.
+  SetConsoleOutputCP(CP_UTF8);
+  SetConsoleCP(CP_UTF8);
+#endif
+
   std::signal(SIGINT, HandleSignal);
 
   NetworkTask::socket_t listen_fd = NetworkTask::kInvalidSocketFd;
@@ -64,7 +74,7 @@ int main() {
       break;
     }
 
-    std::cout << "设备 A 已连接，IP：" << client_ip << "\n";
+    std::cout << "设备 A 已连接，IP: " << client_ip << "\n";
 
     while (g_running.load()) {
       if (!NetworkTask::WaitForReadable(client_fd, 100)) {
