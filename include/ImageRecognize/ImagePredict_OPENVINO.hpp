@@ -231,10 +231,10 @@ private:
   ov::CompiledModel compileModel_(const std::shared_ptr<ov::Model> &model) {
     const unsigned int hw_threads =
         std::max(1u, std::thread::hardware_concurrency());
-    const unsigned int latency_threads_cap = static_cast<unsigned int>(
-        std::max(1, Params().latency_threads_cap));
-    const unsigned int infer_threads = std::min(
-        hw_threads, latency_threads_cap);
+    const unsigned int latency_threads_cap =
+        static_cast<unsigned int>(std::max(1, Params().latency_threads_cap));
+    const unsigned int infer_threads =
+        std::min(hw_threads, latency_threads_cap);
 
     std::vector<std::string> available_devices;
     try {
@@ -717,7 +717,7 @@ inline const ImagePredict::TunableParams &ImagePredict::Params() {
       3, // latency_threads_cap: 低延迟优先，12900H 建议先从 2~4 线程 A/B
       1, // streams_num: OpenVINO 推理流数量（低延迟建议 1）
       32, // pre_merge_top_k: 融合前仅保留高分候选，降低 O(n^2) 开销
-      0.7f,  // score_thresh: 置信度阈值
+      0.5f,  // score_thresh: 置信度阈值
       5,     // min_channel_dim: 原始检测头最少应为 cx,cy,w,h,cls0
       0.45f, // merge_iou_thresh: 同类高重叠框做融合
       0.35f, // suppress_iou_thresh: 融合后再次抑制重叠框

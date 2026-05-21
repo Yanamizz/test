@@ -77,7 +77,7 @@ inline const RuntimeParams &Params() {
       100,   // latency_print_interval_frames: 每 100 帧打印一次统计
 
       true,  // enable_scan_mode: 默认开启扫描模式
-      false, // enable_save_no_target_images: 默认不保存无目标图像
+      true,  // enable_save_no_target_images: 默认不保存无目标图像
       false, // enable_save_target_videos: 默认不保存目标视频
       true,  // enable_display: 默认开启显示窗口
       true,  // enable_calibration_sliders: 默认开启标定滑块
