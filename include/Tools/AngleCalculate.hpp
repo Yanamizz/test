@@ -12,6 +12,7 @@
 #include "KalmanFilter/KalmanFilters.hpp"
 #include "Tools/AngleUtils.hpp"
 #include "Tools/CameraData.hpp"
+#include "Tools/RuntimeParams.hpp"
 
 namespace Tools {
 
@@ -139,6 +140,7 @@ public:
       last_filtered_yaw_ = result.yaw;
       last_filtered_pitch_ = result.pitch;
       has_last_filtered_angles_ = true;
+      has_last_smoothed_velocity_ = false;
       return result;
     }
 
@@ -149,11 +151,26 @@ public:
         UpdateAngleByType(filter_type, absolute_pitch, dt, kf_pitch, ekf_pitch,
                           ukf_pitch, ckf_pitch, oneeuro_pitch));
 
-    const float safe_dt = static_cast<float>(std::max(dt, 1e-6));
+    const double velocity_dt =
+        std::clamp(dt, Params().velocity_dt_min_sec, Params().velocity_dt_max_sec);
+    const float safe_dt = static_cast<float>(std::max(velocity_dt, 1e-6));
     if (has_last_filtered_angles_) {
-      result.yaw_velocity =
+      const float raw_yaw_velocity =
           NormalizeDeltaDeg(result.yaw - last_filtered_yaw_) / safe_dt;
-      result.pitch_velocity = (result.pitch - last_filtered_pitch_) / safe_dt;
+      const float raw_pitch_velocity =
+          (result.pitch - last_filtered_pitch_) / safe_dt;
+      result.yaw_velocity =
+          SmoothVelocityAxis(raw_yaw_velocity, safe_dt, Params().yaw_velocity_abs_limit_deg_per_sec,
+                             Params().yaw_velocity_max_accel_deg_per_sec2,
+                             Params().yaw_velocity_cutoff_hz,
+                             Params().yaw_velocity_deadband_deg_per_sec,
+                             &last_smoothed_yaw_velocity_);
+      result.pitch_velocity =
+          SmoothVelocityAxis(raw_pitch_velocity, safe_dt, Params().pitch_velocity_abs_limit_deg_per_sec,
+                             Params().pitch_velocity_max_accel_deg_per_sec2,
+                             Params().pitch_velocity_cutoff_hz,
+                             Params().pitch_velocity_deadband_deg_per_sec,
+                             &last_smoothed_pitch_velocity_);
     }
     last_filtered_yaw_ = result.yaw;
     last_filtered_pitch_ = result.pitch;
@@ -195,6 +212,9 @@ private:
   void ResetFilters(double yaw, double pitch) {
     ApplyTunableFilterGains();
     has_last_filtered_angles_ = false;
+    has_last_smoothed_velocity_ = false;
+    last_smoothed_yaw_velocity_ = 0.0f;
+    last_smoothed_pitch_velocity_ = 0.0f;
 
     kf_yaw.reset(yaw, 0.0);
     kf_pitch.reset(pitch, 0.0);
@@ -262,6 +282,48 @@ private:
     }
   }
 
+  float SmoothVelocityAxis(float raw_velocity, float dt_sec,
+                           double velocity_abs_limit_deg_per_sec,
+                           double velocity_max_accel_deg_per_sec2,
+                           double velocity_cutoff_hz,
+                           double velocity_deadband_deg_per_sec,
+                           float *last_smoothed_velocity) {
+    const float velocity_limit =
+        static_cast<float>(std::max(0.0, velocity_abs_limit_deg_per_sec));
+    const float clamped_raw_velocity = std::clamp(raw_velocity, -velocity_limit,
+                                                  velocity_limit);
+
+    if (!has_last_smoothed_velocity_) {
+      *last_smoothed_velocity = clamped_raw_velocity;
+      has_last_smoothed_velocity_ = true;
+    } else {
+      const float max_accel =
+          static_cast<float>(std::max(0.0, velocity_max_accel_deg_per_sec2));
+      const float max_delta = max_accel * dt_sec;
+      const float delta = clamped_raw_velocity - *last_smoothed_velocity;
+      const float accel_limited_velocity =
+          *last_smoothed_velocity + std::clamp(delta, -max_delta, max_delta);
+
+      const double cutoff_hz = std::max(0.0, velocity_cutoff_hz);
+      float alpha = 1.0f;
+      if (cutoff_hz > 0.0) {
+        const float tau =
+            1.0f / (2.0f * static_cast<float>(kPi) * static_cast<float>(cutoff_hz));
+        alpha = dt_sec / (tau + dt_sec);
+      }
+      alpha = std::clamp(alpha, 0.0f, 1.0f);
+      *last_smoothed_velocity =
+          *last_smoothed_velocity + alpha * (accel_limited_velocity - *last_smoothed_velocity);
+    }
+
+    if (std::abs(*last_smoothed_velocity) <
+        static_cast<float>(std::max(0.0, velocity_deadband_deg_per_sec))) {
+      *last_smoothed_velocity = 0.0f;
+    }
+
+    return *last_smoothed_velocity;
+  }
+
   struct TuningParams {
     FilterType default_filter_type;
 
@@ -277,6 +339,17 @@ private:
     double oneeuro_min_cutoff_hz;
     double oneeuro_beta;
     double oneeuro_d_cutoff_hz;
+
+    double velocity_dt_min_sec;
+    double velocity_dt_max_sec;
+    double yaw_velocity_abs_limit_deg_per_sec;
+    double pitch_velocity_abs_limit_deg_per_sec;
+    double yaw_velocity_max_accel_deg_per_sec2;
+    double pitch_velocity_max_accel_deg_per_sec2;
+    double yaw_velocity_cutoff_hz;
+    double pitch_velocity_cutoff_hz;
+    double yaw_velocity_deadband_deg_per_sec;
+    double pitch_velocity_deadband_deg_per_sec;
   };
 
   static const TuningParams &Params();
@@ -300,30 +373,41 @@ private:
   float last_filtered_yaw_ = 0.0f;
   float last_filtered_pitch_ = 0.0f;
   bool has_last_filtered_angles_ = false;
+  float last_smoothed_yaw_velocity_ = 0.0f;
+  float last_smoothed_pitch_velocity_ = 0.0f;
+  bool has_last_smoothed_velocity_ = false;
 
   std::chrono::steady_clock::time_point last_time;
   bool is_initialized = false;
 };
 
 inline const AngleCalculator::TuningParams &AngleCalculator::Params() {
-  // ===== 调参集中区（统一放在文件末尾）=====
-  // OneEuro 调参起点：静止目标继续往响应侧推进，后续按“振荡/滞后”逐步收窄。
   static const TuningParams p{
-      FilterType::ONE_EURO, // default_filter_type: 调参模式默认使用 OneEuro
+      FilterType::ONE_EURO,
 
-      0.03, // default_dt_sec: 未提供帧间隔时使用的默认 dt（秒）
-      5.0, // max_offset_deg: 单帧像素解算得到的最大角度偏移限幅（度）
+      0.03, // default_dt_sec
+      5.0,  // max_offset_deg
 
-      10.0, // yaw_filter_q: yaw 过程噪声 Q，调大以提升跟随性
-      0.01, // yaw_filter_r: yaw 测量噪声 R，调小以减少滞后
-      0.1,  // pitch_filter_q: pitch 过程噪声 Q，调小以增强稳定性
-      1.0,  // pitch_filter_r: pitch 测量噪声 R，调大以抑制抖动
+      10.0, // yaw_filter_q
+      0.01, // yaw_filter_r
+      0.1,  // pitch_filter_q
+      1.0,  // pitch_filter_r
 
-      120.0, // oneeuro_freq_hz: OneEuro 采样频率（Hz），通常作为 dt
-             // 异常时的回退值
-      4.6, // oneeuro_min_cutoff_hz: 小幅降稳，压住静止和慢速振荡
-      6.5, // oneeuro_beta: 降低运动响应增益，减少过度追随造成的振荡
-      2.5 // oneeuro_d_cutoff_hz: 降低导数响应，避免把小抖动当作运动
+      120.0, // oneeuro_freq_hz
+      4.6,   // oneeuro_min_cutoff_hz
+      6.5,   // oneeuro_beta
+      2.5,   // oneeuro_d_cutoff_hz
+
+      Tools::Params().angle_velocity_dt_min_sec,
+      Tools::Params().angle_velocity_dt_max_sec,
+      Tools::Params().angle_velocity_yaw_abs_limit_deg_per_sec,
+      Tools::Params().angle_velocity_pitch_abs_limit_deg_per_sec,
+      Tools::Params().angle_velocity_yaw_max_accel_deg_per_sec2,
+      Tools::Params().angle_velocity_pitch_max_accel_deg_per_sec2,
+      Tools::Params().angle_velocity_yaw_cutoff_hz,
+      Tools::Params().angle_velocity_pitch_cutoff_hz,
+      Tools::Params().angle_velocity_yaw_deadband_deg_per_sec,
+      Tools::Params().angle_velocity_pitch_deadband_deg_per_sec
   };
   return p;
 }

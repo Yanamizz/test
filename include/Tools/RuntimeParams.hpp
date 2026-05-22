@@ -30,6 +30,16 @@ struct RuntimeParams {
   float max_send_delta_deg; // 单次发送 yaw 偏角最大限幅（度）
   double dt_max_sec; // 帧间 dt 的有效上限，超过则视为异常（秒）
   float pitch_abs_limit; // 单次发送 pitch 偏角绝对值上限（度）
+  double angle_velocity_dt_min_sec; // 速度估计使用的最小 dt（秒）
+  double angle_velocity_dt_max_sec; // 速度估计使用的最大 dt（秒）
+  double angle_velocity_yaw_abs_limit_deg_per_sec; // yaw 角速度绝对值限幅（度/秒）
+  double angle_velocity_pitch_abs_limit_deg_per_sec; // pitch 角速度绝对值限幅（度/秒）
+  double angle_velocity_yaw_max_accel_deg_per_sec2; // yaw 角速度变化率限幅（度/秒²）
+  double angle_velocity_pitch_max_accel_deg_per_sec2; // pitch 角速度变化率限幅（度/秒²）
+  double angle_velocity_yaw_cutoff_hz; // yaw 角速度低通截止频率（Hz）
+  double angle_velocity_pitch_cutoff_hz; // pitch 角速度低通截止频率（Hz）
+  double angle_velocity_yaw_deadband_deg_per_sec; // yaw 角速度死区（度/秒）
+  double angle_velocity_pitch_deadband_deg_per_sec; // pitch 角速度死区（度/秒）
 
   bool enable_latency_profile;       // 是否开启时延统计
   int latency_print_interval_frames; // 时延统计打印间隔（帧）
@@ -72,12 +82,22 @@ inline const RuntimeParams &Params() {
       10.0f, // max_send_delta_deg: yaw 单次最大发送偏角 10 度
       1.0,   // dt_max_sec: 帧间隔有效上限 1.0 秒
       10.0f, // pitch_abs_limit: pitch 单次最大发送偏角绝对值 10 度
+      0.010, // angle_velocity_dt_min_sec: 速度估计最小 dt 10ms
+      0.080, // angle_velocity_dt_max_sec: 速度估计最大 dt 80ms
+      0.0, // angle_velocity_yaw_abs_limit_deg_per_sec: yaw 角速度限幅（测试设为 0）
+      450.0, // angle_velocity_pitch_abs_limit_deg_per_sec: pitch 角速度限幅（保持）
+      0.0, // angle_velocity_yaw_max_accel_deg_per_sec2: yaw 角加速度限幅（测试设为 0）
+      3000.0, // angle_velocity_pitch_max_accel_deg_per_sec2: pitch 角加速度限幅（保持）
+      0.0, // angle_velocity_yaw_cutoff_hz: yaw 角速度低通截止频率（测试设为 0）
+      22.0, // angle_velocity_pitch_cutoff_hz: pitch 角速度低通截止频率（保持）
+      0.0, // angle_velocity_yaw_deadband_deg_per_sec: yaw 角速度死区（测试设为 0）
+      0.0, // angle_velocity_pitch_deadband_deg_per_sec: pitch 角速度死区（关闭）
 
       false, // enable_latency_profile: 默认关闭时延统计
       100,   // latency_print_interval_frames: 每 100 帧打印一次统计
 
       true,  // enable_scan_mode: 默认开启扫描模式
-      true,  // enable_save_no_target_images: 默认不保存无目标图像
+      false, // enable_save_no_target_images: 默认不保存无目标图像
       false, // enable_save_target_videos: 默认不保存目标视频
       true,  // enable_display: 默认开启显示窗口
       true,  // enable_calibration_sliders: 默认开启标定滑块
