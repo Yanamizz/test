@@ -25,7 +25,7 @@
 namespace NetworkTask {
 
 inline constexpr int kDefaultTcpPort = 5000;
-inline constexpr const char *kDefaultPeerIp = "192.168.10.2";
+inline constexpr const char *kDefaultPeerIp = "192.168.12.2";
 
 #ifdef _WIN32
 using socket_t = SOCKET;
@@ -80,8 +80,7 @@ inline void ShutdownSocket(socket_t fd) {
 inline bool SetReuseAddress(socket_t fd) {
   int opt = 1;
 #ifdef _WIN32
-  return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
-                    reinterpret_cast<const char *>(&opt), sizeof(opt)) == 0;
+  return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char *>(&opt), sizeof(opt)) == 0;
 #else
   return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == 0;
 #endif
@@ -113,8 +112,7 @@ inline bool SendAll(socket_t fd, const std::string &data) {
 
   while (total < data.size()) {
 #ifdef _WIN32
-    int n =
-        send(fd, data.data() + total, static_cast<int>(data.size() - total), 0);
+    int n = send(fd, data.data() + total, static_cast<int>(data.size() - total), 0);
 #else
     ssize_t n = send(fd, data.data() + total, data.size() - total, 0);
 #endif
@@ -127,9 +125,7 @@ inline bool SendAll(socket_t fd, const std::string &data) {
   return true;
 }
 
-inline bool SendText(socket_t fd, const std::string &text) {
-  return SendAll(fd, text);
-}
+inline bool SendText(socket_t fd, const std::string &text) { return SendAll(fd, text); }
 
 inline bool ReceiveText(socket_t fd, std::string &out_text) {
   char buffer[1024];
@@ -147,4 +143,4 @@ inline bool ReceiveText(socket_t fd, std::string &out_text) {
   return true;
 }
 
-} // namespace NetworkTask
+}  // namespace NetworkTask
