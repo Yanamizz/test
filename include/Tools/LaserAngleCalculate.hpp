@@ -5,11 +5,11 @@
 
 #pragma once
 
+#include "Tools/CameraData.hpp"
 #include <algorithm>
 #include <cmath>
 #include <mutex>
 #include <utility>
-#include "Tools/CameraData.hpp"
 
 namespace Tools {
 inline constexpr float kLaserAnglePi = 3.1415926f;
@@ -183,11 +183,11 @@ private:
   static const TunableParams &DefaultParams() {
     // ===== 调参集中区（统一放在文件末尾）=====
     static const TunableParams p{
-        {0.05788f, // stage12 near_calibration_target_height（米）
-         87.421f,  // stage12 near_pixel（px）
+        {0.06275f, // stage12 near_calibration_target_height（米）
+         94.920f,  // stage12 near_pixel（px）
          0.06759f, // stage12 far_calibration_target_height（米）
          61.626f}, // stage12 far_pixel（px）
-        {0.05079f, // stage3 near_calibration_target_height（米）
+        {0.05904f, // stage3 near_calibration_target_height（米）
          77.834f,  // stage3 near_pixel（px）
          0.06650f, // stage3 far_calibration_target_height（米）
          61.014f}, // stage3 far_pixel（px）
@@ -369,14 +369,14 @@ private:
         0.090f, // laser_height_above_camera_m: 激光在相机上方 0.09m
         18.8f, // reference_distance_m: 用于归零的参考水平距离（米）
         0.1f, // min_valid_distance_m: 仅用于防止接近 0 的距离造成异常角度
-        {12.0f,  // stage12 pitch_comp_near_distance_m（米）
-         0.16f,  // stage12 pitch_comp_near_offset_deg，正值向上
-         20.0f,  // stage12 pitch_comp_far_distance_m（米）
-         0.13f}, // stage12 pitch_comp_far_offset_deg，正值向上
-        {12.0f,  // stage3 pitch_comp_near_distance_m（米）
-         0.14f,  // stage3 pitch_comp_near_offset_deg，正值向上
-         20.0f,  // stage3 pitch_comp_far_distance_m（米）
-         0.13f}, // stage3 pitch_comp_far_offset_deg，正值向上
+        {12.0f,   // stage12 pitch_comp_near_distance_m（米）
+         0.13f,   // stage12 pitch_comp_near_offset_deg，正值向上
+         20.0f,   // stage12 pitch_comp_far_distance_m（米）
+         0.125f}, // stage12 pitch_comp_far_offset_deg，正值向上
+        {12.0f,   // stage3 pitch_comp_near_distance_m（米）
+         0.14f,   // stage3 pitch_comp_near_offset_deg，正值向上
+         20.0f,   // stage3 pitch_comp_far_distance_m（米）
+         0.13f},  // stage3 pitch_comp_far_offset_deg，正值向上
         CalibrationStage::Stage12 // active_stage: 当前使用的激光补偿阶段
     };
     return p;

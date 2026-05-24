@@ -38,9 +38,13 @@ private:
   static constexpr int kStage12MinHeightTicks = 5500;
   static constexpr int kStage12MaxHeightTicks = 7000;
   static constexpr int kStage3MinHeightTicks = 4000;
-  static constexpr int kStage3MaxHeightTicks = 5500;
-  static constexpr int kHeightSliderMax =
+  static constexpr int kStage3MaxHeightTicks = 7000;
+  static constexpr int kStage12HeightSliderMax =
       kStage12MaxHeightTicks - kStage12MinHeightTicks;
+  static constexpr int kStage3NearHeightSliderMax =
+      kStage3MaxHeightTicks - kStage3MinHeightTicks;
+  static constexpr int kHeightSliderMax =
+      std::max(kStage12HeightSliderMax, kStage3NearHeightSliderMax);
   static constexpr int kDistanceScale = 10;
   static constexpr int kMinDistanceTicks = 80;
   static constexpr int kMaxDistanceTicks = 250;
