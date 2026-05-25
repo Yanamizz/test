@@ -6,6 +6,14 @@
 
 ## 本轮完成事项（延迟优先）
 
+0. Stage3 推理端轻量光照归一化
+- 文件：`include/ImageRecognize/YoloLightPreprocess.hpp`
+- 文件：`src/ImagePredict.cc`
+- 文件：`include/Tools/SaveImage.hpp`
+- 变更：仅 stage3 在提交 OpenVINO 推理前执行 LAB 色彩空间 L 通道 CLAHE（clipLimit=2.0，tileGridSize=8x8），stage1/2 输入不变。
+- 变更：stage3 无目标/多目标样本保存时成对输出 `raw_*.jpg` 与 `clahe_*.jpg`，其中 `clahe_*` 与实际 stage3 推理输入一致。
+- 注意：所有阶段异常样本保存条件保持“检测框数量不是 1 个”，即无目标或多目标。
+
 1. CPU 大核识别修正（12900H 重点）  
 - 文件：`include/Tools/CpuAffinity.hpp`  
 - 变更：`detectBigCoresByType()` 从“`core_type >= 1`”改为“取观测到的最大 `core_type` 作为性能核组”。  

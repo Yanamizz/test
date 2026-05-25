@@ -19,6 +19,7 @@
 #include "ImageRecognize/ImagePredict_OPENVINO.hpp"
 #include "ImageRecognize/ImageShow.hpp"
 #include "ImageRecognize/TargetTracking.hpp"
+#include "ImageRecognize/YoloLightPreprocess.hpp"
 #include "NetworkTask/NetworkTask.hpp"
 #include "SerialTask/SerialTask.hpp"
 #include "Tools/AngleCalculate.hpp"
@@ -678,8 +679,11 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   bool infer_inflight = false;
   bool has_last_submitted_frame_ts = false;
   cv::Mat inflight_frame;
+  cv::Mat stage3_preprocessed_frame;
   std::chrono::steady_clock::time_point inflight_frame_ts{};
   std::chrono::steady_clock::time_point inflight_infer_start{};
+  bool inflight_used_stage3_predictor = false;
+  ImageRecognize::YoloLightPreprocessor stage3_light_preprocessor;
   const double max_infer_fps = Tools::Params().max_infer_fps;
   const auto infer_submit_interval =
       max_infer_fps > 0.0
@@ -777,9 +781,17 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         AddLatencySample(enable_latency_profile, latency_total, latency_window,
                          &LatencyStats::capture_to_submit_ns, next_frame_ts,
                          inflight_infer_start);
-        active_predictor->startAsync(next_frame);
-        inflight_frame = std::move(next_frame);
+        const bool submit_to_stage3 = using_stage3_predictor;
+        cv::Mat infer_frame = next_frame;
+        if (submit_to_stage3) {
+          stage3_light_preprocessor.PreprocessForYolo(
+              next_frame, &stage3_preprocessed_frame);
+          infer_frame = stage3_preprocessed_frame;
+        }
+        active_predictor->startAsync(infer_frame);
+        inflight_frame = std::move(infer_frame);
         inflight_frame_ts = next_frame_ts;
+        inflight_used_stage3_predictor = submit_to_stage3;
         infer_inflight = true;
         has_last_submitted_frame_ts = true;
         if (infer_submit_interval !=
@@ -815,7 +827,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     std::chrono::steady_clock::time_point infer_end_time{};
     try {
       result = active_predictor->getAsyncResult();
-      if (using_stage3_predictor) {
+      if (inflight_used_stage3_predictor) {
         NormalizeStage3PredictResult(&result);
       }
       has_predict_result = true;
@@ -1037,10 +1049,14 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       }
     }
 
-    // 当检测框数量不是 1 个时，按间隔保存画框前原图
+    // 当检测框数量不是 1 个时，按间隔保存画框前图像，覆盖无目标/多目标异常样本。
     if (enable_save_no_target_images && no_target_saver) {
-      raw_frame = inflight_frame.clone();
-      no_target_saver->Update(raw_frame, result.boxes.size() != 1);
+      if (inflight_used_stage3_predictor) {
+        no_target_saver->UpdateClahe(inflight_frame, result.boxes.size() != 1);
+      } else {
+        raw_frame = inflight_frame.clone();
+        no_target_saver->Update(raw_frame, result.boxes.size() != 1);
+      }
     }
     if (enable_save_target_videos && target_video_saver) {
       const cv::Mat &video_frame = do_display ? frame : inflight_frame;

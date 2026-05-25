@@ -39,13 +39,24 @@ class SaveImageOnNoTarget {
     const std::string filename = BuildImageName();
     const std::filesystem::path file_path = run_folder_ / filename;
 
-    try {
-      if (!cv::imwrite(file_path.string(), frame)) {
-        std::cerr << "[SaveImage] 保存失败: " << file_path << std::endl;
-      }
-    } catch (const std::exception &e) {
-      std::cerr << "[SaveImage] 保存异常: " << e.what() << std::endl;
+    WriteImage(file_path, frame);
+  }
+
+  // 保存实际送入 stage3 推理的 CLAHE 图像。
+  void UpdateClahe(const cv::Mat &clahe_frame, bool should_save) {
+    if (clahe_frame.empty()) return;
+    if (run_folder_.empty()) return;
+
+    if (!should_save) {
+      triggered_frame_count_ = 0;
+      return;
     }
+
+    ++triggered_frame_count_;
+    if (triggered_frame_count_ % save_interval_frames_ != 0) return;
+
+    const std::string base_name = BuildImageName();
+    WriteImage(run_folder_ / ("clahe_" + base_name), clahe_frame);
   }
 
   const std::filesystem::path &RunFolder() const { return run_folder_; }
@@ -56,6 +67,17 @@ class SaveImageOnNoTarget {
   int saved_index_ = 1;
   std::filesystem::path base_dir_;
   std::filesystem::path run_folder_;
+
+  void WriteImage(const std::filesystem::path &file_path,
+                  const cv::Mat &frame) const {
+    try {
+      if (!cv::imwrite(file_path.string(), frame)) {
+        std::cerr << "[SaveImage] 保存失败: " << file_path << std::endl;
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "[SaveImage] 保存异常: " << e.what() << std::endl;
+    }
+  }
 
   void PrepareRunFolder() {
     try {
