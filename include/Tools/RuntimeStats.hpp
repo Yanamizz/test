@@ -32,6 +32,11 @@ struct LatencyStats {
   LatencyBucket control_calc_ns;
   LatencyBucket render_ns;
   LatencyBucket loop_ns;
+  LatencyBucket capture_to_snapshot_ns;
+  LatencyBucket submit_wait_ns;
+  LatencyBucket submit_prepare_ns;
+  LatencyBucket submit_stage3_preprocess_ns;
+  LatencyBucket submit_async_ns;
   LatencyBucket capture_to_submit_ns;
   LatencyBucket capture_to_result_ns;
   LatencyBucket result_to_control_ns;
@@ -96,33 +101,41 @@ inline void PrintLatencyStats(const LatencyStats &s, const char *tag) {
     return static_cast<double>(bucket.total_ns) /
            static_cast<double>(bucket.samples) / 1e6;
   };
-  auto avg_us = [&](const LatencyBucket &bucket) {
-    if (bucket.samples == 0) {
-      return 0.0;
-    }
-    return static_cast<double>(bucket.total_ns) /
-           static_cast<double>(bucket.samples) / 1e3;
-  };
-
   std::cout << std::fixed << std::setprecision(3);
   std::cout << "[延迟][" << tag << "] 循环帧数=" << s.frames
             << " | 平均毫秒"
             << " 推理=" << avg_ms(s.infer_ns)
-            << " IMU匹配=" << avg_ms(s.imu_match_ns)
-            << " 选框=" << avg_ms(s.select_box_ns)
-            << " 角度=" << avg_ms(s.angle_calc_ns)
-            << " 控制计算=" << avg_ms(s.control_calc_ns)
             << " 渲染=" << avg_ms(s.render_ns)
             << " 循环=" << avg_ms(s.loop_ns)
+            << " 采集到取帧=" << avg_ms(s.capture_to_snapshot_ns)
+            << " stage3原图增强=" << avg_ms(s.submit_stage3_preprocess_ns)
+            << " async提交=" << avg_ms(s.submit_async_ns)
             << " 采集到提交=" << avg_ms(s.capture_to_submit_ns)
             << " 采集到结果=" << avg_ms(s.capture_to_result_ns)
             << " 结果到控制=" << avg_ms(s.result_to_control_ns)
+            << std::endl;
+}
+
+inline void PrintSerialLatencyStats(const LatencyStats &s, const char *tag) {
+  const auto has_serial_samples = s.queue_to_serial_ns.samples > 0 ||
+                                  s.capture_to_serial_ns.samples > 0;
+  if (s.frames == 0 && !has_serial_samples) {
+    return;
+  }
+
+  auto avg_ms = [&](const LatencyBucket &bucket) {
+    if (bucket.samples == 0) {
+      return 0.0;
+    }
+    return static_cast<double>(bucket.total_ns) /
+           static_cast<double>(bucket.samples) / 1e6;
+  };
+
+  std::cout << std::fixed << std::setprecision(3);
+  std::cout << "[延迟][" << tag << "] 发送帧数=" << s.frames
+            << " | 平均毫秒"
             << " 入队到串口发送=" << avg_ms(s.queue_to_serial_ns)
             << " 采集到串口发送=" << avg_ms(s.capture_to_serial_ns)
-            << " | 关键微秒"
-            << " IMU匹配=" << avg_us(s.imu_match_ns)
-            << " 选框=" << avg_us(s.select_box_ns)
-            << " 控制计算=" << avg_us(s.control_calc_ns)
             << std::endl;
 }
 

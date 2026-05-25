@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "ImageRecognize/YoloLightPreprocess.hpp"
+
 #include <opencv2/opencv.hpp>
 
 #include <algorithm>
@@ -32,13 +34,16 @@ struct PreprocessResult {
  */
 class ImagePreprocess {
 public:
-  ImagePreprocess() : inputSize_(DefaultInputSize()) {}
+  ImagePreprocess() : ImagePreprocess(DefaultInputSize()) {}
 
   /**
    * @brief 通过指定输入尺寸构造。
    * @param[in] inputSize  模型期望的输入宽高。
    */
-  explicit ImagePreprocess(cv::Size inputSize) : inputSize_(inputSize) {}
+  explicit ImagePreprocess(cv::Size inputSize,
+                           bool enable_light_preprocess = false)
+      : inputSize_(inputSize),
+        enable_light_preprocess_(enable_light_preprocess) {}
 
   /**
    * @brief 对输入图像执行预处理并写入输出结果（就地复用 out->data 容量）。
@@ -78,6 +83,9 @@ public:
 
     cv::resize(input, resized_,
                cv::Size(out->content_width, out->content_height));
+    if (enable_light_preprocess_) {
+      light_preprocessor_.PreprocessForYolo(resized_, &resized_);
+    }
 
     if (letterboxed_.size() != inputSize_ || letterboxed_.type() != input.type()) {
       letterboxed_ = cv::Mat(inputSize_, input.type());
@@ -129,6 +137,8 @@ private:
   cv::Mat rgbImage_;
   cv::Mat floatImage_;
   cv::Size inputSize_; ///< 模型期望的输入尺寸
+  bool enable_light_preprocess_ = false;
+  YoloLightPreprocessor light_preprocessor_;
 };
 
 inline cv::Size ImagePreprocess::DefaultInputSize() {

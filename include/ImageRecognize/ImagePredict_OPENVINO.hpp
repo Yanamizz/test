@@ -40,12 +40,14 @@ class ImagePredict {
 public:
   ImagePredict() = default;
 
-  explicit ImagePredict(const std::string &model_path) {
-    init_(model_path, "AUTO");
+  explicit ImagePredict(const std::string &model_path,
+                        bool enable_light_preprocess = false) {
+    init_(model_path, "AUTO", enable_light_preprocess);
   }
 
-  ImagePredict(const std::string &model_path, const std::string &device_name) {
-    init_(model_path, device_name);
+  ImagePredict(const std::string &model_path, const std::string &device_name,
+               bool enable_light_preprocess = false) {
+    init_(model_path, device_name, enable_light_preprocess);
   }
 
   PredictResult run(const cv::Mat &origin_image_) {
@@ -127,7 +129,8 @@ private:
 
   static const TunableParams &Params();
 
-  void init_(const std::string &model_path, const std::string &device_name) {
+  void init_(const std::string &model_path, const std::string &device_name,
+             bool enable_light_preprocess) {
     if (model_path.empty()) {
       throw std::runtime_error("Model path is empty.");
     }
@@ -141,7 +144,8 @@ private:
     auto model = loadModel_(abs_input_path);
     validateModelIo_(*model);
     resolveInputSpec_(*model);
-    preprocessor_ = ImageRecognize::ImagePreprocess(cv::Size(width_, height_));
+    preprocessor_ = ImageRecognize::ImagePreprocess(cv::Size(width_, height_),
+                                                    enable_light_preprocess);
     compiled_model_ = compileModel_(model);
     createInferRequest_();
     resolveOutputSpec_(*model);
@@ -717,9 +721,9 @@ inline const ImagePredict::TunableParams &ImagePredict::Params() {
       3, // latency_threads_cap: 低延迟优先，12900H 建议先从 2~4 线程 A/B
       1, // streams_num: OpenVINO 推理流数量（低延迟建议 1）
       32, // pre_merge_top_k: 融合前仅保留高分候选，降低 O(n^2) 开销
-      0.1f,  // score_thresh: 置信度阈值
+      0.5f,  // score_thresh: 置信度阈值
       5,     // min_channel_dim: 原始检测头最少应为 cx,cy,w,h,cls0
-      0.45f, // merge_iou_thresh: 同类高重叠框做融合
+      0.75f, // merge_iou_thresh: 同类高重叠框做融合
       0.35f, // suppress_iou_thresh: 融合后再次抑制重叠框
       1      // max_output_boxes: 最终只保留 1 个框，保证唯一目标
   };

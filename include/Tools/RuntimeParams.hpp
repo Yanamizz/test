@@ -86,7 +86,7 @@ inline const RuntimeParams &Params() {
       0.0f,  // minimum_angle_deg: 控制死区 0 度（不抑制微小偏角）
       10.0f, // max_send_delta_deg: yaw 单次最大发送偏角 10 度
       1.0,   // dt_max_sec: 帧间隔有效上限 1.0 秒
-      10.0f, // pitch_abs_limit: pitch 单次最大发送偏角绝对值 10 度
+      5.0f,  // pitch_abs_limit: pitch 单次最大发送偏角绝对值 10 度
       0.010, // angle_velocity_dt_min_sec: 速度估计最小 dt 10ms
       0.080, // angle_velocity_dt_max_sec: 速度估计最大 dt 80ms
       0.0, // angle_velocity_yaw_abs_limit_deg_per_sec: yaw 角速度限幅（测试设为
@@ -95,17 +95,18 @@ inline const RuntimeParams &Params() {
               // 角速度限幅（保持）
       0.0,    // angle_velocity_yaw_max_accel_deg_per_sec2: yaw
               // 角加速度限幅（测试设为 0）
-      3000.0, // angle_velocity_pitch_max_accel_deg_per_sec2: pitch
-              // 角加速度限幅（保持）
+      3200.0, // angle_velocity_pitch_max_accel_deg_per_sec2: pitch
+              // 角加速度限幅（激进跟手档）
       0.0, // angle_velocity_yaw_cutoff_hz: yaw 角速度低通截止频率（测试设为 0）
-      22.0, // angle_velocity_pitch_cutoff_hz: pitch 角速度低通截止频率（保持）
+      24.0, // angle_velocity_pitch_cutoff_hz: pitch
+            // 角速度低通截止频率（激进跟手档）
       0.0, // angle_velocity_yaw_deadband_deg_per_sec: yaw 角速度死区（测试设为
            // 0）
-      0.0, // angle_velocity_pitch_deadband_deg_per_sec: pitch
-           // 角速度死区（关闭）
+      0.05, // angle_velocity_pitch_deadband_deg_per_sec: pitch
+            // 角速度死区（仅保留极小微抖抑制）
 
       false, // enable_latency_profile: 默认关闭时延统计
-      100,   // latency_print_interval_frames: 每 100 帧打印一次统计
+      700,   // latency_print_interval_frames: 每 100 帧打印一次统计
 
       true,  // enable_scan_mode: 默认开启扫描模式
       true,  // enable_save_no_target_images: 默认不保存无目标图像

@@ -40,6 +40,7 @@ using Tools::LatencyStats;
 using Tools::PixelHeightStats;
 using Tools::PrintLatencyStats;
 using Tools::PrintPixelHeightStats;
+using Tools::PrintSerialLatencyStats;
 
 struct AimbotSendCommand {
   float absolute_pitch = 0.0f;
@@ -679,11 +680,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   bool infer_inflight = false;
   bool has_last_submitted_frame_ts = false;
   cv::Mat inflight_frame;
-  cv::Mat stage3_preprocessed_frame;
   std::chrono::steady_clock::time_point inflight_frame_ts{};
   std::chrono::steady_clock::time_point inflight_infer_start{};
   bool inflight_used_stage3_predictor = false;
-  ImageRecognize::YoloLightPreprocessor stage3_light_preprocessor;
   const double max_infer_fps = Tools::Params().max_infer_fps;
   const auto infer_submit_interval =
       max_infer_fps > 0.0
@@ -718,7 +717,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       if (!stage3_predictor) {
         stage3_predictor = std::make_unique<ImageRecognize::ImagePredict>(
             Tools::Params().stage3_model_path,
-            Tools::Params().openvino_device_name);
+            Tools::Params().openvino_device_name,
+            true);
       }
       active_predictor = stage3_predictor.get();
       using_stage3_predictor = true;
@@ -769,26 +769,39 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         }
       }
 
+      const auto t_submit_wait_start = ProfileNow(enable_latency_profile);
       cv::Mat next_frame;
       std::chrono::steady_clock::time_point next_frame_ts{};
       if (!SnapshotLatestFrame(has_last_submitted_frame_ts, inflight_frame_ts,
                                &next_frame, &next_frame_ts)) {
         continue;
       }
+      const auto t_snapshot_done = ProfileNow(enable_latency_profile);
+      AddLatencySample(enable_latency_profile, latency_total, latency_window,
+                       &LatencyStats::submit_wait_ns, t_submit_wait_start,
+                       t_snapshot_done);
+      AddLatencySample(enable_latency_profile, latency_total, latency_window,
+                       &LatencyStats::capture_to_snapshot_ns, next_frame_ts,
+                       t_snapshot_done);
 
       try {
-        inflight_infer_start = ProfileNow(enable_latency_profile);
+        const auto t_submit_prepare_start = ProfileNow(enable_latency_profile);
+        const bool submit_to_stage3 = using_stage3_predictor;
+        cv::Mat infer_frame = next_frame;
+        const auto t_submit_prepare_end = ProfileNow(enable_latency_profile);
+        AddLatencySample(enable_latency_profile, latency_total, latency_window,
+                         &LatencyStats::submit_prepare_ns,
+                         t_submit_prepare_start, t_submit_prepare_end);
+        const auto t_async_submit_start = ProfileNow(enable_latency_profile);
+        active_predictor->startAsync(infer_frame);
+        const auto t_async_submit_end = ProfileNow(enable_latency_profile);
+        AddLatencySample(enable_latency_profile, latency_total, latency_window,
+                         &LatencyStats::submit_async_ns, t_async_submit_start,
+                         t_async_submit_end);
+        inflight_infer_start = t_async_submit_end;
         AddLatencySample(enable_latency_profile, latency_total, latency_window,
                          &LatencyStats::capture_to_submit_ns, next_frame_ts,
                          inflight_infer_start);
-        const bool submit_to_stage3 = using_stage3_predictor;
-        cv::Mat infer_frame = next_frame;
-        if (submit_to_stage3) {
-          stage3_light_preprocessor.PreprocessForYolo(
-              next_frame, &stage3_preprocessed_frame);
-          infer_frame = stage3_preprocessed_frame;
-        }
-        active_predictor->startAsync(infer_frame);
         inflight_frame = std::move(infer_frame);
         inflight_frame_ts = next_frame_ts;
         inflight_used_stage3_predictor = submit_to_stage3;
@@ -1049,10 +1062,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       }
     }
 
-    // 当检测框数量不是 1 个时，按间隔保存画框前图像，覆盖无目标/多目标异常样本。
+    // 当检测框数量不是 1
+    // 个时，按间隔保存画框前图像，覆盖无目标/多目标异常样本。
     if (enable_save_no_target_images && no_target_saver) {
       if (inflight_used_stage3_predictor) {
-        no_target_saver->UpdateClahe(inflight_frame, result.boxes.size() != 1);
+        no_target_saver->UpdateStage3Raw(inflight_frame,
+                                         result.boxes.size() != 1);
       } else {
         raw_frame = inflight_frame.clone();
         no_target_saver->Update(raw_frame, result.boxes.size() != 1);
@@ -1107,7 +1122,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       PrintLatencyStats(latency_window, "窗口");
       {
         std::lock_guard<std::mutex> lk(g_send_latency_mutex);
-        PrintLatencyStats(g_send_latency_window, "窗口-串口链路");
+        PrintSerialLatencyStats(g_send_latency_window, "窗口-串口链路");
         g_send_latency_window = LatencyStats{};
       }
       latency_window = LatencyStats{};
@@ -1118,8 +1133,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     {
       std::lock_guard<std::mutex> lk(g_send_latency_mutex);
       if (g_send_latency_window.frames > 0)
-        PrintLatencyStats(g_send_latency_window, "窗口尾-串口链路");
-      PrintLatencyStats(g_send_latency_total, "总计-串口链路");
+        PrintSerialLatencyStats(g_send_latency_window, "窗口尾-串口链路");
+      PrintSerialLatencyStats(g_send_latency_total, "总计-串口链路");
     }
     if (latency_window.frames > 0)
       PrintLatencyStats(latency_window, "窗口尾");

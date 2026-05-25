@@ -42,9 +42,9 @@ class SaveImageOnNoTarget {
     WriteImage(file_path, frame);
   }
 
-  // 保存实际送入 stage3 推理的 CLAHE 图像。
-  void UpdateClahe(const cv::Mat &clahe_frame, bool should_save) {
-    if (clahe_frame.empty()) return;
+  // 保存 stage3 的原始输入帧；光照增强现在在模型输入尺寸上执行。
+  void UpdateStage3Raw(const cv::Mat &frame, bool should_save) {
+    if (frame.empty()) return;
     if (run_folder_.empty()) return;
 
     if (!should_save) {
@@ -56,7 +56,7 @@ class SaveImageOnNoTarget {
     if (triggered_frame_count_ % save_interval_frames_ != 0) return;
 
     const std::string base_name = BuildImageName();
-    WriteImage(run_folder_ / ("clahe_" + base_name), clahe_frame);
+    WriteImage(run_folder_ / ("stage3_raw_" + base_name), frame);
   }
 
   const std::filesystem::path &RunFolder() const { return run_folder_; }

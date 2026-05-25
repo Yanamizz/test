@@ -59,9 +59,6 @@ inline void SerialSend(serial::Serial &serial_port, float absolute_pitch,
   pitch_velocity *= kDegToRad;
   yaw_velocity *= kDegToRad;
 
-  std::cout << "sendyaw:"
-            << "" << yaw_velocity << " ,sendpitch:" << pitch_velocity
-            << std::endl;
   SerialTask::SendAimbotFrame(
       serial_port, pitch_relative_angle, yaw_relative_angle, pitch_offset,
       yaw_offset, pitch_velocity, yaw_velocity, AimbotState, AimbotTarget);
