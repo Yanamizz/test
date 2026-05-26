@@ -189,8 +189,8 @@ private:
          61.626f}, // stage12 far_pixel（px）
         {0.05904f, // stage3 near_calibration_target_height（米）
          77.834f,  // stage3 near_pixel（px）
-         0.06650f, // stage3 far_calibration_target_height（米）
-         61.014f}, // stage3 far_pixel（px）
+         0.05925f, // stage3 far_calibration_target_height（米）
+         53.838f}, // stage3 far_pixel（px）
         0.25f, // distance_filter_alpha: 一阶滤波系数，越大响应越快
         0.5f,  // filter_reset_ratio: 距离突变超过该比例时重置滤波
         CalibrationStage::Stage12 // active_stage: 当前使用的标定阶段

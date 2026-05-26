@@ -75,14 +75,11 @@ inline void SendAimbotFrame(serial::Serial &serial_port,
   }
 
   AimbotFrame_SCM_t aimbot_frame{};
-  const uint8_t normalized_aimbot_target =
-      (AimbotTarget >= kAimbotTargetActiveThreshold)
-          ? kAimbotTargetActiveThreshold
-          : kAimbotTargetMin;
   aimbot_frame._SOF = 0x55;               // 包头
   aimbot_frame.ID = 0x02;                 // 发送 ID
   aimbot_frame.AimbotState = AimbotState; ///< 0x00 无目标，0x01 有目标
-  aimbot_frame.AimbotTarget = 0x01;       ///< 0x01开激光，0x00关激光
+  aimbot_frame.AimbotTarget =
+      ToWireAimbotTarget(AimbotTarget);   ///< 0x01开激光，0x00关激光
   aimbot_frame.PitchRelativeAngle = pitch_relative_angle;
   aimbot_frame.YawRelativeAngle = yaw_relative_angle;
   aimbot_frame.PitchOffset = pitch_offset;

@@ -50,7 +50,8 @@ int main(int argc, char **argv) {
                                            params.device_name);
     ImageRecognize::PredictResult result = predictor.run(image);
 
-    ImageRecognize::ImageShow::ShowNow(image, result, 0.0);
+    ImageRecognize::ImageShow::DrawNow(image, result, 0.0);
+    ImageRecognize::ImageShow::ShowFrame(image);
     while (!ImageRecognize::ImageShow::WaitForExit()) {
     }
   } catch (const std::exception &e) {

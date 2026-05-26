@@ -9,3 +9,4 @@
 #include "ImageRecognize/OutputDataProcess.hpp"
 #include "ImageRecognize/TargetAssociation.hpp"
 #include "ImageRecognize/TargetClassFilter.hpp"
+#include "ImageRecognize/TargetTrackPipeline.hpp"

@@ -22,6 +22,8 @@
 #include <GxIAPI.h>
 #include <GxPixelFormat.h>
 
+#include "Tools/CameraRoiRuntime.hpp"
+
 namespace CameraTask {
 
 class GalaxyCamera {
@@ -42,6 +44,15 @@ class GalaxyCamera {
   void setExposureTime(double us) { exposure_time_us = us; }
   void setGainAuto(bool enable) { enable_auto_gain = enable; }
   void setGain(double db) { gain_db = db; }
+  void setRoiEnabled(bool enable) { enable_roi_ = enable; }
+  void setRoi(int width, int height, int offset_x = 0, int offset_y = 0) {
+    roi_width_ = width;
+    roi_height_ = height;
+    roi_offset_x_ = offset_x;
+    roi_offset_y_ = offset_y;
+  }
+  void setRoiKeepCentered(bool enable) { roi_keep_centered_ = enable; }
+  bool isRoiEnabled() const { return enable_roi_; }
 
   double getExposureTime() const { return exposure_time_us; }
 
@@ -97,12 +108,13 @@ class GalaxyCamera {
       logLastError("GXInitLib");
       return false;
     }
+    lib_initialized_ = true;
 
     uint32_t device_number = 0;
     status = GXUpdateAllDeviceList(&device_number, 1000);
     if (status != GX_STATUS_SUCCESS || device_number == 0) {
       if (status != GX_STATUS_SUCCESS) logLastError("GXUpdateAllDeviceList");
-      GXCloseLib();
+      close();
       return false;
     }
 
@@ -110,7 +122,7 @@ class GalaxyCamera {
     status = GXGetDeviceInfo(1, &device_info);
     if (status != GX_STATUS_SUCCESS) {
       logLastError("GXGetDeviceInfo");
-      GXCloseLib();
+      close();
       return false;
     }
 
@@ -122,7 +134,7 @@ class GalaxyCamera {
       status = GXGetDeviceIPInfo(1, &device_ip_info);
       if (status != GX_STATUS_SUCCESS) {
         logLastError("GXGetDeviceIPInfo");
-        GXCloseLib();
+        close();
         return false;
       }
       open_param.openMode = GX_OPEN_MAC;
@@ -137,8 +149,7 @@ class GalaxyCamera {
     status = GXOpenDevice(&open_param, &device_handle_);
     if (status != GX_STATUS_SUCCESS) {
       logLastError("GXOpenDevice");
-      GXCloseLib();
-      device_handle_ = nullptr;
+      close();
       return false;
     }
 
@@ -158,7 +169,6 @@ class GalaxyCamera {
       }
     }
 
-    GX_DS_HANDLE ds_handle = nullptr;
     uint32_t ds_num = 0;
     status = GXGetDataStreamNumFromDev(device_handle_, &ds_num);
     if (status != GX_STATUS_SUCCESS || ds_num < 1) {
@@ -166,27 +176,20 @@ class GalaxyCamera {
       close();
       return false;
     }
-    status = GXGetDataStreamHandleFromDev(device_handle_, 1, &ds_handle);
+    status = GXGetDataStreamHandleFromDev(device_handle_, 1, &ds_handle_);
     if (status != GX_STATUS_SUCCESS) {
       logLastError("GXGetDataStreamHandleFromDev");
       close();
       return false;
     }
-
-    uint32_t payload_size = 0;
-    status = GXGetPayLoadSize(ds_handle, &payload_size);
-    if (status != GX_STATUS_SUCCESS || payload_size == 0) {
-      if (status != GX_STATUS_SUCCESS) logLastError("GXGetPayLoadSize");
+    if (!RefreshPayloadBuffer()) {
       close();
       return false;
     }
-
-    image_buffer_.reset(new uint8_t[static_cast<size_t>(payload_size)]);
-    std::memset(&frame_data_, 0, sizeof(frame_data_));
-    frame_data_.pImgBuf = image_buffer_.get();
-    frame_data_.nImgSize = static_cast<int32_t>(payload_size);
+    CacheFullFrameGeometry();
 
     opened_ = true;
+    Tools::SetCameraRoiRuntime(false, 0, 0);
     return true;
   }
 
@@ -194,6 +197,9 @@ class GalaxyCamera {
     if (!opened_ || started_) return opened_;
 
     applyCameraParams();
+    if (!RefreshPayloadBuffer()) {
+      return false;
+    }
     GX_STATUS status = GXSetCommandValue(device_handle_, "AcquisitionStart");
     if (status != GX_STATUS_SUCCESS) {
       logLastError("GXSetCommandValue(AcquisitionStart)");
@@ -216,15 +222,21 @@ class GalaxyCamera {
   }
 
   void close() {
-    if (!opened_) return;
     stop();
     if (device_handle_) {
       GXCloseDevice(device_handle_);
       device_handle_ = nullptr;
     }
-    GXCloseLib();
+    if (lib_initialized_) {
+      GXCloseLib();
+      lib_initialized_ = false;
+    }
     image_buffer_.reset();
+    ds_handle_ = nullptr;
+    payload_size_bytes_ = 0;
     opened_ = false;
+    started_ = false;
+    Tools::SetCameraRoiRuntime(false, 0, 0);
   }
 
   cv::Mat grab(int timeout_ms = 1000) {
@@ -255,7 +267,31 @@ class GalaxyCamera {
   }
 
  private:
-  cv::Mat convertToMat() {
+  bool RefreshPayloadBuffer() {
+    if (ds_handle_ == nullptr) {
+      return false;
+    }
+
+    uint32_t payload_size = 0;
+    const GX_STATUS status = GXGetPayLoadSize(ds_handle_, &payload_size);
+    if (status != GX_STATUS_SUCCESS || payload_size == 0) {
+      if (status != GX_STATUS_SUCCESS) {
+        logLastError("GXGetPayLoadSize");
+      }
+      return false;
+    }
+
+    if (!image_buffer_ || payload_size_bytes_ != payload_size) {
+      image_buffer_.reset(new uint8_t[static_cast<size_t>(payload_size)]);
+      payload_size_bytes_ = payload_size;
+    }
+    std::memset(&frame_data_, 0, sizeof(frame_data_));
+    frame_data_.pImgBuf = image_buffer_.get();
+    frame_data_.nImgSize = static_cast<int32_t>(payload_size);
+    return true;
+  }
+
+	  cv::Mat convertToMat() {
     const int width = frame_data_.nWidth;
     const int height = frame_data_.nHeight;
     if (width <= 0 || height <= 0 || frame_data_.pImgBuf == nullptr) return {};
@@ -405,6 +441,188 @@ class GalaxyCamera {
         if (status != GX_STATUS_SUCCESS) logLastError("GXSetFloatValue(Gain)");
       }
     }
+
+    if (enable_roi_) {
+      applyRoiIfEnabled();
+    } else {
+      RestoreFullFrame();
+    }
+  }
+
+  static int64_t ClampAlignInt(int64_t value, const GX_INT_VALUE &range) {
+    int64_t v = std::clamp(value, range.nMin, range.nMax);
+    if (range.nInc > 0) {
+      v = range.nMin + ((v - range.nMin) / range.nInc) * range.nInc;
+      v = std::clamp(v, range.nMin, range.nMax);
+    }
+    return v;
+  }
+
+  bool QueryIntNode(const char *name, GX_INT_VALUE *out) {
+    const GX_STATUS status = GXGetIntValue(device_handle_, name, out);
+    if (status != GX_STATUS_SUCCESS) {
+      logLastError(name);
+      return false;
+    }
+    return true;
+  }
+
+  void CacheFullFrameGeometry() {
+    int64_t offset_x_min = 0;
+    int64_t offset_y_min = 0;
+    if (!ResetOffsetsToMin(&offset_x_min, &offset_y_min)) {
+      return;
+    }
+
+    GX_INT_VALUE width_range{};
+    GX_INT_VALUE height_range{};
+    if (!QueryIntNode("Width", &width_range) ||
+        !QueryIntNode("Height", &height_range)) {
+      return;
+    }
+
+    full_frame_width_ = width_range.nMax;
+    full_frame_height_ = height_range.nMax;
+    full_frame_offset_x_min_ = offset_x_min;
+    full_frame_offset_y_min_ = offset_y_min;
+  }
+
+  bool ResetOffsetsToMin(int64_t *offset_x_min = nullptr,
+                         int64_t *offset_y_min = nullptr) {
+    GX_INT_VALUE offset_x_range{};
+    GX_INT_VALUE offset_y_range{};
+    if (!QueryIntNode("OffsetX", &offset_x_range) ||
+        !QueryIntNode("OffsetY", &offset_y_range)) {
+      return false;
+    }
+
+    GX_STATUS status =
+        GXSetIntValue(device_handle_, "OffsetX", offset_x_range.nMin);
+    if (status != GX_STATUS_SUCCESS) {
+      logLastError("GXSetIntValue(OffsetX@min)");
+      return false;
+    }
+    status = GXSetIntValue(device_handle_, "OffsetY", offset_y_range.nMin);
+    if (status != GX_STATUS_SUCCESS) {
+      logLastError("GXSetIntValue(OffsetY@min)");
+      return false;
+    }
+
+    if (offset_x_min != nullptr) {
+      *offset_x_min = offset_x_range.nMin;
+    }
+    if (offset_y_min != nullptr) {
+      *offset_y_min = offset_y_range.nMin;
+    }
+    return true;
+  }
+
+  void RestoreFullFrame() {
+    if (!ResetOffsetsToMin()) {
+      Tools::SetCameraRoiRuntime(false, 0, 0);
+      return;
+    }
+
+    if (full_frame_width_ <= 0 || full_frame_height_ <= 0) {
+      CacheFullFrameGeometry();
+    }
+    if (full_frame_width_ <= 0 || full_frame_height_ <= 0) {
+      std::cerr << "[GalaxyCamera] full-frame geometry unavailable, skip restore."
+                << std::endl;
+      Tools::SetCameraRoiRuntime(false, 0, 0);
+      return;
+    }
+
+    GX_STATUS status = GXSetIntValue(device_handle_, "Width", full_frame_width_);
+    if (status != GX_STATUS_SUCCESS) {
+      logLastError("GXSetIntValue(Width@max)");
+    }
+    status = GXSetIntValue(device_handle_, "Height", full_frame_height_);
+    if (status != GX_STATUS_SUCCESS) {
+      logLastError("GXSetIntValue(Height@max)");
+    }
+    status = GXSetIntValue(device_handle_, "OffsetX", full_frame_offset_x_min_);
+    if (status != GX_STATUS_SUCCESS) {
+      logLastError("GXSetIntValue(OffsetX@restore)");
+    }
+    status = GXSetIntValue(device_handle_, "OffsetY", full_frame_offset_y_min_);
+    if (status != GX_STATUS_SUCCESS) {
+      logLastError("GXSetIntValue(OffsetY@restore)");
+    }
+    std::cout << "[GalaxyCamera] ROI disabled: width=" << full_frame_width_
+              << " height=" << full_frame_height_
+              << " offset_x=" << full_frame_offset_x_min_
+              << " offset_y=" << full_frame_offset_y_min_ << std::endl;
+    Tools::SetCameraRoiRuntime(false, 0, 0);
+  }
+
+  void applyRoiIfEnabled() {
+    GX_INT_VALUE width_range{};
+    GX_INT_VALUE height_range{};
+    if (!ResetOffsetsToMin() ||
+        !QueryIntNode("Width", &width_range) ||
+        !QueryIntNode("Height", &height_range)) {
+      std::cerr << "[GalaxyCamera] ROI nodes unavailable, skip ROI config." << std::endl;
+      return;
+    }
+
+    int64_t width = ClampAlignInt(static_cast<int64_t>(std::max(1, roi_width_)), width_range);
+    int64_t height = ClampAlignInt(static_cast<int64_t>(std::max(1, roi_height_)), height_range);
+    int64_t offset_x = static_cast<int64_t>(std::max(0, roi_offset_x_));
+    int64_t offset_y = static_cast<int64_t>(std::max(0, roi_offset_y_));
+
+    if ((full_frame_width_ <= 0 || full_frame_height_ <= 0) &&
+        roi_keep_centered_) {
+      CacheFullFrameGeometry();
+    }
+    GX_STATUS status = GXSetIntValue(device_handle_, "Width", width);
+    if (status != GX_STATUS_SUCCESS) logLastError("GXSetIntValue(Width)");
+    status = GXSetIntValue(device_handle_, "Height", height);
+    if (status != GX_STATUS_SUCCESS) logLastError("GXSetIntValue(Height)");
+
+    GX_INT_VALUE offset_x_range{};
+    GX_INT_VALUE offset_y_range{};
+    if (!QueryIntNode("OffsetX", &offset_x_range) ||
+        !QueryIntNode("OffsetY", &offset_y_range)) {
+      std::cerr << "[GalaxyCamera] ROI offset nodes unavailable after resize, skip ROI offset config."
+                << std::endl;
+      Tools::SetCameraRoiRuntime(true, 0, 0);
+      return;
+    }
+
+    if (roi_keep_centered_ && full_frame_width_ > 0 && full_frame_height_ > 0) {
+      const int64_t centered_x =
+          full_frame_offset_x_min_ + ((full_frame_width_ - width) / 2);
+      const int64_t centered_y =
+          full_frame_offset_y_min_ + ((full_frame_height_ - height) / 2);
+      offset_x = centered_x;
+      offset_y = centered_y;
+    }
+
+    offset_x = ClampAlignInt(offset_x, offset_x_range);
+    offset_y = ClampAlignInt(offset_y, offset_y_range);
+
+    // 使用 full-frame 缓存做边界限制，避免误用 Width/Height 当前节点的新上限。
+    const int64_t full_frame_max_x =
+        full_frame_offset_x_min_ + std::max<int64_t>(0, full_frame_width_ - width);
+    const int64_t full_frame_max_y =
+        full_frame_offset_y_min_ + std::max<int64_t>(0, full_frame_height_ - height);
+    offset_x = std::clamp(offset_x, full_frame_offset_x_min_, full_frame_max_x);
+    offset_y = std::clamp(offset_y, full_frame_offset_y_min_, full_frame_max_y);
+    offset_x = ClampAlignInt(offset_x, offset_x_range);
+    offset_y = ClampAlignInt(offset_y, offset_y_range);
+
+    status = GXSetIntValue(device_handle_, "OffsetX", offset_x);
+    if (status != GX_STATUS_SUCCESS) logLastError("GXSetIntValue(OffsetX)");
+    status = GXSetIntValue(device_handle_, "OffsetY", offset_y);
+    if (status != GX_STATUS_SUCCESS) logLastError("GXSetIntValue(OffsetY)");
+
+    std::cout << "[GalaxyCamera] ROI enabled: width=" << width
+              << " height=" << height
+              << " offset_x=" << offset_x
+              << " offset_y=" << offset_y << std::endl;
+    Tools::SetCameraRoiRuntime(true, static_cast<int>(offset_x),
+                               static_cast<int>(offset_y));
   }
 
   double normalizeExposureTime(double us) const {
@@ -468,12 +686,19 @@ class GalaxyCamera {
   std::vector<uint8_t> rgb_buffer_;
 
   GX_DEV_HANDLE device_handle_ = nullptr;
+  GX_DS_HANDLE ds_handle_ = nullptr;
   GX_FRAME_DATA frame_data_{};
   std::string index_str_;
+  bool lib_initialized_ = false;
   bool opened_ = false;
   bool started_ = false;
   int64_t color_filter_ = GX_COLOR_FILTER_NONE;
   int consecutive_timeouts_ = 0;  ///< 连续超时帧计数，用于触发自动重启
+  uint32_t payload_size_bytes_ = 0;
+  int64_t full_frame_width_ = 0;
+  int64_t full_frame_height_ = 0;
+  int64_t full_frame_offset_x_min_ = 0;
+  int64_t full_frame_offset_y_min_ = 0;
 
  public:
   // ===== 手动配置区（统一放在文件末尾）=====
@@ -490,6 +715,12 @@ class GalaxyCamera {
   bool enable_undistort_ = false;          // 是否启用去畸变（默认关闭以降低延迟）
   std::string wb_channel_name_ = "Red";    // 白平衡通道名，可改为 "Green" / "Blue"
   int wb_channel_index_ = 0;               // 白平衡通道索引，通道名为空时使用
+  bool enable_roi_ = false;                // 是否开启相机侧 ROI（裁剪画幅）
+  bool roi_keep_centered_ = true;          // 是否保持中心点不动进行 ROI 裁剪
+  int roi_width_ = 1280;                   // ROI 宽（像素）
+  int roi_height_ = 720;                   // ROI 高（像素）
+  int roi_offset_x_ = 320;                 // ROI 左上角 X 偏移（像素）
+  int roi_offset_y_ = 180;                 // ROI 左上角 Y 偏移（像素）
 };
 
 }  // namespace CameraTask

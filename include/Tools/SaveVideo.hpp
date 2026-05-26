@@ -19,8 +19,11 @@ namespace Tools {
 class SaveVideoOnTarget {
  public:
   explicit SaveVideoOnTarget(int fps = 30,
-                             const std::string &base_dir = "target_videos")
-      : fps_(std::max(1, fps)), base_dir_(base_dir) {
+                             const std::string &base_dir = "target_videos",
+                             cv::Size output_size = cv::Size())
+      : fps_(std::max(1, fps)),
+        base_dir_(base_dir),
+        output_size_(output_size) {
     PrepareBaseFolder();
   }
 
@@ -39,15 +42,20 @@ class SaveVideoOnTarget {
       return;
     }
 
-    if (!writer_.isOpened() || frame.size() != current_size_) {
+    PrepareOutputFrame(frame);
+    if (prepared_frame_.empty()) {
+      return;
+    }
+
+    if (!writer_.isOpened() || prepared_frame_.size() != current_size_) {
       StopCurrentSegment();
-      if (!StartNewSegment(frame.size())) {
+      if (!StartNewSegment(prepared_frame_.size())) {
         return;
       }
     }
 
     try {
-      writer_.write(frame);
+      writer_.write(prepared_frame_);
     } catch (const std::exception &e) {
       std::cerr << "[SaveVideo] write exception: " << e.what() << std::endl;
       StopCurrentSegment();
@@ -61,6 +69,8 @@ class SaveVideoOnTarget {
   cv::VideoWriter writer_;
   std::filesystem::path base_dir_;
   std::filesystem::path run_folder_;
+  cv::Size output_size_{};
+  cv::Mat prepared_frame_;
 
   void PrepareBaseFolder() {
     try {
@@ -122,13 +132,25 @@ class SaveVideoOnTarget {
     }
     current_size_ = cv::Size{};
   }
+
+  void PrepareOutputFrame(const cv::Mat &frame) {
+    if (output_size_.width > 0 && output_size_.height > 0 &&
+        frame.size() != output_size_) {
+      cv::resize(frame, prepared_frame_, output_size_);
+      return;
+    }
+    prepared_frame_ = frame;
+  }
 };
 
 class SaveVideoFullRun {
  public:
   explicit SaveVideoFullRun(int fps = 30,
-                            const std::string &base_dir = "full_run_videos")
-      : fps_(std::max(1, fps)), base_dir_(base_dir) {
+                            const std::string &base_dir = "full_run_videos",
+                            cv::Size output_size = cv::Size())
+      : fps_(std::max(1, fps)),
+        base_dir_(base_dir),
+        output_size_(output_size) {
     PrepareBaseFolder();
   }
 
@@ -139,15 +161,20 @@ class SaveVideoFullRun {
       return;
     }
 
-    if (!writer_.isOpened() || frame.size() != current_size_) {
+    PrepareOutputFrame(frame);
+    if (prepared_frame_.empty()) {
+      return;
+    }
+
+    if (!writer_.isOpened() || prepared_frame_.size() != current_size_) {
       Stop();
-      if (!Start(frame.size())) {
+      if (!Start(prepared_frame_.size())) {
         return;
       }
     }
 
     try {
-      writer_.write(frame);
+      writer_.write(prepared_frame_);
     } catch (const std::exception &e) {
       std::cerr << "[SaveVideoFullRun] write exception: " << e.what()
                 << std::endl;
@@ -161,7 +188,9 @@ class SaveVideoFullRun {
   cv::Size current_size_{};
   cv::VideoWriter writer_;
   std::filesystem::path base_dir_;
-  std::filesystem::path run_folder_;
+  std::string file_prefix_;
+  cv::Size output_size_{};
+  cv::Mat prepared_frame_;
 
   void PrepareBaseFolder() {
     try {
@@ -178,32 +207,32 @@ class SaveVideoFullRun {
 
       std::ostringstream folder_name;
       folder_name << "full_run_" << std::put_time(&tm_buf, "%Y%m%d_%H%M%S");
-      run_folder_ = base_dir_ / folder_name.str();
-      std::filesystem::create_directories(run_folder_);
+      file_prefix_ = folder_name.str();
 
-      std::cout << "[SaveVideoFullRun] run folder: " << run_folder_
+      std::cout << "[SaveVideoFullRun] output dir: " << base_dir_
                 << std::endl;
     } catch (const std::exception &e) {
       std::cerr << "[SaveVideoFullRun] create folder failed: " << e.what()
                 << std::endl;
-      run_folder_.clear();
+      file_prefix_.clear();
       base_dir_.clear();
     }
   }
 
   std::string BuildFileName() {
     std::ostringstream oss;
-    oss << run_folder_.filename().string() << "_" << std::setw(3)
+    oss << file_prefix_ << "_" << std::setw(3)
         << std::setfill('0') << file_index_++ << ".avi";
     return oss.str();
   }
 
   bool Start(const cv::Size &size) {
-    if (run_folder_.empty() || size.width <= 0 || size.height <= 0) {
+    if (base_dir_.empty() || file_prefix_.empty() || size.width <= 0 ||
+        size.height <= 0) {
       return false;
     }
 
-    const auto file_path = run_folder_ / BuildFileName();
+    const auto file_path = base_dir_ / BuildFileName();
     const int kFourCC = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
     if (!writer_.open(file_path.string(), kFourCC, fps_, size, true)) {
       std::cerr << "[SaveVideoFullRun] open writer failed: " << file_path
@@ -222,6 +251,15 @@ class SaveVideoFullRun {
       std::cout << "[SaveVideoFullRun] stop" << std::endl;
     }
     current_size_ = cv::Size{};
+  }
+
+  void PrepareOutputFrame(const cv::Mat &frame) {
+    if (output_size_.width > 0 && output_size_.height > 0 &&
+        frame.size() != output_size_) {
+      cv::resize(frame, prepared_frame_, output_size_);
+      return;
+    }
+    prepared_frame_ = frame;
   }
 };
 

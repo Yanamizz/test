@@ -18,7 +18,9 @@
 #include "ImageRecognize/ImagePredictCommandLine.hpp"
 #include "ImageRecognize/ImagePredict_OPENVINO.hpp"
 #include "ImageRecognize/ImageShow.hpp"
+#include "ImageRecognize/StagePredictorController.hpp"
 #include "ImageRecognize/TargetTracking.hpp"
+#include "ImageRecognize/TargetTrackPipeline.hpp"
 #include "ImageRecognize/YoloLightPreprocess.hpp"
 #include "NetworkTask/NetworkTask.hpp"
 #include "SerialTask/SerialTask.hpp"
@@ -27,11 +29,14 @@
 #include "Tools/CpuAffinity.hpp"
 #include "Tools/FpsCounter.hpp"
 #include "Tools/LaserAngleCalculate.hpp"
+#include "Tools/LostTargetRecoveryController.hpp"
 #include "Tools/RuntimeParams.hpp"
 #include "Tools/RuntimeStats.hpp"
 #include "Tools/SaveImage.hpp"
 #include "Tools/SaveVideo.hpp"
 #include "Tools/ScanController.hpp"
+#include "Tools/ScanSendController.hpp"
+#include "Tools/StageRuntimeProfile.hpp"
 #include "Tools/VideoInput.hpp"
 
 namespace {
@@ -86,6 +91,8 @@ static std::mutex g_serial_mutex;
 static std::mutex g_send_latency_mutex;
 static Tools::LatencyStats g_send_latency_total;
 static Tools::LatencyStats g_send_latency_window;
+static std::atomic<bool> g_stage3_roi_mode{false};
+static std::atomic<bool> g_scan_stage3_mode{false};
 
 namespace {
 static void RequestStop() {
@@ -134,14 +141,7 @@ static void StartScanMode() {
 }
 
 static void DecrementAimbotTargetSaturated() {
-  uint8_t old_value = g_aimbot_target.load(std::memory_order_acquire);
-  while (old_value > SerialTask::kAimbotTargetMin) {
-    if (g_aimbot_target.compare_exchange_weak(
-            old_value, static_cast<uint8_t>(old_value - 1),
-            std::memory_order_acq_rel, std::memory_order_acquire)) {
-      return;
-    }
-  }
+  SerialTask::SaturatingDecrementAimbotTarget(g_aimbot_target);
 }
 
 static double MaxSerialAimbotFrameHz() {
@@ -151,9 +151,25 @@ static double MaxSerialAimbotFrameHz() {
          (kBitsPerByteOnSerial * sizeof(AimbotFrame_SCM_t));
 }
 
-static double EffectiveScanSendHz() {
-  return std::clamp(Tools::Params().scan_send_hz, 1.0,
-                    MaxSerialAimbotFrameHz());
+static Tools::StageRuntimeProfile StageProfile(Tools::RuntimeStage stage) {
+  return Tools::MakeStageRuntimeProfile(stage, MaxSerialAimbotFrameHz());
+}
+
+static Tools::StageRuntimeProfile StageProfile(bool stage3_mode) {
+  return StageProfile(Tools::RuntimeStageFromBool(stage3_mode));
+}
+
+static double EffectiveScanSendHz(bool stage3_mode) {
+  return StageProfile(stage3_mode).scan.effective_send_hz;
+}
+
+static int EffectiveScanOriginHoldMs(bool stage3_mode) {
+  return StageProfile(stage3_mode).scan.origin_hold_ms;
+}
+
+static Tools::ScanController::Config EffectiveScanControllerConfig(
+    bool stage3_mode) {
+  return StageProfile(stage3_mode).scan.controller_config;
 }
 
 static std::chrono::milliseconds SerialReconnectInterval() {
@@ -267,13 +283,39 @@ static void PrintPredictSettings(
             << (enable_calibration_sliders ? "true" : "false") << std::endl;
   std::cout << "[扫描模式] 启用: " << (enable_scan_mode ? "true" : "false")
             << std::endl;
-  const double effective_scan_send_hz = EffectiveScanSendHz();
-  std::cout << "[扫描模式] 发送频率: " << effective_scan_send_hz;
-  if (effective_scan_send_hz < Tools::Params().scan_send_hz) {
-    std::cout << "（配置值 " << Tools::Params().scan_send_hz
+  const auto stage12_profile = StageProfile(Tools::RuntimeStage::Stage12);
+  std::cout << "[扫描模式] " << stage12_profile.DisplayName() << " 发送频率: "
+            << stage12_profile.scan.effective_send_hz;
+  if (stage12_profile.scan.effective_send_hz <
+      stage12_profile.scan.configured_send_hz) {
+    std::cout << "（配置值 " << stage12_profile.scan.configured_send_hz
               << "，已受串口带宽限制）";
   }
-  std::cout << " Hz" << std::endl;
+  std::cout << " Hz，lambda_percent="
+            << stage12_profile.scan.pitch_wavelength_percent
+            << "，A_percent="
+            << stage12_profile.scan.pitch_amplitude_percent
+            << std::endl;
+  const auto stage3_profile = StageProfile(Tools::RuntimeStage::Stage3);
+  std::cout << "[扫描模式] " << stage3_profile.DisplayName() << " 发送频率: "
+            << stage3_profile.scan.effective_send_hz;
+  if (stage3_profile.scan.effective_send_hz <
+      stage3_profile.scan.configured_send_hz) {
+    std::cout << "（配置值 " << stage3_profile.scan.configured_send_hz
+              << "，已受串口带宽限制）";
+  }
+  std::cout << " Hz，lambda_percent="
+            << stage3_profile.scan.pitch_wavelength_percent
+            << "，A_percent="
+            << stage3_profile.scan.pitch_amplitude_percent
+            << std::endl;
+  std::cout << "[扫描模式] " << stage3_profile.DisplayName() << " 丢失续行: "
+            << stage3_profile.lost_target_coast.duration_ms
+            << " ms，yaw_speed="
+            << stage3_profile.lost_target_coast.yaw_speed_deg_per_sec
+            << " deg/s，pitch_speed="
+            << stage3_profile.lost_target_coast.pitch_speed_deg_per_sec
+            << " deg/s" << std::endl;
   std::cout << "[异常图片保存] 启用: "
             << (enable_save_no_target_images ? "true" : "false") << std::endl;
   std::cout << "[目标视频保存] 启用: "
@@ -359,8 +401,7 @@ NormalizeStage3PredictResult(ImageRecognize::PredictResult *result) {
 static void UpdateAerialRobotStageAndSwitchFlag(
     bool has_predict_result, const ImageRecognize::PredictResult &result,
     double stage_dt, ImageRecognize::AerialRobotLaserLockJudge *stage_judge,
-    bool *pending_stage3_switch,
-    const std::chrono::milliseconds &stage3_switch_target_lost_delay) {
+    ImageRecognize::StagePredictorController *stage_predictor_controller) {
   if (!has_predict_result ||
       g_aerial_robot_stage.load(std::memory_order_acquire) >=
           ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
@@ -378,10 +419,7 @@ static void UpdateAerialRobotStageAndSwitchFlag(
   if (stage >= ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage &&
       previous_stage <
           ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
-    *pending_stage3_switch = true;
-    std::cout << "[空中机器人阶段] 达到 stage=3，等待目标丢失持续 "
-              << stage3_switch_target_lost_delay.count() << "ms 后切换模型"
-              << std::endl;
+    stage_predictor_controller->RequestStage3SwitchAfterTargetLoss();
   }
 }
 
@@ -399,15 +437,6 @@ static void UpdateTargetVisibleAndLostSince(
     *target_lost_since = now;
     *target_lost_since_initialized = true;
   }
-}
-
-static bool Stage3SwitchTargetLostLongEnough(
-    bool target_lost_since_initialized,
-    const std::chrono::steady_clock::time_point &now,
-    const std::chrono::steady_clock::time_point &target_lost_since,
-    const std::chrono::milliseconds &stage3_switch_target_lost_delay) {
-  return target_lost_since_initialized &&
-         (now - target_lost_since) >= stage3_switch_target_lost_delay;
 }
 
 // 等待相机线程交付下一帧；raw_frame 保留给未命中保存逻辑使用。
@@ -459,14 +488,30 @@ int main(int argc, char **argv) {
   CameraTask::GalaxyCamera camera;
   serial::Serial port;
   std::unique_ptr<ImageRecognize::ImagePredict> predictor;
+  const auto stage12_profile = StageProfile(Tools::RuntimeStage::Stage12);
+  const auto stage3_profile = StageProfile(Tools::RuntimeStage::Stage3);
   const auto command_line_options =
       ImageRecognize::ParseImagePredictCommandLine(argc, argv);
 
   g_exposure_controller.SetExposureTimes(
-      Tools::Params().stage12_exposure_time_us,
-      Tools::Params().stage3_exposure_time_us);
+      stage12_profile.exposure_time_us, stage3_profile.exposure_time_us);
   g_exposure_controller.LoadRuntimeParams();
   camera.setExposureTime(g_exposure_controller.GetStage12ExposureTime());
+  // stage12 永远全画幅：启动时显式关闭 ROI。
+  camera.setRoiEnabled(false);
+  camera.setRoiKeepCentered(stage3_profile.roi.keep_centered);
+  camera.setRoi(stage3_profile.roi.width, stage3_profile.roi.height,
+                stage3_profile.roi.offset_x, stage3_profile.roi.offset_y);
+  if (stage3_profile.roi.enabled) {
+    std::cout << "[Camera] Stage3 ROI request: width="
+              << stage3_profile.roi.width
+              << " height=" << stage3_profile.roi.height
+              << " offset_x=" << stage3_profile.roi.offset_x
+              << " offset_y=" << stage3_profile.roi.offset_y
+              << " keep_centered="
+              << (stage3_profile.roi.keep_centered ? "true" : "false")
+              << std::endl;
+  }
 
   cv::setUseOptimized(true);
   cv::setNumThreads(1);
@@ -475,12 +520,12 @@ int main(int argc, char **argv) {
 
   try {
     predictor = std::make_unique<ImageRecognize::ImagePredict>(
-        Tools::Params().stage12_model_path,
+        *stage12_profile.model_path,
         Tools::Params().openvino_device_name);
   } catch (const std::exception &e) {
     std::cerr << "初始化 OpenVINO 模型失败：" << e.what() << std::endl;
     std::cerr << "当前 stage12_model_path: "
-              << Tools::Params().stage12_model_path << std::endl;
+              << *stage12_profile.model_path << std::endl;
     std::cerr << "当前 device_name: " << Tools::Params().openvino_device_name
               << std::endl;
     return -2;
@@ -496,6 +541,7 @@ int main(int argc, char **argv) {
   std::thread image_capture(CaptureThread, &camera,
                             command_line_options.video_path);
   Tools::ScanController scan_controller;
+  scan_controller.SetConfig(stage12_profile.scan.controller_config);
   std::thread image_predict(ImagePredictThread, std::ref(*predictor),
                             std::ref(scan_controller), command_line_options);
   std::thread aimbot_target_receive(AimbotTargetReceiveThread);
@@ -599,7 +645,32 @@ void CaptureThread(CameraTask::GalaxyCamera *camera,
     RequestStop();
     return;
   }
+
+  bool last_stage3_roi_mode = g_stage3_roi_mode.load(std::memory_order_acquire);
+  auto apply_stage3_roi_mode = [&](bool stage3_roi_mode) {
+    const auto profile = StageProfile(stage3_roi_mode);
+    camera->setRoiKeepCentered(profile.roi.keep_centered);
+    camera->setRoi(profile.roi.width, profile.roi.height, profile.roi.offset_x,
+                   profile.roi.offset_y);
+    camera->setRoiEnabled(profile.roi.enabled);
+    camera->stop();
+    camera->start();
+    std::cout << "[Camera] ROI mode switched: stage3="
+              << (stage3_roi_mode ? "true" : "false")
+              << " roi_enabled="
+              << (profile.roi.enabled ? "true" : "false")
+              << std::endl;
+  };
+  apply_stage3_roi_mode(last_stage3_roi_mode);
+
   while (g_running) {
+    const bool stage3_roi_mode =
+        g_stage3_roi_mode.load(std::memory_order_acquire);
+    if (stage3_roi_mode != last_stage3_roi_mode) {
+      apply_stage3_roi_mode(stage3_roi_mode);
+      last_stage3_roi_mode = stage3_roi_mode;
+    }
+
     g_exposure_controller.ApplyPendingChange(camera);
     cv::Mat frame = camera->grab(Tools::Params().capture_timeout_ms);
     if (frame.empty()) {
@@ -631,7 +702,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       angle_calculator; // 持久化 AngleCalculator，避免每次调用时重置 lastTime
   static Tools::LaserAngleCalculator laser_angle_calculator;
   static Tools::DistanceCalculator distance_calculator;
-  static ImageRecognize::CrossFrameTargetTracker target_tracker;
+  static ImageRecognize::TargetTrackPipeline target_track_pipeline;
   static ImageRecognize::AerialRobotLaserLockJudge aerial_robot_stage_judge;
   static const Tools::FilterType filter_type =
       Tools::AngleCalculator::ParseFilterType(
@@ -673,11 +744,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   }
   if (enable_save_target_videos && !target_video_saver) {
     target_video_saver = std::make_unique<Tools::SaveVideoOnTarget>(
-        Tools::Params().target_video_fps, "target_videos");
+        Tools::Params().target_video_fps, "target_videos", cv::Size(480, 480));
   }
   if (enable_save_full_run_video && !full_run_video_saver) {
     full_run_video_saver = std::make_unique<Tools::SaveVideoFullRun>(
-        Tools::Params().target_video_fps, "full_run_videos");
+        Tools::Params().target_video_fps, "full_run_videos",
+        cv::Size(480, 480));
   }
 
   std::chrono::steady_clock::time_point prev_frame_ts{};
@@ -686,9 +758,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   LatencyStats latency_window;
   PixelHeightStats pixel_height_stats;
   std::uint64_t ui_frame_counter = 0;
-  const auto scan_trigger_delay = std::chrono::milliseconds(500);
-  const auto stage3_switch_target_lost_delay = std::chrono::milliseconds(
-      std::max(0, Tools::Params().stage3_switch_target_lost_delay_ms));
+  const auto scan_trigger_delay = std::chrono::milliseconds(
+      std::max(0, Tools::Params().scan_trigger_delay_ms));
+  const auto stage3_profile = StageProfile(Tools::RuntimeStage::Stage3);
   std::chrono::steady_clock::time_point target_lost_since{};
   bool target_lost_since_initialized = false;
   bool infer_inflight = false;
@@ -705,70 +777,24 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           : std::chrono::steady_clock::duration::zero();
   std::chrono::steady_clock::time_point next_infer_submit_time =
       std::chrono::steady_clock::now();
-  std::unique_ptr<ImageRecognize::ImagePredict> stage3_predictor;
-  ImageRecognize::ImagePredict *active_predictor = &predictor;
-  bool using_stage3_predictor = false;
-  bool pending_stage3_switch = false;
+  Tools::LostTargetRecoveryController lost_target_recovery_controller;
 
   const auto reset_tracking_state = [&]() {
-    target_tracker.Reset();
+    target_track_pipeline.Reset();
     distance_calculator.ResetFilter();
+    lost_target_recovery_controller.Reset();
     ClearPendingSend();
   };
-
-  const auto switch_to_stage3_predictor = [&](const char *reason) -> bool {
-    if (using_stage3_predictor) {
-      return true;
-    }
-
-    try {
-      g_exposure_controller.SetActiveMode(
-          CameraTask::ExposureHotkeyController::ExposureMode::Stage3);
-      Tools::DistanceCalculator::SetActiveStage(
-          Tools::CalibrationStage::Stage3);
-      Tools::LaserAngleCalculator::SetActiveStage(
-          Tools::CalibrationStage::Stage3);
-      if (!stage3_predictor) {
-        stage3_predictor = std::make_unique<ImageRecognize::ImagePredict>(
-            Tools::Params().stage3_model_path,
-            Tools::Params().openvino_device_name,
-            true);
-      }
-      active_predictor = stage3_predictor.get();
-      using_stage3_predictor = true;
-      pending_stage3_switch = false;
-      reset_tracking_state();
-      std::cout << "[空中机器人阶段] 切换到 stage3，模型="
-                << Tools::Params().stage3_model_path
-                << " 曝光(us)=" << Tools::Params().stage3_exposure_time_us
-                << " 原因=" << reason << std::endl;
-      return true;
-    } catch (const std::exception &e) {
-      std::cerr << "切换到 stage3 模型失败：" << e.what() << std::endl;
-      RequestStop();
-      return false;
-    }
-  };
-
-  const auto switch_to_stage12_predictor = [&](const char *reason) {
-    if (!using_stage3_predictor) {
-      return;
-    }
-
-    g_exposure_controller.SetActiveMode(
-        CameraTask::ExposureHotkeyController::ExposureMode::Stage12);
-    Tools::DistanceCalculator::SetActiveStage(Tools::CalibrationStage::Stage12);
-    Tools::LaserAngleCalculator::SetActiveStage(
-        Tools::CalibrationStage::Stage12);
-    active_predictor = &predictor;
-    using_stage3_predictor = false;
-    pending_stage3_switch = false;
-    reset_tracking_state();
-    std::cout << "[空中机器人阶段] 切换到 stage1/2，模型="
-              << Tools::Params().stage12_model_path
-              << " 曝光(us)=" << Tools::Params().stage12_exposure_time_us
-              << " 原因=" << reason << std::endl;
-  };
+  ImageRecognize::StagePredictorController stage_predictor_controller(
+      &predictor, Tools::Params().openvino_device_name, MaxSerialAimbotFrameHz(),
+      ImageRecognize::StagePredictorController::Hooks{
+          &g_exposure_controller,
+          &g_stage3_roi_mode,
+          &g_scan_stage3_mode,
+          &scan_controller,
+          &g_scan_controller_mutex,
+          reset_tracking_state,
+          RequestStop});
 
   while (g_running) {
     if (!infer_inflight) {
@@ -800,14 +826,15 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
       try {
         const auto t_submit_prepare_start = ProfileNow(enable_latency_profile);
-        const bool submit_to_stage3 = using_stage3_predictor;
+        const bool submit_to_stage3 =
+            stage_predictor_controller.UsingStage3Predictor();
         cv::Mat infer_frame = next_frame;
         const auto t_submit_prepare_end = ProfileNow(enable_latency_profile);
         AddLatencySample(enable_latency_profile, latency_total, latency_window,
                          &LatencyStats::submit_prepare_ns,
                          t_submit_prepare_start, t_submit_prepare_end);
         const auto t_async_submit_start = ProfileNow(enable_latency_profile);
-        active_predictor->startAsync(infer_frame);
+        stage_predictor_controller.ActivePredictor()->startAsync(infer_frame);
         const auto t_async_submit_end = ProfileNow(enable_latency_profile);
         AddLatencySample(enable_latency_profile, latency_total, latency_window,
                          &LatencyStats::submit_async_ns, t_async_submit_start,
@@ -853,7 +880,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     bool has_predict_result = false;
     std::chrono::steady_clock::time_point infer_end_time{};
     try {
-      result = active_predictor->getAsyncResult();
+      result = stage_predictor_controller.ActivePredictor()->getAsyncResult();
       if (inflight_used_stage3_predictor) {
         NormalizeStage3PredictResult(&result);
       }
@@ -900,31 +927,29 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
     UpdateAerialRobotStageAndSwitchFlag(
         has_predict_result, result, stage_dt, &aerial_robot_stage_judge,
-        &pending_stage3_switch, stage3_switch_target_lost_delay);
+        &stage_predictor_controller);
 
     std::array<float, 6> tracked_box{};
     bool has_tracked_box = false;
-    const auto track_boxes =
-        ImageRecognize::FilterTrackBoxes(result.boxes, target_camp_mode);
     const auto t_select_start = ProfileNow(enable_latency_profile);
-    const auto track_result = target_tracker.Update(track_boxes);
+    const auto track_pipeline_result = target_track_pipeline.Update(
+        result, target_camp_mode,
+        stage_predictor_controller.UsingStage3Predictor());
     const auto t_select_end = ProfileNow(enable_latency_profile);
     AddLatencySample(enable_latency_profile, latency_total, latency_window,
                      &LatencyStats::select_box_ns, t_select_start,
                      t_select_end);
-    const bool track_alive =
-        track_result.has_box || target_tracker.HasRecentLock();
+    const auto &track_result = track_pipeline_result.track_result;
+    const bool track_alive = track_pipeline_result.track_alive;
     const auto now = std::chrono::steady_clock::now();
     UpdateTargetVisibleAndLostSince(track_alive, now, &target_lost_since,
                                     &target_lost_since_initialized);
+    g_target_visible.store(track_result.has_box, std::memory_order_release);
 
-    const bool stage3_switch_target_lost_long_enough =
-        Stage3SwitchTargetLostLongEnough(target_lost_since_initialized, now,
-                                         target_lost_since,
-                                         stage3_switch_target_lost_delay);
-    if (pending_stage3_switch && !using_stage3_predictor && !track_alive &&
-        stage3_switch_target_lost_long_enough) {
-      switch_to_stage3_predictor("stage3_target_lost");
+    if (!track_alive &&
+        stage_predictor_controller.ShouldSwitchToStage3AfterLostTarget(
+            target_lost_since_initialized, now, target_lost_since)) {
+      stage_predictor_controller.SwitchToStage3("stage3_target_lost");
       const auto t_loop_end = ProfileNow(enable_latency_profile);
       AddLatencySample(enable_latency_profile, latency_total, latency_window,
                        &LatencyStats::loop_ns, t_loop_start, t_loop_end);
@@ -932,8 +957,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       continue;
     }
 
-    if (track_result.has_box) {
-      tracked_box = track_result.box;
+    if (track_pipeline_result.has_tracked_box) {
+      tracked_box = track_pipeline_result.tracked_box;
       has_tracked_box = true;
     }
 
@@ -1013,6 +1038,11 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
                                              cmd_delta_pitch, cmd_delta_yaw,
                                              pitch_velocity, yaw_velocity, 0x01,
                                              frame_ts, command_enqueue_time});
+          if (stage_predictor_controller.UsingStage3Predictor()) {
+            lost_target_recovery_controller.PrepareStage3Coast(
+                true, send_abs_pitch, send_abs_yaw, pitch_velocity,
+                yaw_velocity, stage3_profile.lost_target_coast);
+          }
           AddLatencySample(enable_latency_profile, latency_total,
                            latency_window, &LatencyStats::result_to_control_ns,
                            infer_end_time, command_enqueue_time);
@@ -1034,12 +1064,41 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       } else {
         ClearPendingSend();
       }
-    } else {
-      if (enable_scan_mode && has_matched_imu && !track_alive &&
-          target_lost_since_initialized &&
-          (now - target_lost_since) >= scan_trigger_delay) {
-        StartScanMode();
       } else {
+      const auto recovery_result = lost_target_recovery_controller.Update(
+          Tools::LostTargetRecoveryController::UpdateInput{
+              stage_predictor_controller.UsingStage3Predictor(),
+              has_matched_imu,
+              matched_imu,
+              track_alive,
+              track_result.has_box,
+              enable_scan_mode,
+              target_lost_since_initialized,
+              now,
+              target_lost_since,
+              scan_trigger_delay,
+              stage3_profile.lost_target_coast,
+              Tools::Params().max_send_delta_deg,
+              Tools::Params().pitch_abs_limit});
+      if (recovery_result.has_command) {
+        const auto command_enqueue_time = std::chrono::steady_clock::now();
+        StorePendingSend(AimbotSendCommand{
+            recovery_result.command.absolute_pitch,
+            recovery_result.command.absolute_yaw,
+            recovery_result.command.offset_pitch,
+            recovery_result.command.offset_yaw,
+            recovery_result.command.pitch_velocity,
+            recovery_result.command.yaw_velocity,
+            0x01,
+            frame_ts,
+            command_enqueue_time});
+      } else if (recovery_result.pending_action ==
+                 Tools::LostTargetRecoveryController::PendingAction::
+                     StartScanMode) {
+        StartScanMode();
+      } else if (recovery_result.pending_action ==
+                 Tools::LostTargetRecoveryController::PendingAction::
+                     ClearPendingSend) {
         ClearPendingSend();
       }
     }
@@ -1067,13 +1126,14 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           frame, g_aerial_robot_stage.load(std::memory_order_acquire),
           aerial_robot_stage_judge.Progress(),
           aerial_robot_stage_judge.CurrentThreshold());
-      ImageRecognize::ImageShow::ShowNow(frame, result, fps);
+      ImageRecognize::ImageShow::DrawNow(frame, result, fps);
       if (enable_calibration_sliders) {
         Tools::CalibrationSliderPanel::Show(&g_exposure_controller);
       }
       if (has_tracked_box) {
         ImageRecognize::DrawTrackedBox(frame, tracked_box);
       }
+      ImageRecognize::ImageShow::ShowFrame(frame);
     }
 
     // 当检测框数量不是 1
@@ -1088,12 +1148,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       }
     }
     if (enable_save_target_videos && target_video_saver) {
-      const cv::Mat &video_frame = do_display ? frame : inflight_frame;
-      target_video_saver->Update(video_frame, has_tracked_box);
+      target_video_saver->Update(inflight_frame, has_tracked_box);
     }
     if (enable_save_full_run_video && full_run_video_saver) {
-      const cv::Mat &video_frame = do_display ? frame : inflight_frame;
-      full_run_video_saver->Update(video_frame);
+      full_run_video_saver->Update(inflight_frame);
     }
 
     // 处理 GUI 事件并允许按键退出
@@ -1106,9 +1164,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       if (!should_exit && current_exposure_mode != previous_exposure_mode) {
         if (current_exposure_mode ==
             CameraTask::ExposureHotkeyController::ExposureMode::Stage3) {
-          switch_to_stage3_predictor("exposure_debug_stage3");
+          stage_predictor_controller.SwitchToStage3("exposure_debug_stage3");
         } else {
-          switch_to_stage12_predictor("exposure_debug_stage12");
+          stage_predictor_controller.SwitchToStage12("exposure_debug_stage12");
         }
       }
     }
@@ -1203,17 +1261,8 @@ void IMUReadThread(serial::Serial &port) {
 void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
                    bool enable_send_log) {
   Tools::BindCurrentThreadToAuxCore(2);
-  using Clock = std::chrono::steady_clock;
-  const double scan_send_hz = EffectiveScanSendHz();
-  const auto scan_send_interval = std::chrono::duration_cast<Clock::duration>(
-      std::chrono::duration<double>(1.0 / scan_send_hz));
-  const auto scan_origin_hold_duration = std::chrono::milliseconds(
-      std::max(0, Tools::Params().scan_origin_hold_ms));
-
-  auto next_scan_send_time = Clock::now();
-  bool last_scan_mode = false;
-  bool scan_waiting_at_origin = false;
-  Clock::time_point scan_origin_deadline = Clock::now();
+  using Clock = Tools::ScanSendController::Clock;
+  Tools::ScanSendController scan_send_controller;
 
   while (g_running) {
     if (!TryReopenSerialPort(port)) {
@@ -1228,26 +1277,24 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
     if (scan_mode) {
       if (target_visible) {
         ClearPendingSend();
-        last_scan_mode = false;
-        scan_waiting_at_origin = false;
-        next_scan_send_time = Clock::now();
+        scan_send_controller.ExitScanMode();
         continue;
       }
 
       const auto now = Clock::now();
-      if (!last_scan_mode) {
-        next_scan_send_time = now;
-        last_scan_mode = true;
-        scan_waiting_at_origin = true;
-        scan_origin_deadline = now + scan_origin_hold_duration;
-        {
-          std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
-          scan_controller.Reset();
-        }
-      }
+      const bool scan_stage3_mode =
+          g_scan_stage3_mode.load(std::memory_order_acquire);
+      const Tools::ScanSendController::TickConfig tick_config{
+          EffectiveScanSendHz(scan_stage3_mode),
+          std::chrono::milliseconds(EffectiveScanOriginHoldMs(scan_stage3_mode)),
+          EffectiveScanControllerConfig(scan_stage3_mode)};
+      scan_send_controller.EnterOrStayScanMode(
+          tick_config, &scan_controller, &g_scan_controller_mutex, now);
 
-      if (now < next_scan_send_time) {
-        WaitUntilNextScanSend(next_scan_send_time);
+      const auto step_result = scan_send_controller.Step(tick_config, now);
+      if (step_result.status ==
+          Tools::ScanSendController::StepStatus::WaitForNextSend) {
+        WaitUntilNextScanSend(step_result.wait_until);
         continue;
       }
 
@@ -1258,17 +1305,8 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
         continue;
       }
 
-      Tools::ScanCommand scan_command{};
-      {
-        std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
-        if (scan_waiting_at_origin) {
-          scan_command = scan_controller.BuildOriginCommand(latest_imu.yaw,
-                                                            latest_imu.pitch);
-        } else {
-          scan_command =
-              scan_controller.BuildCommand(latest_imu.yaw, latest_imu.pitch);
-        }
-      }
+      const Tools::ScanCommand scan_command = scan_send_controller.BuildCommand(
+          &scan_controller, &g_scan_controller_mutex, latest_imu);
 
       try {
         std::lock_guard<std::mutex> lk(g_serial_mutex);
@@ -1287,19 +1325,12 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
             std::chrono::milliseconds(Tools::Params().imu_send_idle_sleep_ms));
         continue;
       }
-      if (scan_waiting_at_origin && now >= scan_origin_deadline) {
-        scan_waiting_at_origin = false;
-        {
-          std::lock_guard<std::mutex> lk(g_scan_controller_mutex);
-          scan_controller.Reset();
-        }
-      }
-      next_scan_send_time = now + scan_send_interval;
+      scan_send_controller.FinishSend(tick_config, &scan_controller,
+                                      &g_scan_controller_mutex, now);
       continue;
     }
 
-    last_scan_mode = false;
-    scan_waiting_at_origin = false;
+    scan_send_controller.ExitScanMode();
     AimbotSendCommand command;
     if (TakePendingSend(&command)) {
       if (enable_send_log) {

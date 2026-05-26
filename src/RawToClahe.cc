@@ -8,9 +8,9 @@
 
 #include <opencv2/opencv.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
-#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>

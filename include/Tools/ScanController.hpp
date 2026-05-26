@@ -1,16 +1,19 @@
 /**
  * @file    include/Tools/ScanController.hpp
- * @brief   生成云台扫描模式下的绝对角度与相对偏移控制指令。
+ * @brief   生成沿固定 yaw 边界往返、pitch 服从正弦轨迹的扫描指令。
+ *
+ * 参数语义：
+ * - A 百分比：以 pitch 半扫描高度为 100%
+ * - lambda 百分比：以“单次去程恰好走完一个完整正弦周期”为 100%
  */
 
 #pragma once
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 
-#include "Tools/AngleCalculate.hpp"
+#include "Tools/RuntimeParams.hpp"
 namespace Tools {
 
 struct ScanCommand {
@@ -30,7 +33,10 @@ public:
     float max_pitch_deg;
     float min_yaw_deg;
     float max_yaw_deg;
-    float yaw_speed_deg_per_sec;
+    float yaw_step_deg_per_tick;
+    float tick_rate_hz;
+    float pitch_wavelength_percent;
+    float pitch_amplitude_percent;
 
     Config();
   };
@@ -39,9 +45,14 @@ public:
 
   explicit ScanController(const Config &config) : config_(config) { Reset(); }
 
+  void SetConfig(const Config &config) {
+    config_ = config;
+    Reset();
+  }
+
   void Reset() {
-    scan_phase_rad_ = -0.5f * static_cast<float>(kPi);
-    last_update_time_ = Clock::now();
+    current_yaw_deg_ = std::min(config_.min_yaw_deg, config_.max_yaw_deg);
+    yaw_direction_sign_ = 1.0f;
   }
 
   ScanCommand BuildOriginCommand(float imu_yaw_deg, float imu_pitch_deg) const {
@@ -65,44 +76,44 @@ public:
     const float max_yaw_deg =
         std::max(config_.min_yaw_deg, config_.max_yaw_deg);
     const float yaw_span_deg = std::max(max_yaw_deg - min_yaw_deg, 1e-3f);
-    const float yaw_mid_deg = 0.5f * (min_yaw_deg + max_yaw_deg);
-    const float yaw_amplitude_deg = 0.5f * yaw_span_deg;
+    const float min_pitch_deg =
+        std::min(config_.min_pitch_deg, config_.max_pitch_deg);
+    const float max_pitch_deg =
+        std::max(config_.min_pitch_deg, config_.max_pitch_deg);
     const float pitch_mid_deg =
-        0.5f * (config_.min_pitch_deg + config_.max_pitch_deg);
-    const float pitch_amplitude_deg =
-        0.25f * std::abs(config_.max_pitch_deg - config_.min_pitch_deg);
-    const auto now = Clock::now();
-    const float dt_sec =
-        std::max(0.0f, std::chrono::duration_cast<std::chrono::duration<float>>(
-                           now - last_update_time_)
-                           .count());
-    last_update_time_ = now;
+        0.5f * (min_pitch_deg + max_pitch_deg);
+    const float pitch_span_deg = std::max(max_pitch_deg - min_pitch_deg, 1e-3f);
+    const float pitch_amplitude_ratio =
+        std::clamp(config_.pitch_amplitude_percent, 0.0f, 1000.0f) / 100.0f;
+    const float pitch_amplitude_deg = 0.5f * pitch_span_deg * pitch_amplitude_ratio;
+    const float wavelength_ratio =
+        std::max(config_.pitch_wavelength_percent, 1e-3f) / 100.0f;
+    const float effective_lambda_deg = yaw_span_deg * wavelength_ratio;
 
-    const float omega_rad_per_sec =
-        std::max(config_.yaw_speed_deg_per_sec, 1e-4f) /
-        std::max(yaw_amplitude_deg, 1e-3f);
-    scan_phase_rad_ += omega_rad_per_sec * dt_sec;
-    scan_phase_rad_ =
-        std::fmod(scan_phase_rad_, 2.0f * static_cast<float>(kPi));
+    AdvanceAlongYaw_();
 
-    const float sin_phase = std::sin(scan_phase_rad_);
-    const float cos_phase = std::cos(scan_phase_rad_);
-
-    const float scan_yaw_deg = yaw_mid_deg + yaw_amplitude_deg * sin_phase;
+    const float yaw_travel_deg = current_yaw_deg_ - min_yaw_deg;
+    const float pitch_phase_rad =
+        (2.0f * kPiF_ * yaw_travel_deg) / effective_lambda_deg;
+    const float pitch_phase_sign =
+        yaw_direction_sign_ >= 0.0f ? 1.0f : -1.0f;
+    const float scan_yaw_deg = current_yaw_deg_;
     const float scan_pitch_deg =
-        pitch_mid_deg +
-        pitch_amplitude_deg *
-            std::sin(scan_phase_rad_ + 0.5f * static_cast<float>(kPi));
+        pitch_mid_deg + pitch_phase_sign * pitch_amplitude_deg *
+                            std::sin(pitch_phase_rad);
     const float scan_yaw_velocity_deg_per_sec =
-        yaw_amplitude_deg * omega_rad_per_sec * cos_phase;
+        yaw_direction_sign_ * std::max(config_.yaw_step_deg_per_tick, 1e-4f) *
+        std::max(config_.tick_rate_hz, 1.0f);
     const float scan_pitch_velocity_deg_per_sec =
-        pitch_amplitude_deg * omega_rad_per_sec *
-        std::cos(scan_phase_rad_ + 0.5f * static_cast<float>(kPi));
+        pitch_phase_sign * pitch_amplitude_deg * std::cos(pitch_phase_rad) *
+        ((2.0f * kPiF_) / effective_lambda_deg) *
+        scan_yaw_velocity_deg_per_sec;
 
     command.absolute_yaw_deg = scan_yaw_deg;
-    command.absolute_pitch_deg = scan_pitch_deg;
+    command.absolute_pitch_deg =
+        std::clamp(scan_pitch_deg, min_pitch_deg, max_pitch_deg);
     command.offset_yaw_deg = scan_yaw_deg - imu_yaw_deg;
-    command.offset_pitch_deg = scan_pitch_deg - imu_pitch_deg;
+    command.offset_pitch_deg = command.absolute_pitch_deg - imu_pitch_deg;
     command.yaw_velocity_deg_per_sec = scan_yaw_velocity_deg_per_sec;
     command.pitch_velocity_deg_per_sec = scan_pitch_velocity_deg_per_sec;
     command.aimbot_state = 0x01;
@@ -110,7 +121,7 @@ public:
   }
 
 private:
-  using Clock = std::chrono::steady_clock;
+  static constexpr float kPiF_ = 3.1415926f;
 
   float OriginYawDeg_() const {
     return std::min(config_.min_yaw_deg, config_.max_yaw_deg);
@@ -120,16 +131,66 @@ private:
     return 0.5f * (config_.min_pitch_deg + config_.max_pitch_deg);
   }
 
+  void AdvanceAlongYaw_() {
+    const float min_yaw_deg =
+        std::min(config_.min_yaw_deg, config_.max_yaw_deg);
+    const float max_yaw_deg =
+        std::max(config_.min_yaw_deg, config_.max_yaw_deg);
+    const float yaw_span_deg = max_yaw_deg - min_yaw_deg;
+    if (yaw_span_deg <= 1e-4f) {
+      current_yaw_deg_ = min_yaw_deg;
+      yaw_direction_sign_ = 1.0f;
+      return;
+    }
+
+    float remaining_step_deg = std::max(config_.yaw_step_deg_per_tick, 1e-4f);
+    while (remaining_step_deg > 0.0f) {
+      const float boundary_yaw_deg =
+          yaw_direction_sign_ > 0.0f ? max_yaw_deg : min_yaw_deg;
+      const float available_step_deg =
+          std::abs(boundary_yaw_deg - current_yaw_deg_);
+      if (remaining_step_deg <= available_step_deg + 1e-6f) {
+        current_yaw_deg_ += yaw_direction_sign_ * remaining_step_deg;
+        break;
+      }
+
+      current_yaw_deg_ = boundary_yaw_deg;
+      remaining_step_deg -= available_step_deg;
+      yaw_direction_sign_ *= -1.0f;
+    }
+  }
+
   Config config_{};
-  float scan_phase_rad_ = -0.5f * static_cast<float>(kPi);
-  Clock::time_point last_update_time_{Clock::now()};
+  float current_yaw_deg_ = 0.0f;
+  float yaw_direction_sign_ = 1.0f;
 };
 
 inline ScanController::Config::Config()
-    : min_pitch_deg(70.9f),           // pitch 扫描范围下限（度）
-      max_pitch_deg(83.1f),           // pitch 扫描起始上限（度）
-      min_yaw_deg(60.62f),            // yaw 扫描起始下限（度）
-      max_yaw_deg(85.1f),             // yaw 扫描起始上限（度）
-      yaw_speed_deg_per_sec(16.0f) {} // yaw 扫描角速度（度/秒）
+    : min_pitch_deg(70.9f),         // pitch 扫描范围下限（度）
+      max_pitch_deg(83.1f),         // pitch 扫描起始上限（度）
+      min_yaw_deg(60.62f),          // yaw 扫描起始下限（度）
+      max_yaw_deg(85.1f),           // yaw 扫描起始上限（度）
+      yaw_step_deg_per_tick(0.08f),    // 每次发送沿 yaw 轨迹前进的角度
+      tick_rate_hz(200.0f),            // 当前扫描发送频率（用于速度估计）
+      pitch_wavelength_percent(100.0f), // lambda 百分比，100% 表示单次去程恰好一周期
+      pitch_amplitude_percent(100.0f) {} // A 百分比，100% 表示占满 pitch 半量程
+
+inline ScanController::Config MakeDefaultScanControllerConfig() {
+  ScanController::Config config;
+  config.pitch_wavelength_percent =
+      static_cast<float>(Params().scan_pitch_wavelength_percent);
+  config.pitch_amplitude_percent =
+      static_cast<float>(Params().scan_pitch_amplitude_percent);
+  return config;
+}
+
+inline ScanController::Config MakeStage3ScanControllerConfig() {
+  ScanController::Config config;
+  config.pitch_wavelength_percent =
+      static_cast<float>(Params().stage3_scan_pitch_wavelength_percent);
+  config.pitch_amplitude_percent =
+      static_cast<float>(Params().stage3_scan_pitch_amplitude_percent);
+  return config;
+}
 
 } // namespace Tools

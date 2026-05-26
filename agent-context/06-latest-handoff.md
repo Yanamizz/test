@@ -1,10 +1,117 @@
 # Latest Handoff
 
 用途：记录最近一次交接结论与后续建议。  
-更新时间：2026-05-19  
+更新时间：2026-05-27  
 适用场景：新 Agent 快速接续、避免重复排查。
 
 ## 本轮完成事项（延迟优先）
+
+0. 目标框处理链路收口为 `TargetTrackPipeline`
+- 文件：`include/ImageRecognize/TargetTrackPipeline.hpp`
+- 文件：`include/ImageRecognize/TargetTracking.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `TargetTrackPipeline`，将“候选框 class filter -> 跨帧关联 -> stage3 框稳定化”从 `ImagePredictThread` 主流程中抽离为独立 Module。
+- 变更：`ImagePredict.cc` 不再直接持有 `CrossFrameTargetTracker` 与 `TemporalBoxStabilizer`，而是通过统一的 `TargetTrackPipelineResult` 获取 `track_result / tracked_box / track_alive`。
+- 变更：该次抽离不改变现有算法参数和业务语义，目标是降低主流程耦合，为后续继续收口状态机与后处理算法提供更清晰 seam。
+- 当前状态：已于 2026-05-27 本地重新 `cmake --build build -j` 编译通过。
+
+0. 阶段运行配置收口为 `StageRuntimeProfile`
+- 文件：`include/Tools/StageRuntimeProfile.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `StageRuntimeProfile` Module，把 `stage1/2` 与 `stage3` 的模型路径、曝光值、ROI 开关与参数、扫描频率限幅结果、扫描控制器配置、stage3 丢目标续行参数统一组织为一个只读运行时 profile。
+- 变更：`ImagePredict.cc` 中原本散落的 `stage12/stage3` 条件分支，已在以下场景切换为 profile 访问：启动日志打印、相机 ROI 初始化、扫描控制器初始化、ROI 模式切换、stage3/stage1/2 模型切换、副作用日志打印。
+- 变更：该次重构不修改扫描算法、切阶段时机、ROI 语义、曝光语义和模型推理逻辑，目标是减少主流程 shallow condition，提升阶段差异逻辑的 locality，给后续继续收口状态机与线程协作创造更清晰 seam。
+- 当前状态：已于 2026-05-27 本地重新 `cmake --build build -j` 编译通过。
+
+0. 阶段预测器切换收口为 `StagePredictorController`
+- 文件：`include/ImageRecognize/StagePredictorController.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `StagePredictorController` Module，把以下原本分散在 `ImagePredictThread` 内的阶段切换逻辑收口：`stage3` 待切换标记、目标丢失延时后切换判断、`stage1/2 <-> stage3` 预测器切换、切换时曝光/ROI/扫描模式/标定阶段/扫描控制器配置等副作用应用。
+- 变更：`ImagePredict.cc` 不再直接维护 `active_predictor / using_stage3_predictor / pending_stage3_switch / switch_to_stage*_predictor lambda` 这组状态与逻辑，而是通过 `StagePredictorController` 统一完成异步推理入口选择、自动切换和 GUI 热键切换。
+- 变更：该次抽离不改变切阶段时机、切换日志语义、ROI 切换语义、曝光模式切换语义和 stage3 模型懒加载行为，目标是进一步降低主循环 shallow state handling，提升阶段切换逻辑的 locality，为后续继续拆扫描状态机创造更深的 seam。
+- 当前状态：已于 2026-05-27 本地重新 `cmake --build build -j` 编译通过。
+
+0. 丢目标恢复流程收口为 `LostTargetRecoveryController`
+- 文件：`include/Tools/LostTargetRecoveryController.hpp`
+- 文件：`src/ImagePredict.cc`
+- 文件：`include/SerialTask/SerialSend.hpp`
+- 变更：新增 `LostTargetRecoveryController` Module，把以下原本散落在 `ImagePredictThread` 无目标分支中的逻辑收口：`stage3` 丢目标后固定速度续行准备、续行时长判断、续行控制量生成、续行结束后回退到扫描或清空 pending send。
+- 变更：`ImagePredict.cc` 不再直接维护 `stage3_lost_target_coast` 的内部状态，而是通过 `PrepareStage3Coast()` 和 `Update()` 统一处理恢复流程，主循环只消费 `has_command / pending_action` 结果。
+- 变更：顺手修正 `SerialSend.hpp` 中 `AimbotTarget` 实际发送值，改为真正使用 `ToWireAimbotTarget(AimbotTarget)`，同时消除未使用变量警告；这与既有二值化协议语义一致，不改变设计意图。
+- 变更：该次抽离不改变 `stage3` 续行触发条件、续行固定速度语义、进入扫描时机和 `ClearPendingSend/StartScanMode` 的既有时机，目标是继续降低主循环 shallow recovery handling，提升丢目标恢复逻辑的 locality。
+- 当前状态：已于 2026-05-27 本地重新 `cmake --build build -j` 编译通过。
+
+0. 扫描发送状态机收口为 `ScanSendController`
+- 文件：`include/Tools/ScanSendController.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `ScanSendController` Module，把 `IMUSendThread` 内部原本局部维护的扫描发送状态机收口：扫描模式首次进入、原点等待、下一次发送时刻、扫描命令构造、原点等待结束后 `scan_controller.Reset()`。
+- 变更：`IMUSendThread` 不再直接维护 `last_scan_mode / scan_waiting_at_origin / next_scan_send_time / scan_origin_deadline` 这组局部状态，而是通过 `EnterOrStayScanMode / Step / BuildCommand / FinishSend / ExitScanMode` 统一驱动扫描发送流程。
+- 风险说明：该次属于中风险重构，因为它触及串口发送线程的局部状态机；但本轮仍刻意保持原有等待条件、发送频率计算、扫描配置切换和 `WaitUntilNextScanSend/WaitForScanStateChangeFor` 的外部时序不变，没有改扫描算法和共享变量语义。
+- 当前状态：已于 2026-05-27 本地重新 `cmake --build build -j` 编译通过。
+
+0. Galaxy 相机 ROI 裁剪开关（以视野换目标占比）  
+- 文件：`include/CameraTask/GetImage.hpp`  
+- 文件：`include/Tools/RuntimeParams.hpp`  
+- 文件：`src/ImagePredict.cc`  
+- 文件：`include/Tools/AngleCalculate.hpp`  
+- 变更：在 `GalaxyCamera` 增加 ROI 配置接口 `setRoiEnabled/setRoi`，并在 `applyCameraParams()` 中使用 `Width/Height/OffsetX/OffsetY` 节点应用相机侧裁剪；默认关闭。  
+- 变更：ROI 应用时加入节点范围与步进对齐，并采用“先 `Offset=0`、再改 `Width/Height`、最后设置目标 `Offset`”顺序，降低节点写入失败概率。  
+- 变更：主流程在启动时将 `RuntimeParams` 中 ROI 参数下发给相机，并打印 ROI 请求日志。  
+- 变更：角度解算加入 ROI 主点补偿（`cx/cy` 减 `offset_x/offset_y`），避免开启 ROI 后产生系统性角度偏移。  
+- 目的：在不改镜头的前提下，通过缩小取景视野提升目标在模型输入中的像素占比（等效数字变焦），用于“小目标”场景调优。  
+
+0. ROI 控制范围收敛为“仅 stage3 生效”  
+- 文件：`include/Tools/RuntimeParams.hpp`  
+- 文件：`src/ImagePredict.cc`  
+- 变更：ROI 参数重命名为 `stage3_*`，并改为“`stage12` 永远关闭 ROI、`stage3` 由开关控制（默认开启）”。  
+- 变更：ROI 切换信号由预测线程发布，实际相机 ROI 节点写入统一在采集线程执行，避免跨线程直接操作相机对象。  
+- 变更：`CaptureThread` 在 stage 切换时执行 `stop/start` 后应用对应 ROI 模式；切回 stage12 时回归全画幅。  
+- 目的：满足“仅 stage3 裁剪”的业务诉求，并保持主流程线程边界清晰。  
+
+0. ROI 居中基准与全画幅恢复修正  
+- 文件：`include/CameraTask/GetImage.hpp`  
+- 变更：新增 `ResetOffsetsToMin()` 与 `RestoreFullFrame()`，关闭 ROI 时不再只清运行时标记，而是实际将 `Width/Height` 恢复到最大值并把 `OffsetX/OffsetY` 恢复到最小值。  
+- 变更：居中裁剪前先把 offset 归零，再读取 `Width/Height` 范围并按 full-frame 计算中心偏移，避免把上一次 ROI 窗口误当成新裁剪基准。  
+- 目的：修复“stage3 看起来保持左上角不变”和“stage12 未恢复原始全画幅”的行为错误。  
+
+0. ROI 切换后 payload buffer 刷新与半开状态收尾修正
+- 文件：`include/CameraTask/GetImage.hpp`
+- 变更：新增 `ds_handle_` 与 `payload_size_bytes_`，在 `open()` 和 `start()` 前通过 `GXGetPayLoadSize()` 刷新 `frame_data_.nImgSize` 与 `image_buffer_`，避免 ROI/全画幅切换后仍复用旧尺寸 buffer。
+- 变更：新增 `full_frame_width_ / full_frame_height_ / full_frame_offset_x_min_ / full_frame_offset_y_min_`，在首次打开相机时缓存 full-frame 基准，用于后续居中裁剪与恢复全画幅。
+- 变更：`close()` 不再依赖 `opened_` 才执行收尾；即便 `open()` 半途中失败，也会关闭设备句柄、关闭 SDK 库并清空 ROI 运行时状态，避免半开状态残留。
+- 变更：恢复全画幅时增加日志 `[GalaxyCamera] ROI disabled: ...`，便于实机确认 stage12 是否真的回到全画幅。
+- 诊断判断：用户实机日志中 ROI 切换后紧跟 `munmap_chunk(): invalid pointer`，高概率不是普通 ROI 计算错误，而是切换后 payload size 变化、旧图像 buffer 被 SDK 越界写坏，最终在 glibc 释放时崩溃。
+- 当前状态：已于 2026-05-27 本地重新 `cmake --build build -j` 编译通过，待实机复现验证。
+
+0. ROI 居中偏移写入顺序修正 + stage3 慢速扫描模式
+- 文件：`include/CameraTask/GetImage.hpp`
+- 文件：`include/Tools/RuntimeParams.hpp`
+- 文件：`include/Tools/ScanController.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：`applyRoiIfEnabled()` 改为“先归零 offset、先写目标 `Width/Height`、再重新读取 `OffsetX/OffsetY` 范围、最后按 full-frame 中心写偏移”。
+- 诊断判断：之前虽然数学上计算了居中 offset，但 offset 节点范围是在 full-frame 状态下提前读取的；某些 Galaxy 相机此时 `OffsetX/OffsetY` 上限就是 `0`，于是居中值被再次 clamp 到 `0`，表现成“左上角不动”。
+- 变更：扫描模式新增 stage3 独立参数：`stage3_scan_origin_hold_ms`、`stage3_scan_send_hz`、`stage3_scan_yaw_speed_deg_per_sec`。切到 stage3 时，扫描频率和 yaw 扫描角速度都会自动切慢；切回 stage1/2 时自动恢复原配置。
+- 当前默认值：`stage1/2` 扫描发送 `200 Hz`、yaw 扫描速度 `16 deg/s`；`stage3` 扫描发送 `120 Hz`、yaw 扫描速度 `8 deg/s`。
+- 当前状态：已于 2026-05-27 本地重新 `cmake --build build -j` 编译通过，待实机验证日志是否出现更接近中心的 `offset_x/offset_y`。
+
+0. stage3 丢目标后按上一帧速度方向短暂续行，再退回扫描
+- 文件：`include/Tools/RuntimeParams.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `stage3_lost_target_coast_ms` 与 `stage3_lost_target_velocity_scale`，仅在 `stage3` 丢失目标后启用。
+- 变更：当 stage3 仍有目标时，缓存最近一次已发送控制命令的绝对角和 yaw/pitch 角速度；一旦下一段时间检测框消失，则先按这组速度方向续行一小段时间，再回退到原有扫描模式。
+- 变更：`g_target_visible` 改为表示“当前帧是否真实有检测框”，避免 `HasRecentLock()` 仍为真时阻塞扫描/续行状态切换。
+- 当前默认值：续行时长 `220 ms`，速度倍率 `1.0`。
+- 目的：缓解 stage3 缩画幅后，对较快目标因短时失配而立刻丢失的问题，优先向目标离开方向补一小段位移，争取重新把目标拉回视野。
+
+0. AimbotTarget 语义收敛（计数/二值化发送一致）
+- 文件：`include/SerialTask/Common.hpp`
+- 文件：`include/SerialTask/SerialSend.hpp`
+- 文件：`include/NetworkTask/AimbotTargetReceiver.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：在 `SerialTask/Common.hpp` 新增 `ToWireAimbotTarget`、`SaturatingIncrementAimbotTarget`、`SaturatingDecrementAimbotTarget`，统一 AimbotTarget 计数与线协议二值化规则。
+- 变更：网络接收线程增量逻辑改为复用 `SaturatingIncrementAimbotTarget`；阶段切换扣减逻辑改为复用 `SaturatingDecrementAimbotTarget`，移除分散重复实现。
+- 变更：`SerialSend.hpp` 中 `AimbotFrame_SCM_t::AimbotTarget` 从固定 `0x01` 修正为使用 `ToWireAimbotTarget` 的二值化结果，避免“接口传参与实际发送语义不一致”。
+- 目的：与 `03-business-contracts.md` 第 4 条契约对齐，减少联调歧义，提升语义可维护性和测试可覆盖性。
 
 0. Yaw/Pitch 速度滤波调参激进档
 - 文件：`include/Tools/RuntimeParams.hpp`
@@ -17,7 +124,8 @@
 - 文件：`include/ImageRecognize/ImagePredictCommandLine.hpp`
 - 文件：`src/ImagePredict.cc`
 - 变更：新增 `enable_save_full_run_video`，默认关闭；命令行可用 `--save-full-run-video`/`--no-save-full-run-video` 控制。
-- 变更：启用后从程序运行到结束持续保存视频到 `full_run_videos/full_run_YYYYmmdd_HHMMSS/`，复用 `target_video_fps` 和 MJPG AVI 编码。
+- 变更：启用后从程序运行到结束持续保存视频到 `full_run_videos/full_run_YYYYmmdd_HHMMSS_001.avi`，复用 `target_video_fps` 和 MJPG AVI 编码。
+- 变更：为降低录像开销，目标录像与全程录像统一改为保存不带 `putText`/框绘制的 `inflight_frame` 原始帧，并在保存器内部缩放到 `480x480`。
 
 2. Pitch 速度滤波调参记录
 - 文件：`include/Tools/RuntimeParams.hpp`
@@ -56,7 +164,7 @@
 ## 当前风险与注意事项
 
 1. 设备限制  
-- 当前环境仅编辑器，无法编译与运行验证；本轮为静态改动与一致性检查。
+- 当前环境无法直接连接实机相机复现；但截至 2026-05-27，修复后的 `ImagePredict` 已完成本地编译验证。
 
 2. 工作区状态  
 - 仓库存在历史改动，交接时不要回退与本轮无关的变更。
@@ -70,7 +178,16 @@
 - p50/p95/p99 推理时延  
 - 串口发送周期抖动  
 - 丢帧率与目标锁定稳定性
+- stage3 日志是否接近居中偏移：
+  预期 `1920x1200 -> 1280x720` 时，`offset_x` 应接近 `320`，`offset_y` 应接近 `240`（受相机节点步进约束可略有偏差）
+- stage12 切回时是否打印全画幅恢复日志：
+  预期出现 `[GalaxyCamera] ROI disabled: width=<max> height=<max> offset_x=<min> offset_y=<min>`
+- 原始复现命令 `./bin/ImagePredict --no-save-no-target-images` 下，切换 stage3/stage12 后不再出现 `munmap_chunk(): invalid pointer`
 
 2. 若延迟仍波动较大  
 - 在不影响精确度前提下，继续下调 `latency_threads_cap` 做 A/B 对比。  
 - 复核 `IMUSendThread` 是否需要更高优先级或更强隔离策略。
+
+3. 若实机切阶段后仍然崩溃  
+- 第一优先方向：将 `CaptureThread` 中的 ROI 切换从 `camera->stop(); camera->start();` 升级为完整的 `camera->close(); camera->open(); camera->start();`，牺牲一点切换时延换 SDK 兼容性。
+- 第二优先方向：在 `RefreshPayloadBuffer()` 中临时加带标签的 payload 日志，记录 ROI 开关前后的旧/新 `payload_size_bytes_`，验证是否仍有尺寸漂移未被刷新。

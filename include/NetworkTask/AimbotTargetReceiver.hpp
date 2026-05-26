@@ -68,17 +68,6 @@ template <typename RunningPredicate>
 inline void RunAimbotTargetReceiver(std::atomic<uint8_t> &aimbot_target,
                                     RunningPredicate is_running,
                                     int port = kDefaultTcpPort) {
-  const auto saturating_increment = [&aimbot_target]() {
-    uint8_t old_value = aimbot_target.load(std::memory_order_acquire);
-    while (old_value < SerialTask::kAimbotTargetMax) {
-      if (aimbot_target.compare_exchange_weak(
-              old_value, static_cast<uint8_t>(old_value + 1),
-              std::memory_order_acq_rel, std::memory_order_acquire)) {
-        return;
-      }
-    }
-  };
-
   socket_t listen_fd = kInvalidSocketFd;
   if (!CreateListeningSocket(listen_fd, port)) {
     std::cerr << "[网络] AimbotTarget 监听端口 " << port << " 失败"
@@ -126,7 +115,7 @@ inline void RunAimbotTargetReceiver(std::atomic<uint8_t> &aimbot_target,
       }
 
       if (target == SerialTask::kAimbotTargetActiveThreshold) {
-        saturating_increment();
+        SerialTask::SaturatingIncrementAimbotTarget(aimbot_target);
       }
 
       const uint8_t current_target =

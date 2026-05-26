@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 /**
  * @brief 目标侧欧拉角帧（Pitch, Yaw）
@@ -53,5 +54,35 @@ inline constexpr uint8_t IMU_DATA_SEND_ID = 0x03;
 inline constexpr uint8_t kAimbotTargetMin = 0x00;
 inline constexpr uint8_t kAimbotTargetActiveThreshold = 0x01;
 inline constexpr uint8_t kAimbotTargetMax = 0x03;
+
+inline uint8_t ToWireAimbotTarget(uint8_t counter_value) {
+  return (counter_value >= kAimbotTargetActiveThreshold)
+             ? kAimbotTargetActiveThreshold
+             : kAimbotTargetMin;
+}
+
+inline void SaturatingIncrementAimbotTarget(std::atomic<uint8_t> &counter) {
+  uint8_t old_value = counter.load(std::memory_order_acquire);
+  while (old_value < kAimbotTargetMax) {
+    if (counter.compare_exchange_weak(old_value,
+                                      static_cast<uint8_t>(old_value + 1),
+                                      std::memory_order_acq_rel,
+                                      std::memory_order_acquire)) {
+      return;
+    }
+  }
+}
+
+inline void SaturatingDecrementAimbotTarget(std::atomic<uint8_t> &counter) {
+  uint8_t old_value = counter.load(std::memory_order_acquire);
+  while (old_value > kAimbotTargetMin) {
+    if (counter.compare_exchange_weak(old_value,
+                                      static_cast<uint8_t>(old_value - 1),
+                                      std::memory_order_acq_rel,
+                                      std::memory_order_acquire)) {
+      return;
+    }
+  }
+}
 
 } // namespace SerialTask

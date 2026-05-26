@@ -28,12 +28,12 @@ public:
   }
 
   /**
-   * @brief 绘制检测框、中心点和 FPS，并在窗口中显示图像
+   * @brief 仅绘制检测框、中心点和 FPS，不执行窗口展示。
    * @param frame 输入输出图像帧
-   * @param boxes 检测框列表，每个框为 [x1, y1, x2, y2, confidence]
+   * @param result 检测结果
+   * @param fps 帧率
    */
-
-  static void ShowNow(cv::Mat &frame,
+  static void DrawNow(cv::Mat &frame,
                       const ImageRecognize::DataProcessResult &result,
                       double fps) {
     // 绘制结果
@@ -55,7 +55,9 @@ public:
     }
     cv::putText(frame, "FPS: " + std::to_string(fps), {10, 30},
                 cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 0}, 2);
+  }
 
+  static void ShowFrame(const cv::Mat &frame) {
     static bool window_initialized = false;
     if (!window_initialized) {
       cv::namedWindow("Detection Result", cv::WINDOW_NORMAL);
@@ -63,6 +65,16 @@ public:
       window_initialized = true;
     }
     cv::imshow("Detection Result", frame);
+  }
+
+  /**
+   * @brief 兼容旧接口：绘制后立刻展示。
+   */
+  static void ShowNow(cv::Mat &frame,
+                      const ImageRecognize::DataProcessResult &result,
+                      double fps) {
+    DrawNow(frame, result, fps);
+    ShowFrame(frame);
   }
 
   static void ShowDetectionCenter(cv::Mat &frame, double cx, double cy) {

@@ -12,6 +12,7 @@
 #include "KalmanFilter/KalmanFilters.hpp"
 #include "Tools/AngleUtils.hpp"
 #include "Tools/CameraData.hpp"
+#include "Tools/CameraRoiRuntime.hpp"
 #include "Tools/RuntimeParams.hpp"
 
 namespace Tools {
@@ -112,6 +113,10 @@ public:
     double fy = cameraData.cameraMatrix.at<double>(1, 1);
     double cx = cameraData.cameraMatrix.at<double>(0, 2);
     double cy = cameraData.cameraMatrix.at<double>(1, 2);
+    if (Tools::CameraRoiRuntimeEnabled()) {
+      cx -= static_cast<double>(Tools::CameraRoiRuntimeOffsetX());
+      cy -= static_cast<double>(Tools::CameraRoiRuntimeOffsetY());
+    }
     const double rxNew = (static_cast<double>(targetX) - cx) / fx;
     const double ryNew = (static_cast<double>(targetY) - cy) / fy;
     // yaw/pitch 正方向已相对旧云台约定反向：画面右侧为 +yaw，画面下方为 -pitch。
@@ -195,6 +200,14 @@ public:
     const double fy = cameraData.cameraMatrix.at<double>(1, 1);
     const double cx = cameraData.cameraMatrix.at<double>(0, 2);
     const double cy = cameraData.cameraMatrix.at<double>(1, 2);
+    const double roi_adjusted_cx =
+        Tools::CameraRoiRuntimeEnabled()
+            ? (cx - static_cast<double>(Tools::CameraRoiRuntimeOffsetX()))
+            : cx;
+    const double roi_adjusted_cy =
+        Tools::CameraRoiRuntimeEnabled()
+            ? (cy - static_cast<double>(Tools::CameraRoiRuntimeOffsetY()))
+            : cy;
 
     const double offset_yaw = static_cast<double>(absoluteYaw - currentYaw);
     const double offset_pitch =
@@ -203,8 +216,8 @@ public:
     const double rx = std::tan(offset_yaw * kPi / 180.0);
     const double ry = -std::tan(offset_pitch * kPi / 180.0);
 
-    const float pred_x = static_cast<float>(cx + fx * rx);
-    const float pred_y = static_cast<float>(cy + fy * ry);
+    const float pred_x = static_cast<float>(roi_adjusted_cx + fx * rx);
+    const float pred_y = static_cast<float>(roi_adjusted_cy + fy * ry);
     return {pred_x, pred_y};
   }
 

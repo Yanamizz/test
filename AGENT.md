@@ -27,6 +27,7 @@
 - 主流程/线程/时序改动：优先读 `03` + `05` + `06`
 - 构建或环境问题：优先读 `02` + `04`
 - 串口/网络语义问题：优先读 `03` + `04`
+- 扫描发送/阶段切换/丢目标恢复重构：优先读 `05` + `06`
 - 不确定入口文件：优先读 `05`
 
 ## 当前项目关键约定（摘要）
@@ -35,6 +36,7 @@
 - 去畸变策略：由于畸变参数不准确，项目约定可去除去畸变操作。  
 - 上下文维护：最新交接统一追加到 `agent-context/06-latest-handoff.md`。  
 - 代码改动前，先核对 `agent-context/05-change-entrypoints.md` 的入口映射。
+- 当前主流程已新增 4 个关键 seam：`TargetTrackPipeline`、`StageRuntimeProfile`、`StagePredictorController`、`LostTargetRecoveryController`；扫描发送线程已新增 `ScanSendController`。后续优先沿这些 seam 深化，避免把状态重新摊回 `src/ImagePredict.cc`。
 
 ## 提交前校对清单
 
