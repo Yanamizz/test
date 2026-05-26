@@ -1,17 +1,7 @@
 /**
  * @file    src/RawToClahe.cc
- * @brief   Offline tool to convert saved raw images into CLAHE-processedimages.
-# 批量生成训练用 CLAHE 图，默认输出到 xxx_train_clahe
-./build/bin/RawToClahe captures/run_xxx
-
-  # 指定输出目录
-./build/bin/RawToClahe captures/run_xxx dataset_stage3_train
-
-  # 明确模型输入尺寸
-./build/bin/RawToClahe --size 480x480 captures/run_xxx dataset_stage3_train
-
-  # 如果你真的想要原尺寸 CLAHE 图
-./build/bin/RawToClahe --full-size captures/run_xxx captures/run_xxx_full_clahe
+ * @brief   Offline tool to convert saved raw images or videos into
+ *          CLAHE-processed training assets.
  */
 
 #include "ImageRecognize/YoloLightPreprocess.hpp"
@@ -20,6 +10,7 @@
 
 #include <filesystem>
 #include <iostream>
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -48,6 +39,22 @@ bool IsImageFile(const std::filesystem::path &path) {
   return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp";
 }
 
+bool IsVideoFile(const std::filesystem::path &path) {
+  if (!path.has_extension()) {
+    return false;
+  }
+
+  std::string ext = path.extension().string();
+  std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+
+  return ext == ".avi" || ext == ".mp4" || ext == ".mkv" ||
+         ext == ".mov" || ext == ".wmv" || ext == ".flv" ||
+         ext == ".webm" || ext == ".m4v" || ext == ".mpg" ||
+         ext == ".mpeg";
+}
+
 std::filesystem::path DefaultOutputPath(const std::filesystem::path &input) {
   if (std::filesystem::is_directory(input)) {
     return input.parent_path() / (input.filename().string() + "_train_clahe");
@@ -56,6 +63,9 @@ std::filesystem::path DefaultOutputPath(const std::filesystem::path &input) {
   const std::filesystem::path parent = input.has_parent_path()
                                            ? input.parent_path()
                                            : std::filesystem::path(".");
+  if (IsVideoFile(input)) {
+    return parent / (input.stem().string() + "_train_clahe.avi");
+  }
   return parent /
          (input.stem().string() + "_train_clahe" + input.extension().string());
 }
@@ -101,6 +111,17 @@ BuildModelInputClahe(const cv::Mat &input, const cv::Size &input_size,
   return letterboxed;
 }
 
+cv::Mat ProcessFrame(const cv::Mat &input, const Options &options,
+                     ImageRecognize::YoloLightPreprocessor *preprocessor) {
+  if (options.model_input_mode) {
+    return BuildModelInputClahe(input, options.input_size, preprocessor);
+  }
+
+  cv::Mat output;
+  preprocessor->PreprocessForYolo(input, &output);
+  return output;
+}
+
 bool ConvertOne(const std::filesystem::path &input_file,
                 const std::filesystem::path &output_file,
                 const Options &options,
@@ -111,12 +132,7 @@ bool ConvertOne(const std::filesystem::path &input_file,
     return false;
   }
 
-  cv::Mat output;
-  if (options.model_input_mode) {
-    output = BuildModelInputClahe(input, options.input_size, preprocessor);
-  } else {
-    preprocessor->PreprocessForYolo(input, &output);
-  }
+  const cv::Mat output = ProcessFrame(input, options, preprocessor);
   std::filesystem::create_directories(output_file.parent_path());
   if (!cv::imwrite(output_file.string(), output)) {
     std::cerr << "[RawToClahe] 保存失败: " << output_file << std::endl;
@@ -126,9 +142,58 @@ bool ConvertOne(const std::filesystem::path &input_file,
   return true;
 }
 
+bool ConvertVideo(const Options &options,
+                  ImageRecognize::YoloLightPreprocessor *preprocessor) {
+  cv::VideoCapture capture(options.input_path.string(), cv::CAP_ANY);
+  if (!capture.isOpened()) {
+    std::cerr << "[RawToClahe] 打开视频失败: " << options.input_path
+              << std::endl;
+    return false;
+  }
+
+  const double source_fps = capture.get(cv::CAP_PROP_FPS);
+  const double fps = source_fps > 0.0 ? source_fps : 30.0;
+  const int fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+  cv::VideoWriter writer;
+  int frame_count = 0;
+
+  cv::Mat frame;
+  while (capture.read(frame)) {
+    if (frame.empty()) {
+      continue;
+    }
+
+    const cv::Mat output = ProcessFrame(frame, options, preprocessor);
+    if (!writer.isOpened()) {
+      std::filesystem::create_directories(options.output_path.parent_path());
+      if (!writer.open(options.output_path.string(), fourcc, fps, output.size(),
+                       true)) {
+        std::cerr << "[RawToClahe] 打开视频输出失败: " << options.output_path
+                  << std::endl;
+        return false;
+      }
+    }
+
+    writer.write(output);
+    ++frame_count;
+  }
+
+  if (writer.isOpened()) {
+    writer.release();
+  }
+
+  std::cout << "[RawToClahe] 视频完成: 帧数=" << frame_count
+            << " 模式="
+            << (options.model_input_mode ? "model-input" : "full-size")
+            << " 尺寸=" << options.input_size.width << "x"
+            << options.input_size.height << " 输出=" << options.output_path
+            << std::endl;
+  return frame_count > 0;
+}
+
 void PrintUsage(const char *program) {
   std::cerr << "用法: " << program
-            << " [--model-input|--full-size] [--size WxH] <输入图片或目录> "
+            << " [--model-input|--full-size] [--size WxH] <输入图片/目录/视频> "
                "[输出图片或目录]\n"
             << "示例: " << program
             << " captures/run_xxx captures/run_xxx_train\n"
@@ -136,6 +201,8 @@ void PrintUsage(const char *program) {
             << " --size 480x480 captures/run_xxx/stage3_raw_000001.jpg\n"
             << "示例: " << program
             << " --full-size captures/run_xxx captures/run_xxx_full_clahe"
+            << "\n示例: " << program
+            << " --size 480x480 input.mp4 output_train_clahe.avi"
             << std::endl;
 }
 
@@ -205,6 +272,10 @@ int main(int argc, char **argv) {
   const bool batch_mode = std::filesystem::is_directory(options.input_path);
 
   ImageRecognize::YoloLightPreprocessor preprocessor;
+  if (!batch_mode && IsVideoFile(options.input_path)) {
+    return ConvertVideo(options, &preprocessor) ? 0 : 2;
+  }
+
   std::vector<std::filesystem::path> inputs;
   if (batch_mode) {
     for (const auto &entry :

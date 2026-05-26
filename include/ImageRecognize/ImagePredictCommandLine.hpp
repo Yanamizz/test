@@ -18,6 +18,7 @@ struct ImagePredictCommandLineOptions {
   std::optional<bool> enable_latency_profile;
   std::optional<bool> enable_scan_mode;
   std::optional<bool> enable_save_no_target_images;
+  std::optional<bool> enable_save_full_run_video;
   std::optional<std::string> video_path;
 };
 
@@ -55,6 +56,8 @@ ParseImagePredictCommandLine(int argc, char **argv) {
   constexpr std::string_view kScanModePrefix = "--scan-mode=";
   constexpr std::string_view kSaveNoTargetImagesPrefix =
       "--save-no-target-images=";
+  constexpr std::string_view kSaveFullRunVideoPrefix =
+      "--save-full-run-video=";
   constexpr std::string_view kSendLogPrefix = "--send-log=";
   constexpr std::string_view kVideoPrefix = "--video=";
 
@@ -151,6 +154,25 @@ ParseImagePredictCommandLine(int argc, char **argv) {
       options.enable_save_no_target_images = detail::ParseBoolValue(
           arg.substr(kSaveNoTargetImagesPrefix.size()),
           options.enable_save_no_target_images);
+      continue;
+    }
+
+    if (arg == "--save-full-run-video" ||
+        arg == "--enable-save-full-run-video") {
+      options.enable_save_full_run_video = true;
+      continue;
+    }
+
+    if (arg == "--no-save-full-run-video" ||
+        arg == "--disable-save-full-run-video") {
+      options.enable_save_full_run_video = false;
+      continue;
+    }
+
+    if (detail::StartsWith(arg, kSaveFullRunVideoPrefix)) {
+      options.enable_save_full_run_video = detail::ParseBoolValue(
+          arg.substr(kSaveFullRunVideoPrefix.size()),
+          options.enable_save_full_run_video);
       continue;
     }
 

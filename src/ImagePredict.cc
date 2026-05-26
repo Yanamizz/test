@@ -255,8 +255,9 @@ static void PrintPredictSettings(
     Tools::FilterType filter_type,
     ImageRecognize::TargetCampMode target_camp_mode, bool enable_display,
     bool enable_scan_mode, bool enable_save_no_target_images,
-    bool /*enable_save_target_videos*/, bool enable_latency_profile,
-    bool enable_calibration_sliders, bool enable_send_log) {
+    bool enable_save_target_videos, bool enable_save_full_run_video,
+    bool enable_latency_profile, bool enable_calibration_sliders,
+    bool enable_send_log) {
   std::cout << "[角度滤波] 类型: " << Tools::ToString(filter_type) << std::endl;
   std::cout << "[跟踪阵营] 模式: " << ImageRecognize::ToString(target_camp_mode)
             << std::endl;
@@ -275,6 +276,10 @@ static void PrintPredictSettings(
   std::cout << " Hz" << std::endl;
   std::cout << "[异常图片保存] 启用: "
             << (enable_save_no_target_images ? "true" : "false") << std::endl;
+  std::cout << "[目标视频保存] 启用: "
+            << (enable_save_target_videos ? "true" : "false") << std::endl;
+  std::cout << "[全程录像] 启用: "
+            << (enable_save_full_run_video ? "true" : "false") << std::endl;
   std::cout << "[延迟统计] 启用: "
             << (enable_latency_profile ? "true" : "false") << std::endl;
   std::cout << "[发送日志] 启用: " << (enable_send_log ? "true" : "false")
@@ -647,16 +652,21 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
                     Tools::Params().enable_save_no_target_images);
   const bool enable_save_target_videos =
       Tools::Params().enable_save_target_videos;
+  const bool enable_save_full_run_video = ResolveOption(
+      command_line_options.enable_save_full_run_video,
+      Tools::Params().enable_save_full_run_video);
   const bool enable_latency_profile =
       ResolveOption(command_line_options.enable_latency_profile,
                     Tools::Params().enable_latency_profile);
 
   PrintPredictSettings(filter_type, target_camp_mode, enable_display,
                        enable_scan_mode, enable_save_no_target_images,
-                       enable_save_target_videos, enable_latency_profile,
-                       enable_calibration_sliders, enable_send_log);
+                       enable_save_target_videos, enable_save_full_run_video,
+                       enable_latency_profile, enable_calibration_sliders,
+                       enable_send_log);
   static std::unique_ptr<Tools::SaveImageOnNoTarget> no_target_saver;
   static std::unique_ptr<Tools::SaveVideoOnTarget> target_video_saver;
+  static std::unique_ptr<Tools::SaveVideoFullRun> full_run_video_saver;
   if (enable_save_no_target_images && !no_target_saver) {
     no_target_saver =
         std::make_unique<Tools::SaveImageOnNoTarget>(5, "captures");
@@ -664,6 +674,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   if (enable_save_target_videos && !target_video_saver) {
     target_video_saver = std::make_unique<Tools::SaveVideoOnTarget>(
         Tools::Params().target_video_fps, "target_videos");
+  }
+  if (enable_save_full_run_video && !full_run_video_saver) {
+    full_run_video_saver = std::make_unique<Tools::SaveVideoFullRun>(
+        Tools::Params().target_video_fps, "full_run_videos");
   }
 
   std::chrono::steady_clock::time_point prev_frame_ts{};
@@ -1076,6 +1090,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     if (enable_save_target_videos && target_video_saver) {
       const cv::Mat &video_frame = do_display ? frame : inflight_frame;
       target_video_saver->Update(video_frame, has_tracked_box);
+    }
+    if (enable_save_full_run_video && full_run_video_saver) {
+      const cv::Mat &video_frame = do_display ? frame : inflight_frame;
+      full_run_video_saver->Update(video_frame);
     }
 
     // 处理 GUI 事件并允许按键退出

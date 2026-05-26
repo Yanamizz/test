@@ -54,6 +54,7 @@ struct RuntimeParams {
   bool enable_scan_mode;             // 是否启用丢目标后扫描模式
   bool enable_save_no_target_images; // 是否保存“无目标”样本图
   bool enable_save_target_videos;    // 是否保存“有目标”视频片段
+  bool enable_save_full_run_video;   // 是否保存程序全程视频
   bool enable_display;               // 是否启用可视化窗口
   bool enable_calibration_sliders;   // 是否启用标定滑块 UI
   bool enable_send_log;              // 是否打印串口发送日志
@@ -89,19 +90,19 @@ inline const RuntimeParams &Params() {
       5.0f,  // pitch_abs_limit: pitch 单次最大发送偏角绝对值 10 度
       0.010, // angle_velocity_dt_min_sec: 速度估计最小 dt 10ms
       0.080, // angle_velocity_dt_max_sec: 速度估计最大 dt 80ms
-      0.0, // angle_velocity_yaw_abs_limit_deg_per_sec: yaw 角速度限幅（测试设为
-           // 0）
-      450.0,  // angle_velocity_pitch_abs_limit_deg_per_sec: pitch
-              // 角速度限幅（保持）
-      0.0,    // angle_velocity_yaw_max_accel_deg_per_sec2: yaw
-              // 角加速度限幅（测试设为 0）
-      3200.0, // angle_velocity_pitch_max_accel_deg_per_sec2: pitch
-              // 角加速度限幅（激进跟手档）
-      0.0, // angle_velocity_yaw_cutoff_hz: yaw 角速度低通截止频率（测试设为 0）
-      24.0, // angle_velocity_pitch_cutoff_hz: pitch
-            // 角速度低通截止频率（激进跟手档）
-      0.0, // angle_velocity_yaw_deadband_deg_per_sec: yaw 角速度死区（测试设为
-           // 0）
+      480.0, // angle_velocity_yaw_abs_limit_deg_per_sec: yaw
+             // 角速度限幅（调参激进档）
+      520.0, // angle_velocity_pitch_abs_limit_deg_per_sec: pitch
+             // 角速度限幅（调参激进档）
+      3600.0, // angle_velocity_yaw_max_accel_deg_per_sec2: yaw
+              // 角加速度限幅（调参激进档）
+      4200.0, // angle_velocity_pitch_max_accel_deg_per_sec2: pitch
+              // 角加速度限幅（调参激进档）
+      28.0, // angle_velocity_yaw_cutoff_hz: yaw 角速度低通截止频率（调参激进档）
+      32.0, // angle_velocity_pitch_cutoff_hz: pitch
+            // 角速度低通截止频率（调参激进档）
+      0.05, // angle_velocity_yaw_deadband_deg_per_sec: yaw
+            // 角速度死区（抑制极小微抖）
       0.05, // angle_velocity_pitch_deadband_deg_per_sec: pitch
             // 角速度死区（仅保留极小微抖抑制）
 
@@ -111,6 +112,7 @@ inline const RuntimeParams &Params() {
       true,  // enable_scan_mode: 默认开启扫描模式
       true,  // enable_save_no_target_images: 默认不保存无目标图像
       false, // enable_save_target_videos: 默认不保存目标视频
+      false, // enable_save_full_run_video: 默认不保存全程视频
       true,  // enable_display: 默认开启显示窗口
       true,  // enable_calibration_sliders: 默认开启标定滑块
       true,  // enable_send_log: 默认开启发送日志

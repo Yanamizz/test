@@ -6,13 +6,26 @@
 
 ## 本轮完成事项（延迟优先）
 
-0. Pitch 速度滤波调参记录
+0. Yaw/Pitch 速度滤波调参激进档
+- 文件：`include/Tools/RuntimeParams.hpp`
+- 变更：进入调参激进档，yaw 速度参数为 `480.0`、`3600.0`、`28.0`、`0.05`，pitch 速度参数为 `520.0`、`4200.0`、`32.0`、`0.05`，分别对应速度限幅、角加速度限幅、低通截止频率、死区。
+- 目的：提高 yaw/pitch 速度响应，减少跟随滞后；若实机出现小抖，优先回落 cutoff 或 max_accel。
+
+1. 增加全程录像开关
+- 文件：`include/Tools/SaveVideo.hpp`
+- 文件：`include/Tools/RuntimeParams.hpp`
+- 文件：`include/ImageRecognize/ImagePredictCommandLine.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `enable_save_full_run_video`，默认关闭；命令行可用 `--save-full-run-video`/`--no-save-full-run-video` 控制。
+- 变更：启用后从程序运行到结束持续保存视频到 `full_run_videos/full_run_YYYYmmdd_HHMMSS/`，复用 `target_video_fps` 和 MJPG AVI 编码。
+
+2. Pitch 速度滤波调参记录
 - 文件：`include/Tools/RuntimeParams.hpp`
 - 变更：曾将 `angle_velocity_pitch_max_accel_deg_per_sec2` 从 `3000.0` 收到 `2600.0`、`angle_velocity_pitch_cutoff_hz` 从 `22.0` 收到 `18.0`、`angle_velocity_pitch_deadband_deg_per_sec` 从 `0.0` 加到 `0.25` 来压制微抖。
 - 变更：因实机反馈 `pitch` 仍略滞后，当前推进到激进跟手档 `3200.0`、`24.0`、`0.05`，比原始速度滤波更跟手但仍保留极小微抖抑制。
 - 目的：在抑制 `pitch` 小抖的前提下减少跟随滞后。
 
-1. Stage3 推理端轻量光照归一化
+3. Stage3 推理端轻量光照归一化
 - 文件：`include/ImageRecognize/YoloLightPreprocess.hpp`
 - 文件：`src/ImagePredict.cc`
 - 文件：`include/Tools/SaveImage.hpp`
@@ -20,21 +33,21 @@
 - 变更：stage3 无目标/多目标样本保存输出 `stage3_raw_*.jpg`，对应进入 stage3 预测器前的原始帧；实际 CLAHE 在模型输入尺寸上执行。
 - 注意：所有阶段异常样本保存条件保持“检测框数量不是 1 个”，即无目标或多目标。
 
-2. CPU 大核识别修正（12900H 重点）  
+4. CPU 大核识别修正（12900H 重点）  
 - 文件：`include/Tools/CpuAffinity.hpp`  
 - 变更：`detectBigCoresByType()` 从“`core_type >= 1`”改为“取观测到的最大 `core_type` 作为性能核组”。  
 - 目的：避免把 E 核误归为大核，降低推理线程调度抖动。
 
-3. 增加主线程辅助核绑定接口  
+5. 增加主线程辅助核绑定接口  
 - 文件：`include/Tools/CpuAffinity.hpp`  
 - 变更：新增 `BindCurrentThreadToAuxCores()`。
 
-4. 主线程初始化后绑核策略调整  
+6. 主线程初始化后绑核策略调整  
 - 文件：`src/ImagePredict.cc`  
 - 变更：模型初始化完成后，主线程从全核改为辅助核集合。  
 - 目的：减少与推理关键路径争抢性能核。
 
-5. OpenVINO 推理线程策略改为延迟导向  
+7. OpenVINO 推理线程策略改为延迟导向  
 - 文件：`include/ImageRecognize/ImagePredict_OPENVINO.hpp`  
 - 变更：参数字段改名 `hw_threads_reserved -> latency_threads_cap`；  
   `infer_threads` 由“总线程减保留”改为 `min(hw_threads, latency_threads_cap)`，并带最小保护。  
