@@ -9,15 +9,19 @@
 #include <array>
 #include <cmath>
 
+#include "KalmanFilter/OneEuroFilter.hpp"
+
 namespace ImageRecognize {
 
 struct TemporalBoxStabilizerParams {
   float min_iou_to_stabilize;         // 低于该 IoU 直接放弃平滑，避免错平滑到别的目标
   float max_center_distance_ratio;    // 中心点相对位移超过该比例时不做平滑
   float max_area_ratio;               // 面积变化过大时不做平滑
-  float base_measurement_gain;        // 当前帧测量的基础权重，越大越跟手
-  float min_measurement_gain;         // 平滑时当前帧的最小权重
-  float max_measurement_gain;         // 平滑时当前帧的最大权重
+  double center_min_cutoff_hz;        // 框中心点 One Euro 最小截止频率
+  double center_beta;                 // 框中心点 One Euro 速度增益
+  double size_min_cutoff_hz;          // 框尺寸 One Euro 最小截止频率
+  double size_beta;                   // 框尺寸 One Euro 速度增益
+  double derivative_cutoff_hz;        // One Euro 导数低通截止频率
 
   TemporalBoxStabilizerParams();
 };
@@ -26,19 +30,29 @@ class TemporalBoxStabilizer {
  public:
   explicit TemporalBoxStabilizer(
       const TemporalBoxStabilizerParams &params = TemporalBoxStabilizerParams{})
-      : params_(params) {}
+      : params_(params),
+        center_x_filter_(120.0, params.center_min_cutoff_hz, params.center_beta,
+                         params.derivative_cutoff_hz),
+        center_y_filter_(120.0, params.center_min_cutoff_hz, params.center_beta,
+                         params.derivative_cutoff_hz),
+        width_filter_(120.0, params.size_min_cutoff_hz, params.size_beta,
+                      params.derivative_cutoff_hz),
+        height_filter_(120.0, params.size_min_cutoff_hz, params.size_beta,
+                       params.derivative_cutoff_hz) {}
 
   void Reset() {
     initialized_ = false;
     stable_box_ = {};
+    ResetFilters_();
   }
 
   std::array<float, 6> Update(const std::array<float, 6> &raw_box,
-                              bool matched_history) {
+                              bool matched_history, double dt = -1.0) {
     if (!initialized_ || !matched_history ||
         static_cast<int>(stable_box_[5]) != static_cast<int>(raw_box[5])) {
       stable_box_ = raw_box;
       initialized_ = true;
+      SeedFiltersFromBox_(raw_box, dt);
       return stable_box_;
     }
 
@@ -55,40 +69,34 @@ class TemporalBoxStabilizer {
         !area_ratio_ok) {
       stable_box_ = raw_box;
       initialized_ = true;
+      SeedFiltersFromBox_(raw_box, dt);
       return stable_box_;
     }
 
-    const float iou_score =
-        Saturate_((iou - params_.min_iou_to_stabilize) /
-                  std::max(1e-3f, 1.0f - params_.min_iou_to_stabilize));
-    const float motion_score =
-        Saturate_(1.0f - center_distance_ratio /
-                             std::max(params_.max_center_distance_ratio, 1e-3f));
-    const float confidence_score = Saturate_(raw_box[4]);
-    const float area_score = AreaScore_(area_ratio);
+    const BoxState raw_state = ToBoxState_(raw_box);
+    BoxState filtered_state{};
+    filtered_state.cx =
+        static_cast<float>(center_x_filter_.filter(raw_state.cx, dt));
+    filtered_state.cy =
+        static_cast<float>(center_y_filter_.filter(raw_state.cy, dt));
+    filtered_state.width =
+        std::max(1.0f, static_cast<float>(width_filter_.filter(raw_state.width, dt)));
+    filtered_state.height = std::max(
+        1.0f, static_cast<float>(height_filter_.filter(raw_state.height, dt)));
 
-    float measurement_gain =
-        params_.base_measurement_gain +
-        0.18f * (1.0f - iou_score) +
-        0.16f * (1.0f - motion_score) +
-        0.08f * (1.0f - confidence_score) +
-        0.08f * (1.0f - area_score);
-    measurement_gain =
-        std::clamp(measurement_gain, params_.min_measurement_gain,
-                   params_.max_measurement_gain);
-
-    for (int i = 0; i < 4; ++i) {
-      stable_box_[i] =
-          stable_box_[i] +
-          (raw_box[i] - stable_box_[i]) * measurement_gain;
-    }
-    stable_box_[4] = raw_box[4];
-    stable_box_[5] = raw_box[5];
+    stable_box_ = FromBoxState_(filtered_state, raw_box[4], raw_box[5]);
     initialized_ = true;
     return stable_box_;
   }
 
  private:
+  struct BoxState {
+    float cx = 0.0f;
+    float cy = 0.0f;
+    float width = 0.0f;
+    float height = 0.0f;
+  };
+
   static float Saturate_(float value) {
     return std::clamp(value, 0.0f, 1.0f);
   }
@@ -141,15 +149,41 @@ class TemporalBoxStabilizer {
     return cand_area / ref_area;
   }
 
-  float AreaScore_(float area_ratio) const {
-    const float safe_ratio = std::max(area_ratio, 1e-6f);
-    const float safe_limit = std::max(params_.max_area_ratio, 1.01f);
-    const float normalized_log_distance =
-        std::abs(std::log(safe_ratio)) / std::log(safe_limit);
-    return Saturate_(1.0f - normalized_log_distance);
+  static BoxState ToBoxState_(const std::array<float, 6> &box) {
+    const float width = BoxWidth_(box);
+    const float height = BoxHeight_(box);
+    return {0.5f * (box[0] + box[2]), 0.5f * (box[1] + box[3]), width, height};
+  }
+
+  static std::array<float, 6> FromBoxState_(const BoxState &state, float score,
+                                            float class_id) {
+    const float half_width = 0.5f * state.width;
+    const float half_height = 0.5f * state.height;
+    return {state.cx - half_width, state.cy - half_height,
+            state.cx + half_width, state.cy + half_height, score, class_id};
+  }
+
+  void ResetFilters_() {
+    center_x_filter_.reset();
+    center_y_filter_.reset();
+    width_filter_.reset();
+    height_filter_.reset();
+  }
+
+  void SeedFiltersFromBox_(const std::array<float, 6> &box, double dt) {
+    ResetFilters_();
+    const BoxState state = ToBoxState_(box);
+    center_x_filter_.filter(state.cx, dt);
+    center_y_filter_.filter(state.cy, dt);
+    width_filter_.filter(state.width, dt);
+    height_filter_.filter(state.height, dt);
   }
 
   TemporalBoxStabilizerParams params_{};
+  Tools::OneEuroFilter center_x_filter_;
+  Tools::OneEuroFilter center_y_filter_;
+  Tools::OneEuroFilter width_filter_;
+  Tools::OneEuroFilter height_filter_;
   bool initialized_ = false;
   std::array<float, 6> stable_box_{};
 };
@@ -158,8 +192,10 @@ inline TemporalBoxStabilizerParams::TemporalBoxStabilizerParams()
     : min_iou_to_stabilize(0.30f),      // 低于该 IoU 视为明显跳框，不做平滑
       max_center_distance_ratio(0.65f), // 位移过大时优先保留响应速度
       max_area_ratio(1.8f),             // 面积变化超过 1.8x 不做平滑
-      base_measurement_gain(0.62f),     // 默认更偏向当前观测，优先保精度
-      min_measurement_gain(0.45f),      // 平滑时至少保留 45% 当前观测
-      max_measurement_gain(0.88f) {}    // 跳动较大时几乎直接跟随当前观测
+      center_min_cutoff_hz(1.6),        // 低速时更稳，高速时交给 beta 拉高带宽
+      center_beta(0.28),                // 中心移动加快时主动减小滞后
+      size_min_cutoff_hz(1.2),          // 尺寸变化通常比中心更抖，适当更稳
+      size_beta(0.16),                  // 尺寸运动时仍保留一定响应
+      derivative_cutoff_hz(1.0) {}
 
 } // namespace ImageRecognize

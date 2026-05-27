@@ -109,29 +109,8 @@ public:
       is_initialized = true;
     }
 
-    double fx = cameraData.cameraMatrix.at<double>(0, 0);
-    double fy = cameraData.cameraMatrix.at<double>(1, 1);
-    double cx = cameraData.cameraMatrix.at<double>(0, 2);
-    double cy = cameraData.cameraMatrix.at<double>(1, 2);
-    if (Tools::CameraRoiRuntimeEnabled()) {
-      cx -= static_cast<double>(Tools::CameraRoiRuntimeOffsetX());
-      cy -= static_cast<double>(Tools::CameraRoiRuntimeOffsetY());
-    }
-    const double rxNew = (static_cast<double>(targetX) - cx) / fx;
-    const double ryNew = (static_cast<double>(targetY) - cy) / fy;
-    // yaw/pitch 正方向已相对旧云台约定反向：画面右侧为 +yaw，画面下方为 -pitch。
-    double offset_yaw = std::atan2(rxNew, 1.0) / kPi * 180.0;
-    double offset_pitch = -std::atan2(ryNew, 1.0) / kPi * 180.0;
-
-    if (std::abs(offset_yaw) > Params().max_offset_deg) {
-      offset_yaw = Params().max_offset_deg * (offset_yaw > 0 ? 1.0 : -1.0);
-    }
-    if (std::abs(offset_pitch) > Params().max_offset_deg) {
-      offset_pitch = Params().max_offset_deg * (offset_pitch > 0 ? 1.0 : -1.0);
-    }
-
-    double absolute_yaw = currentYaw + offset_yaw;
-    double absolute_pitch = currentPitch + offset_pitch;
+    const auto [absolute_yaw, absolute_pitch] =
+        ComputeRawAbsoluteAngles_(targetX, targetY, currentYaw, currentPitch);
 
     AngleCommand result{};
 
@@ -193,6 +172,16 @@ public:
     return {result.yaw, result.pitch};
   }
 
+  std::pair<float, float>
+  CalculateAbsoluteAnglesWithoutFilter(float targetX, float targetY,
+                                       float currentYaw,
+                                       float currentPitch) const {
+    const auto [absolute_yaw, absolute_pitch] =
+        ComputeRawAbsoluteAngles_(targetX, targetY, currentYaw, currentPitch);
+    return {static_cast<float>(absolute_yaw),
+            static_cast<float>(absolute_pitch)};
+  }
+
   cv::Point2f AbsoluteAnglesToPixel(float absoluteYaw, float absolutePitch,
                                     float currentYaw,
                                     float currentPitch) const {
@@ -222,6 +211,35 @@ public:
   }
 
 private:
+  std::pair<double, double> ComputeRawAbsoluteAngles_(float targetX,
+                                                      float targetY,
+                                                      float currentYaw,
+                                                      float currentPitch) const {
+    const double fx = cameraData.cameraMatrix.at<double>(0, 0);
+    const double fy = cameraData.cameraMatrix.at<double>(1, 1);
+    double cx = cameraData.cameraMatrix.at<double>(0, 2);
+    double cy = cameraData.cameraMatrix.at<double>(1, 2);
+    if (Tools::CameraRoiRuntimeEnabled()) {
+      cx -= static_cast<double>(Tools::CameraRoiRuntimeOffsetX());
+      cy -= static_cast<double>(Tools::CameraRoiRuntimeOffsetY());
+    }
+
+    const double rx = (static_cast<double>(targetX) - cx) / fx;
+    const double ry = (static_cast<double>(targetY) - cy) / fy;
+    double offset_yaw = std::atan2(rx, 1.0) / kPi * 180.0;
+    double offset_pitch = -std::atan2(ry, 1.0) / kPi * 180.0;
+
+    if (std::abs(offset_yaw) > Params().max_offset_deg) {
+      offset_yaw = Params().max_offset_deg * (offset_yaw > 0 ? 1.0 : -1.0);
+    }
+    if (std::abs(offset_pitch) > Params().max_offset_deg) {
+      offset_pitch = Params().max_offset_deg * (offset_pitch > 0 ? 1.0 : -1.0);
+    }
+
+    return {static_cast<double>(currentYaw) + offset_yaw,
+            static_cast<double>(currentPitch) + offset_pitch};
+  }
+
   void ResetFilters(double yaw, double pitch) {
     ApplyTunableFilterGains();
     has_last_filtered_angles_ = false;

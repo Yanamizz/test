@@ -42,6 +42,7 @@ struct StageCameraRoiProfile {
 struct StageScanProfile {
   double configured_send_hz = 0.0;
   double effective_send_hz = 1.0;
+  double yaw_speed_deg_per_sec = 0.0;
   int origin_hold_ms = 0;
   float pitch_wavelength_percent = 100.0f;
   float pitch_amplitude_percent = 100.0f;
@@ -50,6 +51,9 @@ struct StageScanProfile {
 
 struct StageLostTargetCoastProfile {
   int duration_ms = 0;
+  int trigger_delay_ms = 0;
+  int reacquire_confirm_ms = 0;
+  double reacquire_gate_deg = 0.0;
   double yaw_speed_deg_per_sec = 0.0;
   double pitch_speed_deg_per_sec = 0.0;
 };
@@ -70,8 +74,6 @@ struct StageRuntimeProfile {
 
 inline StageRuntimeProfile MakeStageRuntimeProfile(RuntimeStage stage,
                                                    double scan_send_hz_cap) {
-  constexpr float kDefaultYawStepDegPerTick = 0.08f;
-
   const auto &params = Params();
   const bool stage3_mode = IsStage3(stage);
 
@@ -97,6 +99,9 @@ inline StageRuntimeProfile MakeStageRuntimeProfile(RuntimeStage stage,
   profile.scan.effective_send_hz =
       std::clamp(profile.scan.configured_send_hz, 1.0,
                  std::max(1.0, scan_send_hz_cap));
+  profile.scan.yaw_speed_deg_per_sec =
+      std::max(0.01, stage3_mode ? params.stage3_scan_yaw_speed_deg_per_sec
+                                 : params.scan_yaw_speed_deg_per_sec);
   profile.scan.origin_hold_ms =
       std::max(0, stage3_mode ? params.stage3_scan_origin_hold_ms
                               : params.scan_origin_hold_ms);
@@ -112,11 +117,19 @@ inline StageRuntimeProfile MakeStageRuntimeProfile(RuntimeStage stage,
   profile.scan.controller_config.tick_rate_hz =
       static_cast<float>(std::max(profile.scan.effective_send_hz, 1.0));
   profile.scan.controller_config.yaw_step_deg_per_tick =
-      kDefaultYawStepDegPerTick;
+      static_cast<float>(profile.scan.yaw_speed_deg_per_sec /
+                         std::max(profile.scan.controller_config.tick_rate_hz,
+                                  1.0f));
 
   if (stage3_mode) {
     profile.lost_target_coast.duration_ms =
         std::max(0, params.stage3_lost_target_coast_ms);
+    profile.lost_target_coast.trigger_delay_ms =
+        std::max(0, params.stage3_lost_target_coast_trigger_delay_ms);
+    profile.lost_target_coast.reacquire_confirm_ms =
+        std::max(0, params.stage3_lost_target_reacquire_confirm_ms);
+    profile.lost_target_coast.reacquire_gate_deg =
+        std::max(0.0, params.stage3_lost_target_reacquire_gate_deg);
     profile.lost_target_coast.yaw_speed_deg_per_sec =
         params.stage3_lost_target_coast_yaw_speed_deg_per_sec;
     profile.lost_target_coast.pitch_speed_deg_per_sec =

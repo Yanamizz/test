@@ -34,7 +34,8 @@ class TargetTrackPipeline {
 
   TargetTrackPipelineResult Update(const PredictResult &result,
                                    TargetCampMode target_camp_mode,
-                                   bool enable_box_stabilization) {
+                                   bool enable_box_stabilization,
+                                   double dt = -1.0) {
     TargetTrackPipelineResult pipeline_result{};
     pipeline_result.candidate_boxes =
         FilterTrackBoxes(result.boxes, target_camp_mode);
@@ -50,7 +51,7 @@ class TargetTrackPipeline {
     if (enable_box_stabilization) {
       pipeline_result.tracked_box = stabilizer_.Update(
           pipeline_result.tracked_box,
-          pipeline_result.track_result.matched_history);
+          pipeline_result.track_result.matched_history, dt);
     }
     pipeline_result.has_tracked_box = true;
     return pipeline_result;

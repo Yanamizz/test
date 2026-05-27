@@ -33,9 +33,11 @@ cmake --build "${BUILD_DIR}" --target ImagePredict -j"${JOBS}"
 
 ANTIDRONE_RUNTIME_PARAMS_PATH="${RUNTIME_PARAMS_PATH}" \
 "${TARGET}" \
+  --scan-mode \
   --no-display \
   --no-calibration-sliders \
   --no-latency-profile \
   --no-save-no-target-images \
+  --save-full-run-video \
   --no-send-log \
   "$@"

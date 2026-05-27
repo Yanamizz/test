@@ -58,6 +58,21 @@ struct AimbotSendCommand {
   std::chrono::steady_clock::time_point source_frame_ts{};
   std::chrono::steady_clock::time_point enqueue_ts{};
 };
+
+struct FrameOverlayData {
+  bool show_detection_center = false;
+  cv::Point2f detection_center{};
+  bool show_tracked_center = false;
+  cv::Point2f tracked_center{};
+  bool show_distance = false;
+  float distance = 0.0f;
+};
+
+struct TrackedTargetAbsoluteAngles {
+  bool valid = false;
+  float yaw = 0.0f;
+  float pitch = 0.0f;
+};
 } // namespace
 
 std::atomic<bool> g_running(true); // 全局运行标志
@@ -274,6 +289,20 @@ static void PrintPredictSettings(
     bool enable_save_target_videos, bool enable_save_full_run_video,
     bool enable_latency_profile, bool enable_calibration_sliders,
     bool enable_send_log) {
+  const auto print_scan_profile = [](const Tools::StageRuntimeProfile &profile) {
+    std::cout << "[扫描模式] " << profile.DisplayName() << " 发送频率: "
+              << profile.scan.effective_send_hz;
+    if (profile.scan.effective_send_hz < profile.scan.configured_send_hz) {
+      std::cout << "（配置值 " << profile.scan.configured_send_hz
+                << "，已受串口带宽限制）";
+    }
+    std::cout << " Hz，yaw_speed="
+              << profile.scan.yaw_speed_deg_per_sec
+              << " deg/s，lambda_percent="
+              << profile.scan.pitch_wavelength_percent << "，A_percent="
+              << profile.scan.pitch_amplitude_percent << std::endl;
+  };
+
   std::cout << "[角度滤波] 类型: " << Tools::ToString(filter_type) << std::endl;
   std::cout << "[跟踪阵营] 模式: " << ImageRecognize::ToString(target_camp_mode)
             << std::endl;
@@ -284,38 +313,20 @@ static void PrintPredictSettings(
   std::cout << "[扫描模式] 启用: " << (enable_scan_mode ? "true" : "false")
             << std::endl;
   const auto stage12_profile = StageProfile(Tools::RuntimeStage::Stage12);
-  std::cout << "[扫描模式] " << stage12_profile.DisplayName() << " 发送频率: "
-            << stage12_profile.scan.effective_send_hz;
-  if (stage12_profile.scan.effective_send_hz <
-      stage12_profile.scan.configured_send_hz) {
-    std::cout << "（配置值 " << stage12_profile.scan.configured_send_hz
-              << "，已受串口带宽限制）";
-  }
-  std::cout << " Hz，lambda_percent="
-            << stage12_profile.scan.pitch_wavelength_percent
-            << "，A_percent="
-            << stage12_profile.scan.pitch_amplitude_percent
-            << std::endl;
+  print_scan_profile(stage12_profile);
   const auto stage3_profile = StageProfile(Tools::RuntimeStage::Stage3);
-  std::cout << "[扫描模式] " << stage3_profile.DisplayName() << " 发送频率: "
-            << stage3_profile.scan.effective_send_hz;
-  if (stage3_profile.scan.effective_send_hz <
-      stage3_profile.scan.configured_send_hz) {
-    std::cout << "（配置值 " << stage3_profile.scan.configured_send_hz
-              << "，已受串口带宽限制）";
-  }
-  std::cout << " Hz，lambda_percent="
-            << stage3_profile.scan.pitch_wavelength_percent
-            << "，A_percent="
-            << stage3_profile.scan.pitch_amplitude_percent
-            << std::endl;
+  print_scan_profile(stage3_profile);
   std::cout << "[扫描模式] " << stage3_profile.DisplayName() << " 丢失续行: "
             << stage3_profile.lost_target_coast.duration_ms
             << " ms，yaw_speed="
             << stage3_profile.lost_target_coast.yaw_speed_deg_per_sec
             << " deg/s，pitch_speed="
             << stage3_profile.lost_target_coast.pitch_speed_deg_per_sec
-            << " deg/s" << std::endl;
+            << " deg/s，reacquire_delay="
+            << stage3_profile.lost_target_coast.reacquire_confirm_ms
+            << " ms，reacquire_gate="
+            << stage3_profile.lost_target_coast.reacquire_gate_deg
+            << " deg" << std::endl;
   std::cout << "[异常图片保存] 启用: "
             << (enable_save_no_target_images ? "true" : "false") << std::endl;
   std::cout << "[目标视频保存] 启用: "
@@ -358,6 +369,12 @@ static void AddLatencyFrame(bool enabled, LatencyStats &total,
 
   total.AddFrame();
   window.AddFrame();
+}
+
+static double ElapsedMilliseconds(
+    const std::chrono::steady_clock::time_point &start,
+    const std::chrono::steady_clock::time_point &end) {
+  return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
 static void AddSendLatencySample(
@@ -472,6 +489,37 @@ static bool SnapshotLatestFrame(
   return true;
 }
 
+static void PublishLatestFrame(cv::Mat frame,
+                               const std::chrono::steady_clock::time_point &ts) {
+  const int write_idx = g_write_idx.load(std::memory_order_relaxed);
+  g_frame_buffers[write_idx].frame = std::move(frame);
+  g_frame_buffers[write_idx].ts = ts;
+
+  g_write_idx.store(1 - write_idx, std::memory_order_release);
+  g_read_idx.store(write_idx, std::memory_order_release);
+  g_frame_cv.notify_one();
+}
+
+static void EnsureOptionalSaversInitialized(
+    bool enable_save_no_target_images, bool enable_save_target_videos,
+    bool enable_save_full_run_video,
+    std::unique_ptr<Tools::SaveImageOnNoTarget> *no_target_saver,
+    std::unique_ptr<Tools::SaveVideoOnTarget> *target_video_saver,
+    std::unique_ptr<Tools::SaveVideoFullRun> *full_run_video_saver) {
+  if (enable_save_no_target_images && !*no_target_saver) {
+    *no_target_saver = std::make_unique<Tools::SaveImageOnNoTarget>(5, "captures");
+  }
+  if (enable_save_target_videos && !*target_video_saver) {
+    *target_video_saver = std::make_unique<Tools::SaveVideoOnTarget>(
+        Tools::Params().target_video_fps, "target_videos", cv::Size(480, 480));
+  }
+  if (enable_save_full_run_video && !*full_run_video_saver) {
+    *full_run_video_saver = std::make_unique<Tools::SaveVideoFullRun>(
+        Tools::Params().target_video_fps, "full_run_videos",
+        cv::Size(480, 480));
+  }
+}
+
 } // namespace
 
 void CaptureThread(CameraTask::GalaxyCamera *camera,
@@ -506,10 +554,14 @@ int main(int argc, char **argv) {
     std::cout << "[Camera] Stage3 ROI request: width="
               << stage3_profile.roi.width
               << " height=" << stage3_profile.roi.height
-              << " offset_x=" << stage3_profile.roi.offset_x
-              << " offset_y=" << stage3_profile.roi.offset_y
               << " keep_centered="
               << (stage3_profile.roi.keep_centered ? "true" : "false")
+              << (stage3_profile.roi.keep_centered
+                      ? " anchor=center"
+                      : " offset_x=" +
+                            std::to_string(stage3_profile.roi.offset_x) +
+                            " offset_y=" +
+                            std::to_string(stage3_profile.roi.offset_y))
               << std::endl;
   }
 
@@ -620,14 +672,7 @@ void CaptureThread(CameraTask::GalaxyCamera *camera,
         std::cout << "[视频输入] 回到开头继续播放。" << std::endl;
       }
 
-      int write_idx = g_write_idx.load(std::memory_order_relaxed);
-      g_frame_buffers[write_idx].frame = std::move(frame);
-      g_frame_buffers[write_idx].ts = std::chrono::steady_clock::now();
-
-      int next_write = 1 - write_idx;
-      g_write_idx.store(next_write, std::memory_order_release);
-      g_read_idx.store(write_idx, std::memory_order_release);
-      g_frame_cv.notify_one();
+      PublishLatestFrame(std::move(frame), std::chrono::steady_clock::now());
 
       next_frame_time +=
           std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -648,17 +693,32 @@ void CaptureThread(CameraTask::GalaxyCamera *camera,
 
   bool last_stage3_roi_mode = g_stage3_roi_mode.load(std::memory_order_acquire);
   auto apply_stage3_roi_mode = [&](bool stage3_roi_mode) {
+    const auto total_start = std::chrono::steady_clock::now();
     const auto profile = StageProfile(stage3_roi_mode);
+    const auto roi_config_start = std::chrono::steady_clock::now();
     camera->setRoiKeepCentered(profile.roi.keep_centered);
     camera->setRoi(profile.roi.width, profile.roi.height, profile.roi.offset_x,
                    profile.roi.offset_y);
     camera->setRoiEnabled(profile.roi.enabled);
+    const auto roi_config_end = std::chrono::steady_clock::now();
+
+    const auto stop_start = std::chrono::steady_clock::now();
     camera->stop();
+    const auto stop_end = std::chrono::steady_clock::now();
+
+    const auto start_start = std::chrono::steady_clock::now();
     camera->start();
+    const auto start_end = std::chrono::steady_clock::now();
+
     std::cout << "[Camera] ROI mode switched: stage3="
               << (stage3_roi_mode ? "true" : "false")
               << " roi_enabled="
               << (profile.roi.enabled ? "true" : "false")
+              << " config_ms="
+              << ElapsedMilliseconds(roi_config_start, roi_config_end)
+              << " stop_ms=" << ElapsedMilliseconds(stop_start, stop_end)
+              << " start_ms=" << ElapsedMilliseconds(start_start, start_end)
+              << " total_ms=" << ElapsedMilliseconds(total_start, start_end)
               << std::endl;
   };
   apply_stage3_roi_mode(last_stage3_roi_mode);
@@ -674,20 +734,11 @@ void CaptureThread(CameraTask::GalaxyCamera *camera,
     g_exposure_controller.ApplyPendingChange(camera);
     cv::Mat frame = camera->grab(Tools::Params().capture_timeout_ms);
     if (frame.empty()) {
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(Tools::Params().capture_empty_sleep_ms));
       continue;
     }
 
     // 双 buffer 避免相机线程和推理线程争用同一帧。
-    int write_idx = g_write_idx.load(std::memory_order_relaxed);
-    g_frame_buffers[write_idx].frame = std::move(frame);
-    g_frame_buffers[write_idx].ts = std::chrono::steady_clock::now();
-
-    int next_write = 1 - write_idx;
-    g_write_idx.store(next_write, std::memory_order_release);
-    g_read_idx.store(write_idx, std::memory_order_release);
-    g_frame_cv.notify_one();
+    PublishLatestFrame(std::move(frame), std::chrono::steady_clock::now());
   }
 
   camera->close();
@@ -738,19 +789,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   static std::unique_ptr<Tools::SaveImageOnNoTarget> no_target_saver;
   static std::unique_ptr<Tools::SaveVideoOnTarget> target_video_saver;
   static std::unique_ptr<Tools::SaveVideoFullRun> full_run_video_saver;
-  if (enable_save_no_target_images && !no_target_saver) {
-    no_target_saver =
-        std::make_unique<Tools::SaveImageOnNoTarget>(5, "captures");
-  }
-  if (enable_save_target_videos && !target_video_saver) {
-    target_video_saver = std::make_unique<Tools::SaveVideoOnTarget>(
-        Tools::Params().target_video_fps, "target_videos", cv::Size(480, 480));
-  }
-  if (enable_save_full_run_video && !full_run_video_saver) {
-    full_run_video_saver = std::make_unique<Tools::SaveVideoFullRun>(
-        Tools::Params().target_video_fps, "full_run_videos",
-        cv::Size(480, 480));
-  }
+  EnsureOptionalSaversInitialized(
+      enable_save_no_target_images, enable_save_target_videos,
+      enable_save_full_run_video, &no_target_saver, &target_video_saver,
+      &full_run_video_saver);
 
   std::chrono::steady_clock::time_point prev_frame_ts{};
   bool has_prev_frame_ts = false;
@@ -836,6 +878,11 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         const auto t_async_submit_start = ProfileNow(enable_latency_profile);
         stage_predictor_controller.ActivePredictor()->startAsync(infer_frame);
         const auto t_async_submit_end = ProfileNow(enable_latency_profile);
+        if (submit_to_stage3) {
+          AddLatencySample(enable_latency_profile, latency_total, latency_window,
+                           &LatencyStats::submit_stage3_preprocess_ns,
+                           t_async_submit_start, t_async_submit_end);
+        }
         AddLatencySample(enable_latency_profile, latency_total, latency_window,
                          &LatencyStats::submit_async_ns, t_async_submit_start,
                          t_async_submit_end);
@@ -866,9 +913,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       break;
     }
 
-    cv::Mat frame = inflight_frame;
-    cv::Mat raw_frame;
     const auto frame_ts = inflight_frame_ts;
+    FrameOverlayData overlay_data{};
 
     ImageRecognize::PredictResult result;
     SerialTask::EulerAngles matched_imu{};
@@ -934,7 +980,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     const auto t_select_start = ProfileNow(enable_latency_profile);
     const auto track_pipeline_result = target_track_pipeline.Update(
         result, target_camp_mode,
-        stage_predictor_controller.UsingStage3Predictor());
+        stage_predictor_controller.UsingStage3Predictor(), frame_dt);
     const auto t_select_end = ProfileNow(enable_latency_profile);
     AddLatencySample(enable_latency_profile, latency_total, latency_window,
                      &LatencyStats::select_box_ns, t_select_start,
@@ -945,6 +991,28 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     UpdateTargetVisibleAndLostSince(track_alive, now, &target_lost_since,
                                     &target_lost_since_initialized);
     g_target_visible.store(track_result.has_box, std::memory_order_release);
+    TrackedTargetAbsoluteAngles tracked_target_absolute_angles{};
+    if (track_pipeline_result.has_tracked_box && has_matched_imu) {
+      const cv::Point2f tracked_center =
+          ImageRecognize::BoxCenter(track_pipeline_result.tracked_box);
+      const auto [tracked_absolute_yaw, tracked_absolute_pitch] =
+          angle_calculator.CalculateAbsoluteAnglesWithoutFilter(
+              tracked_center.x, tracked_center.y, matched_imu.yaw,
+              matched_imu.pitch);
+      tracked_target_absolute_angles.valid = true;
+      tracked_target_absolute_angles.yaw = tracked_absolute_yaw;
+      tracked_target_absolute_angles.pitch = tracked_absolute_pitch;
+    }
+    const bool accept_tracked_target =
+        lost_target_recovery_controller.ShouldAcceptTrackedTarget(
+            Tools::LostTargetRecoveryController::ReacquireCheckInput{
+                stage_predictor_controller.UsingStage3Predictor(),
+                track_pipeline_result.has_tracked_box,
+                tracked_target_absolute_angles.valid,
+                tracked_target_absolute_angles.pitch,
+                tracked_target_absolute_angles.yaw,
+                now,
+                stage3_profile.lost_target_coast});
 
     if (!track_alive &&
         stage_predictor_controller.ShouldSwitchToStage3AfterLostTarget(
@@ -957,24 +1025,21 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       continue;
     }
 
-    if (track_pipeline_result.has_tracked_box) {
+    if (track_pipeline_result.has_tracked_box && accept_tracked_target) {
       tracked_box = track_pipeline_result.tracked_box;
       has_tracked_box = true;
     }
 
     if (has_tracked_box) {
-      if (enable_display && track_result.has_box) {
-        const cv::Point2f detection_center =
+      if (track_result.has_box) {
+        overlay_data.show_detection_center = enable_display;
+        overlay_data.detection_center =
             ImageRecognize::BoxCenter(track_result.box);
-        ImageRecognize::ImageShow::ShowDetectionCenter(
-            frame, detection_center.x, detection_center.y);
       }
 
       const cv::Point2f tracked_center = ImageRecognize::BoxCenter(tracked_box);
-      if (enable_display) {
-        ImageRecognize::ImageShow::ShowPred(frame, tracked_center.x,
-                                            tracked_center.y);
-      }
+      overlay_data.show_tracked_center = enable_display;
+      overlay_data.tracked_center = tracked_center;
 
       const float center_x = tracked_center.x;
       const float center_y = tracked_center.y;
@@ -1047,7 +1112,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
                            latency_window, &LatencyStats::result_to_control_ns,
                            infer_end_time, command_enqueue_time);
           if (enable_display) {
-            ImageRecognize::ImageShow::ShowDistance(frame, distance);
+            overlay_data.show_distance = true;
+            overlay_data.distance = distance;
           }
         } else {
           ClearPendingSend();
@@ -1121,12 +1187,24 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     ++ui_frame_counter;
 
     if (do_display) {
-      frame = inflight_frame.clone();
+      cv::Mat frame = inflight_frame.clone();
       ImageRecognize::ImageShow::ShowLockProgress(
           frame, g_aerial_robot_stage.load(std::memory_order_acquire),
           aerial_robot_stage_judge.Progress(),
           aerial_robot_stage_judge.CurrentThreshold());
       ImageRecognize::ImageShow::DrawNow(frame, result, fps);
+      if (overlay_data.show_detection_center) {
+        ImageRecognize::ImageShow::ShowDetectionCenter(
+            frame, overlay_data.detection_center.x,
+            overlay_data.detection_center.y);
+      }
+      if (overlay_data.show_tracked_center) {
+        ImageRecognize::ImageShow::ShowPred(frame, overlay_data.tracked_center.x,
+                                            overlay_data.tracked_center.y);
+      }
+      if (overlay_data.show_distance) {
+        ImageRecognize::ImageShow::ShowDistance(frame, overlay_data.distance);
+      }
       if (enable_calibration_sliders) {
         Tools::CalibrationSliderPanel::Show(&g_exposure_controller);
       }
@@ -1143,8 +1221,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         no_target_saver->UpdateStage3Raw(inflight_frame,
                                          result.boxes.size() != 1);
       } else {
-        raw_frame = inflight_frame.clone();
-        no_target_saver->Update(raw_frame, result.boxes.size() != 1);
+        no_target_saver->Update(inflight_frame, result.boxes.size() != 1);
       }
     }
     if (enable_save_target_videos && target_video_saver) {

@@ -97,18 +97,26 @@ private:
     CalibrationStage active_stage;
   };
 
+  struct RuntimeSnapshot {
+    StageTunableParams stage;
+    float distance_filter_alpha;
+    float filter_reset_ratio;
+  };
+
   float CalculateDistanceByPixelHeight(float pixel_h) {
     if (!std::isfinite(pixel_h) || pixel_h <= 0.0f)
       return 0.0f;
 
-    const float raw_distance = EstimateCalibratedDistanceByHeight(pixel_h);
+    const RuntimeSnapshot params = SnapshotCurrentRuntime_();
+    const float raw_distance =
+        EstimateCalibratedDistanceByHeight(pixel_h, params.stage);
     if (!std::isfinite(raw_distance) || raw_distance <= 0.0f)
       return 0.0f;
-    return FilterDistance(raw_distance);
+    return FilterDistance(raw_distance, params);
   }
 
-  float EstimateCalibratedDistanceByHeight(float pixel_h) const {
-    const auto params = ParamsForStage(ActiveStage());
+  float EstimateCalibratedDistanceByHeight(
+      float pixel_h, const StageTunableParams &params) const {
     const float near_height = params.near_calibration_target_height;
     const float far_height = params.far_calibration_target_height;
     const float near_pixel = params.near_pixel;
@@ -135,8 +143,7 @@ private:
     return (target_height * focal_y_px_) / pixel_h;
   }
 
-  float FilterDistance(float raw_distance) {
-    const auto params = Params();
+  float FilterDistance(float raw_distance, const RuntimeSnapshot &params) {
     if (!has_filtered_distance_ || filtered_distance_ <= 0.0f) {
       filtered_distance_ = raw_distance;
       has_filtered_distance_ = true;
@@ -155,9 +162,11 @@ private:
     return filtered_distance_;
   }
 
-  static TunableParams Params() {
+  static RuntimeSnapshot SnapshotCurrentRuntime_() {
     std::lock_guard<std::mutex> lk(ParamsMutex());
-    return MutableParams();
+    const auto &params = MutableParams();
+    return {StageParams(params, params.active_stage), params.distance_filter_alpha,
+            params.filter_reset_ratio};
   }
 
   static StageTunableParams ParamsForStage(CalibrationStage stage) {
@@ -167,6 +176,11 @@ private:
 
   static StageTunableParams &StageParams(TunableParams &params,
                                          CalibrationStage stage) {
+    return stage == CalibrationStage::Stage3 ? params.stage3 : params.stage12;
+  }
+
+  static const StageTunableParams &StageParams(const TunableParams &params,
+                                               CalibrationStage stage) {
     return stage == CalibrationStage::Stage3 ? params.stage3 : params.stage12;
   }
 
@@ -185,12 +199,12 @@ private:
     static const TunableParams p{
         {0.06275f, // stage12 near_calibration_target_height（米）
          94.920f,  // stage12 near_pixel（px）
-         0.06759f, // stage12 far_calibration_target_height（米）
-         61.626f}, // stage12 far_pixel（px）
-        {0.05904f, // stage3 near_calibration_target_height（米）
-         77.834f,  // stage3 near_pixel（px）
-         0.05925f, // stage3 far_calibration_target_height（米）
-         53.838f}, // stage3 far_pixel（px）
+         0.06497f, // stage12 far_calibration_target_height（米）
+         59.081f}, // stage12 far_pixel（px）
+        {0.05588f, // stage3 near_calibration_target_height（米）
+         78.907f,  // stage3 near_pixel（px）
+         0.05941f, // stage3 far_calibration_target_height（米）
+         54.439f}, // stage3 far_pixel（px）
         0.25f, // distance_filter_alpha: 一阶滤波系数，越大响应越快
         0.5f,  // filter_reset_ratio: 距离突变超过该比例时重置滤波
         CalibrationStage::Stage12 // active_stage: 当前使用的标定阶段
@@ -272,11 +286,10 @@ public:
   std::pair<float, float> CalculateLaserAngles(float distance, float, float) {
     // 激光和相机的连线始终垂直于相机视线；新 pitch 正方向与旧约定相反，
     // 激光在上方时向下补偿为负值。
-    const auto params = Params();
-    const float current_pitch =
-        ComputePitchCorrectionDeg(distance, params.laser_height_above_camera_m);
-    const float reference_pitch = ComputePitchCorrectionDeg(
-        params.reference_distance_m, params.laser_height_above_camera_m);
+    const RuntimeSnapshot params = SnapshotCurrentRuntime_();
+    const float current_pitch = ComputePitchCorrectionDeg(distance, params);
+    const float reference_pitch =
+        ComputePitchCorrectionDeg(params.reference_distance_m, params);
     const float distance_pitch_offset =
         ComputeDistancePitchOffsetDeg(distance, params);
     return {0.0f, reference_pitch - current_pitch + distance_pitch_offset};
@@ -299,21 +312,27 @@ private:
     CalibrationStage active_stage;
   };
 
+  struct RuntimeSnapshot {
+    float laser_height_above_camera_m;
+    float reference_distance_m;
+    float min_valid_distance_m;
+    StageTunableParams stage;
+  };
+
   static float ComputePitchCorrectionDeg(float distance,
-                                         float laser_height_above_camera_m) {
-    const float safe_distance = SafeDistance(distance);
+                                         const RuntimeSnapshot &params) {
+    const float safe_distance = SafeDistance(distance, params);
     const float laser_pitch_rad =
-        std::atan2(laser_height_above_camera_m, safe_distance);
+        std::atan2(params.laser_height_above_camera_m, safe_distance);
     return laser_pitch_rad * kRadToDeg;
   }
 
   static float ComputeDistancePitchOffsetDeg(float distance,
-                                             const TunableParams &params) {
-    const auto stage_params = StageParams(params, params.active_stage);
-    const float near_distance = stage_params.pitch_comp_near_distance_m;
-    const float far_distance = stage_params.pitch_comp_far_distance_m;
-    const float near_offset = stage_params.pitch_comp_near_offset_deg;
-    const float far_offset = stage_params.pitch_comp_far_offset_deg;
+                                             const RuntimeSnapshot &params) {
+    const float near_distance = params.stage.pitch_comp_near_distance_m;
+    const float far_distance = params.stage.pitch_comp_far_distance_m;
+    const float near_offset = params.stage.pitch_comp_near_offset_deg;
+    const float far_offset = params.stage.pitch_comp_far_offset_deg;
     if (!std::isfinite(distance) || !std::isfinite(near_distance) ||
         !std::isfinite(far_distance) || !std::isfinite(near_offset) ||
         !std::isfinite(far_offset) ||
@@ -327,15 +346,18 @@ private:
     return near_offset + t * (far_offset - near_offset);
   }
 
-  static float SafeDistance(float distance) {
+  static float SafeDistance(float distance, const RuntimeSnapshot &params) {
     if (!std::isfinite(distance) || distance <= 0.0f)
-      return Params().reference_distance_m;
-    return std::max(distance, Params().min_valid_distance_m);
+      return params.reference_distance_m;
+    return std::max(distance, params.min_valid_distance_m);
   }
 
-  static TunableParams Params() {
+  static RuntimeSnapshot SnapshotCurrentRuntime_() {
     std::lock_guard<std::mutex> lk(ParamsMutex());
-    return MutableParams();
+    const auto &params = MutableParams();
+    return {params.laser_height_above_camera_m, params.reference_distance_m,
+            params.min_valid_distance_m,
+            StageParams(params, params.active_stage)};
   }
 
   static StageTunableParams ParamsForStage(CalibrationStage stage) {
@@ -372,11 +394,11 @@ private:
         {12.0f,  // stage12 pitch_comp_near_distance_m（米）
          0.13f,  // stage12 pitch_comp_near_offset_deg，正值向上
          20.0f,  // stage12 pitch_comp_far_distance_m（米）
-         0.11f}, // stage12 pitch_comp_far_offset_deg，正值向上
-        {12.0f,  // stage3 pitch_comp_near_distance_m（米）
+         0.09f}, // stage12 pitch_comp_far_offset_deg，正值向上
+        {13.0f,  // stage3 pitch_comp_near_distance_m（米）
          0.14f,  // stage3 pitch_comp_near_offset_deg，正值向上
          20.0f,  // stage3 pitch_comp_far_distance_m（米）
-         0.13f}, // stage3 pitch_comp_far_offset_deg，正值向上
+         0.11f}, // stage3 pitch_comp_far_offset_deg，正值向上
         CalibrationStage::Stage12 // active_stage: 当前使用的激光补偿阶段
     };
     return p;

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -16,6 +17,7 @@
 
 #include "CameraTask/ExposureHotkeyController.hpp"
 #include "ImageRecognize/ImagePredict_OPENVINO.hpp"
+#include "Tools/CpuAffinity.hpp"
 #include "Tools/LaserAngleCalculate.hpp"
 #include "Tools/StageRuntimeProfile.hpp"
 
@@ -23,6 +25,11 @@ namespace ImageRecognize {
 
 class StagePredictorController {
 public:
+  struct Stage3WarmupResult {
+    std::unique_ptr<ImageRecognize::ImagePredict> predictor;
+    double elapsed_ms = 0.0;
+  };
+
   struct Hooks {
     CameraTask::ExposureHotkeyController *exposure_controller = nullptr;
     std::atomic<bool> *stage3_roi_mode_flag = nullptr;
@@ -65,6 +72,7 @@ public:
     if (using_stage3_predictor_ || pending_stage3_switch_) {
       return;
     }
+    StartStage3WarmupIfNeeded_();
     pending_stage3_switch_ = true;
     std::cout << "[空中机器人阶段] 达到 stage=3，等待目标丢失持续 "
               << stage3_switch_target_lost_delay_.count() << "ms 后切换模型"
@@ -87,20 +95,22 @@ public:
 
     try {
       ApplyStageSideEffects_(stage3_profile_);
-      if (!stage3_predictor_) {
-        stage3_predictor_ = std::make_unique<ImageRecognize::ImagePredict>(
-            *stage3_profile_.model_path, device_name_,
-            stage3_profile_.enable_light_preprocess);
-      }
+      EnsureStage3PredictorReady_();
+      const auto switch_start = std::chrono::steady_clock::now();
       active_predictor_ = stage3_predictor_.get();
       using_stage3_predictor_ = true;
       pending_stage3_switch_ = false;
       if (hooks_.on_stage_changed) {
         hooks_.on_stage_changed();
       }
+      const auto switch_end = std::chrono::steady_clock::now();
+      const double switch_elapsed_ms = std::chrono::duration<double, std::milli>(
+                                           switch_end - switch_start)
+                                           .count();
       std::cout << "[空中机器人阶段] 切换到 " << stage3_profile_.DisplayName()
                 << "，模型=" << *stage3_profile_.model_path << " 曝光(us)="
-                << stage3_profile_.exposure_time_us << " 原因=" << reason
+                << LoggedExposureTimeUs_(stage3_profile_) << " 原因="
+                << reason << " 切换接管耗时=" << switch_elapsed_ms << "ms"
                 << std::endl;
       return true;
     } catch (const std::exception &e) {
@@ -126,11 +136,17 @@ public:
     }
     std::cout << "[空中机器人阶段] 切换到 " << stage12_profile_.DisplayName()
               << "，模型=" << *stage12_profile_.model_path << " 曝光(us)="
-              << stage12_profile_.exposure_time_us << " 原因=" << reason
-              << std::endl;
+              << LoggedExposureTimeUs_(stage12_profile_) << " 原因="
+              << reason << std::endl;
   }
 
 private:
+  static double ElapsedMilliseconds_(
+      const std::chrono::steady_clock::time_point &start,
+      const std::chrono::steady_clock::time_point &end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+  }
+
   static CameraTask::ExposureHotkeyController::ExposureMode ToExposureMode_(
       Tools::RuntimeStage stage) {
     return stage == Tools::RuntimeStage::Stage3
@@ -145,11 +161,29 @@ private:
                : Tools::CalibrationStage::Stage12;
   }
 
-  void ApplyStageSideEffects_(const Tools::StageRuntimeProfile &profile) {
-    const bool use_stage3_resources = profile.UsesStage3Resources();
+  double LoggedExposureTimeUs_(const Tools::StageRuntimeProfile &profile) const {
     if (hooks_.exposure_controller) {
-      hooks_.exposure_controller->SetActiveMode(ToExposureMode_(profile.stage));
+      return hooks_.exposure_controller->GetExposureTime();
     }
+    return profile.exposure_time_us;
+  }
+
+  void ApplyStageSideEffects_(const Tools::StageRuntimeProfile &profile) {
+    const auto total_start = std::chrono::steady_clock::now();
+    const bool use_stage3_resources = profile.UsesStage3Resources();
+    double exposure_ms = 0.0;
+    double roi_flag_ms = 0.0;
+    double calibration_ms = 0.0;
+    double scan_config_ms = 0.0;
+
+    if (hooks_.exposure_controller) {
+      const auto step_start = std::chrono::steady_clock::now();
+      hooks_.exposure_controller->SetActiveMode(ToExposureMode_(profile.stage));
+      const auto step_end = std::chrono::steady_clock::now();
+      exposure_ms = ElapsedMilliseconds_(step_start, step_end);
+    }
+
+    const auto roi_flag_start = std::chrono::steady_clock::now();
     if (hooks_.stage3_roi_mode_flag) {
       hooks_.stage3_roi_mode_flag->store(use_stage3_resources,
                                          std::memory_order_release);
@@ -158,19 +192,110 @@ private:
       hooks_.scan_stage3_mode_flag->store(use_stage3_resources,
                                           std::memory_order_release);
     }
+    const auto roi_flag_end = std::chrono::steady_clock::now();
+    roi_flag_ms = ElapsedMilliseconds_(roi_flag_start, roi_flag_end);
+
+    const auto calibration_start = std::chrono::steady_clock::now();
     Tools::DistanceCalculator::SetActiveStage(
         ToCalibrationStage_(profile.stage));
     Tools::LaserAngleCalculator::SetActiveStage(
         ToCalibrationStage_(profile.stage));
+    const auto calibration_end = std::chrono::steady_clock::now();
+    calibration_ms = ElapsedMilliseconds_(calibration_start, calibration_end);
+
     if (hooks_.scan_controller && hooks_.scan_controller_mutex) {
+      const auto scan_config_start = std::chrono::steady_clock::now();
       std::lock_guard<std::mutex> lk(*hooks_.scan_controller_mutex);
       hooks_.scan_controller->SetConfig(profile.scan.controller_config);
+      const auto scan_config_end = std::chrono::steady_clock::now();
+      scan_config_ms = ElapsedMilliseconds_(scan_config_start, scan_config_end);
+    }
+
+    const auto total_end = std::chrono::steady_clock::now();
+    std::cout << "[空中机器人阶段] " << profile.DisplayName()
+              << " 副作用耗时 total="
+              << ElapsedMilliseconds_(total_start, total_end)
+              << "ms exposure=" << exposure_ms << "ms roi_flag="
+              << roi_flag_ms << "ms calibration=" << calibration_ms
+              << "ms scan_config=" << scan_config_ms << "ms" << std::endl;
+  }
+
+  void StartStage3WarmupIfNeeded_() {
+    if (stage3_predictor_ || stage3_warmup_future_.valid()) {
+      return;
+    }
+
+    const std::string model_path = *stage3_profile_.model_path;
+    const std::string device_name = device_name_;
+    const bool enable_light_preprocess = stage3_profile_.enable_light_preprocess;
+    std::cout << "[空中机器人阶段] stage3 模型后台预热启动，模型="
+              << model_path << std::endl;
+    stage3_warmup_future_ = std::async(
+        std::launch::async,
+        [model_path, device_name, enable_light_preprocess]() mutable {
+          Tools::BindCurrentThreadToAuxCores();
+          const auto warmup_start = std::chrono::steady_clock::now();
+          auto predictor = std::make_unique<ImageRecognize::ImagePredict>(
+              model_path, device_name, enable_light_preprocess);
+          const auto warmup_end = std::chrono::steady_clock::now();
+          Stage3WarmupResult result{};
+          result.predictor = std::move(predictor);
+          result.elapsed_ms =
+              std::chrono::duration<double, std::milli>(warmup_end - warmup_start)
+                  .count();
+          return result;
+        });
+  }
+
+  void EnsureStage3PredictorReady_() {
+    if (stage3_predictor_) {
+      return;
+    }
+
+    if (!stage3_warmup_future_.valid()) {
+      const auto load_start = std::chrono::steady_clock::now();
+      stage3_predictor_ = std::make_unique<ImageRecognize::ImagePredict>(
+          *stage3_profile_.model_path, device_name_,
+          stage3_profile_.enable_light_preprocess);
+      const auto load_end = std::chrono::steady_clock::now();
+      std::cout << "[空中机器人阶段] stage3 模型同步加载完成，耗时="
+                << std::chrono::duration<double, std::milli>(load_end - load_start)
+                       .count()
+                << "ms" << std::endl;
+      return;
+    }
+
+    const auto future_status =
+        stage3_warmup_future_.wait_for(std::chrono::milliseconds(0));
+    if (future_status != std::future_status::ready) {
+      std::cout << "[空中机器人阶段] stage3 模型预热未完成，切换时等待后台预热收尾"
+                << std::endl;
+    }
+
+    try {
+      Stage3WarmupResult result = stage3_warmup_future_.get();
+      stage3_predictor_ = std::move(result.predictor);
+      std::cout << "[空中机器人阶段] stage3 模型后台预热完成，耗时="
+                << result.elapsed_ms << "ms" << std::endl;
+    } catch (const std::exception &e) {
+      std::cerr << "[空中机器人阶段] stage3 模型后台预热失败，回退同步加载："
+                << e.what() << std::endl;
+      const auto load_start = std::chrono::steady_clock::now();
+      stage3_predictor_ = std::make_unique<ImageRecognize::ImagePredict>(
+          *stage3_profile_.model_path, device_name_,
+          stage3_profile_.enable_light_preprocess);
+      const auto load_end = std::chrono::steady_clock::now();
+      std::cout << "[空中机器人阶段] stage3 模型同步回退加载完成，耗时="
+                << std::chrono::duration<double, std::milli>(load_end - load_start)
+                       .count()
+                << "ms" << std::endl;
     }
   }
 
   ImageRecognize::ImagePredict *stage12_predictor_ = nullptr;
   ImageRecognize::ImagePredict *active_predictor_ = nullptr;
   std::unique_ptr<ImageRecognize::ImagePredict> stage3_predictor_;
+  std::future<Stage3WarmupResult> stage3_warmup_future_;
   std::string device_name_;
   Tools::StageRuntimeProfile stage12_profile_{};
   Tools::StageRuntimeProfile stage3_profile_{};

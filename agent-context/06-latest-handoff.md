@@ -161,6 +161,46 @@
   `infer_threads` 由“总线程减保留”改为 `min(hw_threads, latency_threads_cap)`，并带最小保护。  
 - 目的：抑制过高并发导致的尾延迟与抖动。
 
+8. stage3 检测框稳定化升级为带门控的 One Euro 滤波
+- 文件：`include/ImageRecognize/TemporalBoxStabilizer.hpp`
+- 文件：`include/ImageRecognize/TargetTrackPipeline.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：保留原有 IoU / 中心偏移 / 面积变化门控，仅当可确认仍是同一目标时，才对 `stage3` 的框中心与框尺寸应用 One Euro Filter。
+- 变更：`TargetTrackPipeline::Update()` 新增 `dt` 输入，复用主循环实时帧间隔；`stage1/2` 仍不启用该稳框路径。
+- 变更：原先固定权重的自适应 EMA 稳框逻辑已替换为速度自适应滤波，目标低速时更稳，高速时自动提高截止频率以减小跟随滞后。
+- 默认参数：`center_min_cutoff_hz=1.6`、`center_beta=0.28`、`size_min_cutoff_hz=1.2`、`size_beta=0.16`、`derivative_cutoff_hz=1.0`。
+- 目的：针对 stage3 检测框抖动，在尽量不损失精度和动态响应的前提下压制高频抖动；风险低于直接改检测阈值、NMS 或主控制滤波。
+
+9. stage3 丢失续行增加轻量滞回，抑制“短暂丢失 -> 续行 -> 回检 -> 再续行”抖动
+- 文件：`include/Tools/RuntimeParams.hpp`
+- 文件：`include/Tools/StageRuntimeProfile.hpp`
+- 文件：`include/Tools/LostTargetRecoveryController.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `stage3_lost_target_coast_trigger_delay_ms` 与 `stage3_lost_target_reacquire_confirm_ms`，分别控制“连续丢失多久后才进入续行”和“重新识别稳定多久后才退出续行”。
+- 变更：`LostTargetRecoveryController` 内部新增轻量滞回与单次丢失续行消费逻辑：同一次丢失只触发一次续行；续行中重新识别到目标时不会立刻抢回控制，而是经过一个很短的确认窗口。
+- 变更：`ImagePredict.cc` 主循环在消费 `tracked_box` 前调用 `ShouldAcceptTrackedTarget()`；当 stage3 正在续行且回检尚未稳定时，继续沿用续行而不是立即切回检测控制。
+- 默认参数：`trigger_delay_ms=40`、`reacquire_confirm_ms=60`。
+- 目的：在不取消 stage3 续行机制的前提下，抑制因小画幅短时漏检导致的控制来回切换抖动，同时尽量不引入明显额外滞后。
+
+10. 阶段切换延迟优化：stage3 模型后台预热
+- 文件：`include/ImageRecognize/StagePredictorController.hpp`
+- 诊断结论：首次切换到 `stage3` 的主要延迟来源，大概率不是阶段判定本身，而是 `stage3` 模型首次构造时的 OpenVINO 读模型与编译模型开销；这也解释了“第一次切换明显慢，后续切换快很多”的现象。
+- 变更：在 `RequestStage3SwitchAfterTargetLoss()` 中，一旦进入“达到 stage=3、等待丢目标后切换”的待切换窗口，就异步启动 `stage3` 模型后台预热，而不是等真正切换那一刻再同步构造。
+- 变更：后台预热线程绑定到辅助核，尽量减少与主推理线程争抢性能核；真正切换时通过 `EnsureStage3PredictorReady_()` 接管预热结果，若预热失败则自动回退到原来的同步加载路径。
+- 变更：新增阶段切换日志，分别输出 `stage3` 预热启动、预热完成耗时、预热未完成需等待、同步回退加载耗时，以及真正“切换接管耗时”。
+- 风险判断：低风险。该改动没有改变阶段切换判定时机、ROI/曝光/扫描副作用时机，也没有改变模型选择逻辑，只是把首次 `stage3` 模型构造前移到等待窗口中。
+- 当前状态：已于 2026-05-28 本地重新 `cmake --build build -j` 编译通过。
+
+11. 激光/距离补偿热路径快照优化 + ROI/阶段切换分段耗时打点
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/ImageRecognize/StagePredictorController.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：`DistanceCalculator` 与 `LaserAngleCalculator` 的热路径改为每次计算只快照一次当前 runtime stage 参数，避免每帧多次读取阶段配置带来的额外锁/原子访问。
+- 变更：`StagePredictorController::ApplyStageSideEffects_()` 新增分段耗时日志，拆出 `exposure / roi_flag / calibration / scan_config / total`，便于判断阶段切换剩余开销是否还卡在副作用应用链上。
+- 变更：`CaptureThread` 中 `apply_stage3_roi_mode()` 新增分段耗时日志，拆出 `config_ms / stop_ms / start_ms / total_ms`，用于确认 ROI 切换延迟是否主要来自 `camera->stop()` / `camera->start()`。
+- 变更：把 `RuntimeStats` 里原本只打印未采样的 `submit_stage3_preprocess_ns` 接上真实统计，当前记为 `stage3` 路径 `startAsync()` 时间，避免延迟日志出现误导性的长期 `0ms`。
+- 风险判断：低风险。以上改动均不改变主流程行为，只补诊断信息并减少热路径的轻微读配置开销。
+
 ## 当前风险与注意事项
 
 1. 设备限制  

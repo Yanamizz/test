@@ -31,36 +31,56 @@
 namespace Tools {
 
 struct RuntimeParams {
+  // 注意：字段顺序需与下方 Params() 中的聚合初始化顺序严格保持一致。
+
+  // ===== 基础模型与策略 =====
   std::string stage12_model_path; // stage1/2 使用的 OpenVINO 模型路径（xml）
   std::string stage3_model_path; // stage3 使用的 OpenVINO 模型路径（xml）
   std::string openvino_device_name; // OpenVINO 设备名，如 CPU/GPU/AUTO
   std::string angle_filter_type; // 角度滤波器类型，如 ONE_EURO/KF/UKF
   std::string target_camp_mode;  // 目标阵营筛选模式，如 RED/BLUE/ALL
 
+  // ===== 相机采集与 ROI =====
   int capture_timeout_ms;        // 相机抓帧超时时间（毫秒）
   bool stage3_enable_camera_roi; // stage3 是否开启相机侧 ROI 裁剪（stage12
                                  // 永远关闭）
   bool stage3_roi_keep_centered; // stage3 是否保持中心点不动进行 ROI 裁剪
   int stage3_roi_width;          // stage3 ROI 宽（像素）
   int stage3_roi_height;         // stage3 ROI 高（像素）
-  int stage3_roi_offset_x;         // stage3 ROI 左上角 X 偏移（像素）
-  int stage3_roi_offset_y;         // stage3 ROI 左上角 Y 偏移（像素）
+  int stage3_roi_offset_x;       // stage3 ROI 左上角 X 偏移（像素），仅在
+                                 // keep_centered=false 时生效
+  int stage3_roi_offset_y;       // stage3 ROI 左上角 Y 偏移（像素），仅在
+                                 // keep_centered=false 时生效
   double stage12_exposure_time_us; // stage1/2 默认曝光时间（微秒）
   double stage3_exposure_time_us;  // stage3 默认曝光时间（微秒）
+
+  // ===== 阶段切换与 stage3 丢失恢复 =====
   int stage3_switch_target_lost_delay_ms; // 满足 stage3
                                           // 后，丢目标持续多久再切模型（毫秒）
   int stage3_lost_target_coast_ms; // stage3 丢失目标后按丢失前速度方向续行时长
                                    // （毫秒）
+  int stage3_lost_target_coast_trigger_delay_ms; // stage3
+                                                 // 连续丢失多久后才进入续行
+                                                 // （毫秒）
+  int stage3_lost_target_reacquire_confirm_ms; // stage3
+                                               // 重新识别后需持续多久才退出
+                                               // 续行（毫秒）
+  double stage3_lost_target_reacquire_gate_deg; // stage3
+                                                // 回检框与续行预测位置允许的
+                                                // 最大角差（度）
   double stage3_lost_target_coast_yaw_speed_deg_per_sec; // stage3 丢目标后
                                                          // 续行固定 yaw 速度
   double
       stage3_lost_target_coast_pitch_speed_deg_per_sec; // stage3 丢目标后
                                                         // 续行固定 pitch 速度
+
+  // ===== 线程等待与时序容差 =====
   int capture_empty_sleep_ms; // 相机空帧时休眠时长（毫秒）
   int imu_read_fail_sleep_ms; // IMU 读取失败时休眠时长（毫秒）
   int imu_send_idle_sleep_ms; // 发送线程空闲/等待时休眠时长（毫秒）
   int imu_buffer_max_age_ms; // IMU 匹配图像帧时允许的最大时间差（毫秒）
 
+  // ===== 主控制与角速度估计 =====
   float minimum_angle_deg; // 小于该偏角时不发送控制（死区，单位度）
   float max_send_delta_deg; // 单次发送 yaw 偏角最大限幅（度）
   double dt_max_sec; // 帧间 dt 的有效上限，超过则视为异常（秒）
@@ -83,9 +103,11 @@ struct RuntimeParams {
   double angle_velocity_yaw_deadband_deg_per_sec; // yaw 角速度死区（度/秒）
   double angle_velocity_pitch_deadband_deg_per_sec; // pitch 角速度死区（度/秒）
 
+  // ===== 时延统计 =====
   bool enable_latency_profile;       // 是否开启时延统计
   int latency_print_interval_frames; // 时延统计打印间隔（帧）
 
+  // ===== 功能开关 =====
   bool enable_scan_mode;             // 是否启用丢目标后扫描模式
   bool enable_save_no_target_images; // 是否保存“无目标”样本图
   bool enable_save_target_videos;    // 是否保存“有目标”视频片段
@@ -94,13 +116,16 @@ struct RuntimeParams {
   bool enable_calibration_sliders;   // 是否启用标定滑块 UI
   bool enable_send_log;              // 是否打印串口发送日志
 
+  // ===== 扫描与推理节流 =====
   int scan_trigger_delay_ms; // 丢失目标后，延迟多久进入扫描模式（毫秒）
   int scan_origin_hold_ms; // 扫描模式起始时在原点保持时长（毫秒）
   int stage3_scan_origin_hold_ms; // stage3 扫描模式起始时在原点保持时长
                                   // （毫秒）
   double max_infer_fps; // 推理提交帧率上限；<=0 表示不限速
-  double scan_send_hz; // stage1/2 扫描发送频率（Hz），只控制运动速度
-  double stage3_scan_send_hz; // stage3 扫描发送频率（Hz），只控制运动速度
+  double scan_send_hz; // stage1/2 扫描发送频率（Hz），优先用于控制平滑度
+  double stage3_scan_send_hz; // stage3 扫描发送频率（Hz），优先用于控制平滑度
+  double scan_yaw_speed_deg_per_sec; // stage1/2 扫描 yaw 角速度（度/秒）
+  double stage3_scan_yaw_speed_deg_per_sec; // stage3 扫描 yaw 角速度（度/秒）
   float scan_pitch_wavelength_percent; // stage1/2 lambda 百分比，100% 表示往返
                                        // 轨迹刚好构成横 8 字
   float scan_pitch_amplitude_percent; // stage1/2 A 百分比，100% 表示占用
@@ -109,6 +134,8 @@ struct RuntimeParams {
                                               // 表示往返轨迹刚好构成横 8 字
   float stage3_scan_pitch_amplitude_percent; // stage3 A 百分比，100%
                                              // 表示占用 pitch 半扫描高度
+
+  // ===== 显示与保存输出 =====
   int display_every_n_frames;  // 每 N 帧刷新一次显示
   int gui_poll_every_n_frames; // 每 N 帧轮询一次 GUI 按键事件
   int target_video_fps;        // 目标视频保存帧率（fps）
@@ -116,12 +143,14 @@ struct RuntimeParams {
 
 inline const RuntimeParams &Params() {
   static const RuntimeParams p{
+      // ===== 基础模型与策略 =====
       "/home/nuc/antidrone/src/model/antidrone_stage12_int8_openvino_model/"
       "antidrone_stage12.xml",
       "/home/nuc/antidrone/src/model/antidrone_stage3_int8_openvino_model/"
       "antidrone_stage3.xml",
       "CPU", "ONE_EURO", "ALL",
 
+      // ===== 相机采集与 ROI =====
       1000, // capture_timeout_ms: 相机抓帧超时 1000ms
       true, // stage3_enable_camera_roi: stage3 默认开启相机侧 ROI 裁剪
       true, // stage3_roi_keep_centered: stage3 默认保持中心点不动裁剪
@@ -132,21 +161,28 @@ inline const RuntimeParams &Params() {
       1000.0, // stage12_exposure_time_us: stage1/2 默认曝光 1000us
       4000.0, // stage3_exposure_time_us: stage3 默认曝光 4000us
 
+      // ===== 阶段切换与 stage3 丢失恢复 =====
       300, // stage3_switch_target_lost_delay_ms: stage3 后丢目标 300ms 再切模型
       300, // stage3_lost_target_coast_ms: stage3 丢目标后续行 300ms
+      40, // stage3_lost_target_coast_trigger_delay_ms: 丢失 40ms 后才续行
+      60, // stage3_lost_target_reacquire_confirm_ms: 重识别稳定 60ms 才退出续行
+      1.2, // stage3_lost_target_reacquire_gate_deg: 回检接管最大允许角差 1.2 度
       3.0, // stage3_lost_target_coast_yaw_speed_deg_per_sec: stage3 丢目标后
            // 续行固定 yaw 速度
       2.0, // stage3_lost_target_coast_pitch_speed_deg_per_sec: stage3 丢目标后
            // 续行固定 pitch 速度
+
+      // ===== 线程等待与时序容差 =====
       5,   // capture_empty_sleep_ms: 空帧休眠 5ms
       2,   // imu_read_fail_sleep_ms: IMU 读失败休眠 2ms
       1,   // imu_send_idle_sleep_ms: 发送线程空闲休眠 1ms
       100, // imu_buffer_max_age_ms: IMU/图像最大匹配窗口 100ms
 
+      // ===== 主控制与角速度估计 =====
       0.0f,  // minimum_angle_deg: 控制死区 0 度（不抑制微小偏角）
       10.0f, // max_send_delta_deg: yaw 单次最大发送偏角 10 度
       1.0,   // dt_max_sec: 帧间隔有效上限 1.0 秒
-      5.0f,  // pitch_abs_limit: pitch 单次最大发送偏角绝对值 10 度
+      5.0f,  // pitch_abs_limit: pitch 单次最大发送偏角绝对值 5 度
       0.010, // angle_velocity_dt_min_sec: 速度估计最小 dt 10ms
       0.080, // angle_velocity_dt_max_sec: 速度估计最大 dt 80ms
       480.0, // angle_velocity_yaw_abs_limit_deg_per_sec: yaw
@@ -166,9 +202,11 @@ inline const RuntimeParams &Params() {
       0.05,   // angle_velocity_pitch_deadband_deg_per_sec: pitch
               // 角速度死区（仅保留极小微抖抑制）
 
+      // ===== 时延统计 =====
       false, // enable_latency_profile: 默认关闭时延统计
-      700,   // latency_print_interval_frames: 每 100 帧打印一次统计
+      700,   // latency_print_interval_frames: 每 700 帧打印一次统计
 
+      // ===== 功能开关 =====
       true,  // enable_scan_mode: 默认开启扫描模式
       false, // enable_save_no_target_images: 默认不保存无目标图像
       false, // enable_save_target_videos: 默认不保存目标视频
@@ -177,20 +215,24 @@ inline const RuntimeParams &Params() {
       true,  // enable_calibration_sliders: 默认开启标定滑块
       true,  // enable_send_log: 默认开启发送日志
 
-      1000, // scan_trigger_delay_ms: 丢目标后 500ms 进入扫描
+      // ===== 扫描与推理节流 =====
+      1000, // scan_trigger_delay_ms: 丢目标后 1000ms 进入扫描
       1000, // scan_origin_hold_ms: 扫描起始在原点保持 1000ms
       1500, // stage3_scan_origin_hold_ms: stage3 扫描起始在原点保持 1500ms
       0.0, // max_infer_fps: 0 表示不限制推理提交帧率
 
       200.0, // scan_send_hz: stage1/2 扫描发送频率 200Hz
-      25.0,  // stage3_scan_send_hz: stage3 扫描发送频率 100Hz
+      200.0, // stage3_scan_send_hz: stage3 扫描发送频率 200Hz
+      16.0,  // scan_yaw_speed_deg_per_sec: stage1/2 扫描 yaw 速度 16deg/s
+      3.2, // stage3_scan_yaw_speed_deg_per_sec: stage3 扫描 yaw 速度 3.2deg/s
 
       100.0f, // scan_pitch_wavelength_percent: stage1/2 lambda 百分比
       50.0f,  // scan_pitch_amplitude_percent: stage1/2 A 百分比
 
-      50.0f, // stage3_scan_pitch_wavelength_percent: stage3 lambda 百分比
-      50.0f, // stage3_scan_pitch_amplitude_percent: stage3 A 百分比
+      40.0f,  // stage3_scan_pitch_wavelength_percent: stage3 lambda 百分比
+      100.0f, // stage3_scan_pitch_amplitude_percent: stage3 A 百分比
 
+      // ===== 显示与保存输出 =====
       2, // display_every_n_frames: 每 2 帧刷新一次显示
       2, // gui_poll_every_n_frames: 每 2 帧轮询一次按键
       30 // target_video_fps: 目标视频保存 30fps
