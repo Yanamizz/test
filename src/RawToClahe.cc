@@ -8,7 +8,11 @@
 
 #include <opencv2/opencv.hpp>
 
+<<<<<<< Updated upstream
 #include <algorithm>
+=======
+#include <fstream>
+>>>>>>> Stashed changes
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -23,6 +27,24 @@ struct Options {
   std::filesystem::path input_path;
   std::filesystem::path output_path;
 };
+
+std::filesystem::path FailureLogPath(const std::filesystem::path &output_path, bool batch_mode) {
+  if (batch_mode) {
+    return output_path / "RawToClahe_read_failures.txt";
+  }
+
+  const std::filesystem::path parent =
+      output_path.has_parent_path() ? output_path.parent_path() : std::filesystem::path(".");
+  return parent / (output_path.stem().string() + "_read_failures.txt");
+}
+
+void AppendFailureLog(std::ofstream *log_file, const std::filesystem::path &input_file, const std::string &reason) {
+  if (log_file == nullptr || !log_file->is_open()) {
+    return;
+  }
+
+  *log_file << input_file.string() << '\t' << reason << '\n';
+}
 
 bool IsImageFile(const std::filesystem::path &path) {
   if (!path.has_extension()) {
@@ -45,14 +67,11 @@ bool IsVideoFile(const std::filesystem::path &path) {
   }
 
   std::string ext = path.extension().string();
-  std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
+  std::transform(ext.begin(), ext.end(), ext.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-  return ext == ".avi" || ext == ".mp4" || ext == ".mkv" ||
-         ext == ".mov" || ext == ".wmv" || ext == ".flv" ||
-         ext == ".webm" || ext == ".m4v" || ext == ".mpg" ||
-         ext == ".mpeg";
+  return ext == ".avi" || ext == ".mp4" || ext == ".mkv" || ext == ".mov" || ext == ".wmv" || ext == ".flv" ||
+         ext == ".webm" || ext == ".m4v" || ext == ".mpg" || ext == ".mpeg";
 }
 
 std::filesystem::path DefaultOutputPath(const std::filesystem::path &input) {
@@ -60,20 +79,15 @@ std::filesystem::path DefaultOutputPath(const std::filesystem::path &input) {
     return input.parent_path() / (input.filename().string() + "_train_clahe");
   }
 
-  const std::filesystem::path parent = input.has_parent_path()
-                                           ? input.parent_path()
-                                           : std::filesystem::path(".");
+  const std::filesystem::path parent = input.has_parent_path() ? input.parent_path() : std::filesystem::path(".");
   if (IsVideoFile(input)) {
     return parent / (input.stem().string() + "_train_clahe.avi");
   }
-  return parent /
-         (input.stem().string() + "_train_clahe" + input.extension().string());
+  return parent / (input.stem().string() + "_train_clahe" + input.extension().string());
 }
 
-std::filesystem::path OutputFileFor(const std::filesystem::path &input_file,
-                                    const std::filesystem::path &input_root,
-                                    const std::filesystem::path &output_root,
-                                    bool batch_mode) {
+std::filesystem::path OutputFileFor(const std::filesystem::path &input_file, const std::filesystem::path &input_root,
+                                    const std::filesystem::path &output_root, bool batch_mode) {
   if (!batch_mode) {
     return output_root;
   }
@@ -82,19 +96,14 @@ std::filesystem::path OutputFileFor(const std::filesystem::path &input_file,
   return output_root / relative;
 }
 
-cv::Mat
-BuildModelInputClahe(const cv::Mat &input, const cv::Size &input_size,
-                     ImageRecognize::YoloLightPreprocessor *preprocessor) {
-  const float scale_x =
-      static_cast<float>(input_size.width) / static_cast<float>(input.cols);
-  const float scale_y =
-      static_cast<float>(input_size.height) / static_cast<float>(input.rows);
+cv::Mat BuildModelInputClahe(const cv::Mat &input, const cv::Size &input_size,
+                             ImageRecognize::YoloLightPreprocessor *preprocessor) {
+  const float scale_x = static_cast<float>(input_size.width) / static_cast<float>(input.cols);
+  const float scale_y = static_cast<float>(input_size.height) / static_cast<float>(input.rows);
   const float scale = std::min(scale_x, scale_y);
 
-  int content_width =
-      std::max(1, static_cast<int>(std::round(input.cols * scale)));
-  int content_height =
-      std::max(1, static_cast<int>(std::round(input.rows * scale)));
+  int content_width = std::max(1, static_cast<int>(std::round(input.cols * scale)));
+  int content_height = std::max(1, static_cast<int>(std::round(input.rows * scale)));
   content_width = std::min(content_width, input_size.width);
   content_height = std::min(content_height, input_size.height);
 
@@ -106,8 +115,7 @@ BuildModelInputClahe(const cv::Mat &input, const cv::Size &input_size,
   preprocessor->PreprocessForYolo(resized, &resized);
 
   cv::Mat letterboxed(input_size, input.type(), cv::Scalar(114, 114, 114));
-  resized.copyTo(
-      letterboxed(cv::Rect(pad_x, pad_y, content_width, content_height)));
+  resized.copyTo(letterboxed(cv::Rect(pad_x, pad_y, content_width, content_height)));
   return letterboxed;
 }
 
@@ -122,13 +130,21 @@ cv::Mat ProcessFrame(const cv::Mat &input, const Options &options,
   return output;
 }
 
-bool ConvertOne(const std::filesystem::path &input_file,
-                const std::filesystem::path &output_file,
-                const Options &options,
-                ImageRecognize::YoloLightPreprocessor *preprocessor) {
+bool ConvertOne(const std::filesystem::path &input_file, const std::filesystem::path &output_file,
+                const Options &options, ImageRecognize::YoloLightPreprocessor *preprocessor,
+                std::ofstream *failure_log) {
+  std::error_code file_size_error;
+  const auto file_size = std::filesystem::file_size(input_file, file_size_error);
+  if (!file_size_error && file_size == 0) {
+    std::cerr << "[RawToClahe] 跳过空文件: " << input_file << std::endl;
+    AppendFailureLog(failure_log, input_file, "empty file");
+    return false;
+  }
+
   const cv::Mat input = cv::imread(input_file.string(), cv::IMREAD_COLOR);
   if (input.empty()) {
     std::cerr << "[RawToClahe] 读取失败: " << input_file << std::endl;
+    AppendFailureLog(failure_log, input_file, "cv::imread returned empty");
     return false;
   }
 
@@ -142,12 +158,10 @@ bool ConvertOne(const std::filesystem::path &input_file,
   return true;
 }
 
-bool ConvertVideo(const Options &options,
-                  ImageRecognize::YoloLightPreprocessor *preprocessor) {
+bool ConvertVideo(const Options &options, ImageRecognize::YoloLightPreprocessor *preprocessor) {
   cv::VideoCapture capture(options.input_path.string(), cv::CAP_ANY);
   if (!capture.isOpened()) {
-    std::cerr << "[RawToClahe] 打开视频失败: " << options.input_path
-              << std::endl;
+    std::cerr << "[RawToClahe] 打开视频失败: " << options.input_path << std::endl;
     return false;
   }
 
@@ -166,10 +180,8 @@ bool ConvertVideo(const Options &options,
     const cv::Mat output = ProcessFrame(frame, options, preprocessor);
     if (!writer.isOpened()) {
       std::filesystem::create_directories(options.output_path.parent_path());
-      if (!writer.open(options.output_path.string(), fourcc, fps, output.size(),
-                       true)) {
-        std::cerr << "[RawToClahe] 打开视频输出失败: " << options.output_path
-                  << std::endl;
+      if (!writer.open(options.output_path.string(), fourcc, fps, output.size(), true)) {
+        std::cerr << "[RawToClahe] 打开视频输出失败: " << options.output_path << std::endl;
         return false;
       }
     }
@@ -183,11 +195,9 @@ bool ConvertVideo(const Options &options,
   }
 
   std::cout << "[RawToClahe] 视频完成: 帧数=" << frame_count
-            << " 模式="
-            << (options.model_input_mode ? "model-input" : "full-size")
-            << " 尺寸=" << options.input_size.width << "x"
-            << options.input_size.height << " 输出=" << options.output_path
-            << std::endl;
+            << " 模式=" << (options.model_input_mode ? "model-input" : "full-size")
+            << " 尺寸=" << options.input_size.width << "x" << options.input_size.height
+            << " 输出=" << options.output_path << std::endl;
   return frame_count > 0;
 }
 
@@ -195,15 +205,10 @@ void PrintUsage(const char *program) {
   std::cerr << "用法: " << program
             << " [--model-input|--full-size] [--size WxH] <输入图片/目录/视频> "
                "[输出图片或目录]\n"
-            << "示例: " << program
-            << " captures/run_xxx captures/run_xxx_train\n"
-            << "示例: " << program
-            << " --size 480x480 captures/run_xxx/stage3_raw_000001.jpg\n"
-            << "示例: " << program
-            << " --full-size captures/run_xxx captures/run_xxx_full_clahe"
-            << "\n示例: " << program
-            << " --size 480x480 input.mp4 output_train_clahe.avi"
-            << std::endl;
+            << "示例: " << program << " captures/run_xxx captures/run_xxx_train\n"
+            << "示例: " << program << " --size 480x480 captures/run_xxx/stage3_raw_000001.jpg\n"
+            << "示例: " << program << " --full-size captures/run_xxx captures/run_xxx_full_clahe"
+            << "\n示例: " << program << " --size 480x480 input.mp4 output_train_clahe.avi" << std::endl;
 }
 
 cv::Size ParseSize(const std::string &text) {
@@ -249,13 +254,12 @@ bool ParseArgs(int argc, char **argv, Options *options) {
   }
 
   options->input_path = positional[0];
-  options->output_path = positional.size() == 2
-                             ? std::filesystem::path(positional[1])
-                             : DefaultOutputPath(options->input_path);
+  options->output_path =
+      positional.size() == 2 ? std::filesystem::path(positional[1]) : DefaultOutputPath(options->input_path);
   return true;
 }
 
-} // namespace
+}  // namespace
 
 int main(int argc, char **argv) {
   Options options;
@@ -270,6 +274,13 @@ int main(int argc, char **argv) {
   }
 
   const bool batch_mode = std::filesystem::is_directory(options.input_path);
+  const std::filesystem::path failure_log_path = FailureLogPath(options.output_path, batch_mode);
+  std::filesystem::create_directories(failure_log_path.parent_path());
+  std::ofstream failure_log(failure_log_path, std::ios::out | std::ios::trunc);
+  if (!failure_log.is_open()) {
+    std::cerr << "[RawToClahe] 无法创建日志文件: " << failure_log_path << std::endl;
+    return 1;
+  }
 
   ImageRecognize::YoloLightPreprocessor preprocessor;
   if (!batch_mode && IsVideoFile(options.input_path)) {
@@ -278,8 +289,7 @@ int main(int argc, char **argv) {
 
   std::vector<std::filesystem::path> inputs;
   if (batch_mode) {
-    for (const auto &entry :
-         std::filesystem::recursive_directory_iterator(options.input_path)) {
+    for (const auto &entry : std::filesystem::recursive_directory_iterator(options.input_path)) {
       if (entry.is_regular_file() && IsImageFile(entry.path())) {
         inputs.push_back(entry.path());
       }
@@ -294,19 +304,20 @@ int main(int argc, char **argv) {
   }
 
   int ok_count = 0;
+  int fail_count = 0;
   for (const auto &input_file : inputs) {
-    const std::filesystem::path output_file = OutputFileFor(
-        input_file, options.input_path, options.output_path, batch_mode);
-    if (ConvertOne(input_file, output_file, options, &preprocessor)) {
+    const std::filesystem::path output_file =
+        OutputFileFor(input_file, options.input_path, options.output_path, batch_mode);
+    if (ConvertOne(input_file, output_file, options, &preprocessor, &failure_log)) {
       ++ok_count;
+    } else {
+      ++fail_count;
     }
   }
 
-  std::cout << "[RawToClahe] 完成: " << ok_count << "/" << inputs.size()
-            << " 模式="
-            << (options.model_input_mode ? "model-input" : "full-size")
-            << " 尺寸=" << options.input_size.width << "x"
-            << options.input_size.height << " 输出=" << options.output_path
-            << std::endl;
-  return ok_count == static_cast<int>(inputs.size()) ? 0 : 2;
+  std::cout << "[RawToClahe] 完成: " << ok_count << "/" << inputs.size() << " 跳过/失败=" << fail_count
+            << " 模式=" << (options.model_input_mode ? "model-input" : "full-size")
+            << " 尺寸=" << options.input_size.width << "x" << options.input_size.height
+            << " 输出=" << options.output_path << " 日志=" << failure_log_path << std::endl;
+  return ok_count > 0 ? 0 : 2;
 }
