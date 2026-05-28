@@ -1,10 +1,45 @@
 # Latest Handoff
 
 用途：记录最近一次交接结论与后续建议。  
-更新时间：2026-05-27  
+更新时间：2026-05-29
 适用场景：新 Agent 快速接续、避免重复排查。
 
 ## 本轮完成事项（延迟优先）
+
+12. target_camp_mode 支持滑块面板运行时切换
+- 文件：`include/ImageRecognize/TargetClassFilter.hpp`
+- 文件：`include/Tools/CalibrationSliderPanel.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：在现有标定滑块面板增加 `target camp 0R 1B 2All` 三档滑块，用于运行时切换 `RED_AND_PURPLE / BLUE_AND_PURPLE / ALL`。
+- 变更：`target_camp_mode` 从预测线程启动时的固定值改为运行时读取；切换后会重置 `TargetTrackPipeline`，避免跨阵营沿用旧 tracker 历史框。
+- 设计说明：没有新增单独头文件；运行时控制器放在已有 `TargetClassFilter.hpp`，因为该 Module 已拥有 `TargetCampMode` 的解析、命名和筛选语义，滑块面板只作为写入口。
+- 风险判断：低风险。该改动只影响目标类别筛选入口，不改变 stage12/stage3 阶段切换、扫描发送、ROI 或推理链路。
+- 当前状态：已于 2026-05-29 本地重新 `cmake --build build -j` 编译通过。
+
+13. AimbotTarget 串口线协议激光窗口控制
+- 文件：`include/SerialTask/Common.hpp`
+- 文件：`include/SerialTask/SerialSend.hpp`
+- 文件：`src/ImagePredict.cc`
+- 文件：`agent-context/03-business-contracts.md`
+- 文件：`README.md`
+- 变更：`SerialSend.hpp` 中 `AimbotFrame_SCM_t::AimbotTarget` 恢复消费调用方传入线值，并通过 `ToWireAimbotTarget()` 统一规整为 `0x00/0x01`。
+- 变更：`src/ImagePredict.cc` 中只在锁定流程 `stage1 -> stage2` 完成时启动 55s 激光关闭窗口；窗口内串口帧发送 `AimbotTarget=0x00`，窗口结束后恢复 `0x01`。
+- 变更：进入 `stage3` 时清除关闭窗口，并且 `stage3` 期间 `AimbotTarget` 固定发送 `0x01`。
+- 变更：现存 TCP 接收、内部累积计数、stage 切换扣减逻辑保留，供日志、联调与后续恢复线协议消费使用。
+- 风险判断：低风险业务语义变化。关闭窗口只绑定 stage1/2 锁定完成，不合并 stage12/stage3 行为；后续若要“55s 到点无论是否有 pending/扫描帧都主动补发 0x01”，需要另行评估串口发送线程时序。
+- 当前状态：已于 2026-05-29 本地执行 `cmake --build build -j` 与 `cmake --build build --target ImagePredict -j`，构建系统返回目标已是最新。
+
+14. 低风险架构/延迟/鲁棒性巡检收尾
+- 文件：`src/ImagePredict.cc`
+- 文件：`include/ImageRecognize/TargetClassFilter.hpp`
+- 文件：`include/Tools/RuntimeParams.hpp`
+- 文件：`agent-context/04-integration-and-troubleshooting.md`
+- 变更：扫描发送线程中 `TickConfig` 生成改为一次 `StageRuntimeProfile` 快照，避免高频扫描路径每轮重复构造 3 次 profile；stage12/stage3 仍各自走独立 profile，不改变发送频率、原点保持或扫描控制器配置。
+- 变更：`TargetCampModeController::SetModeIndex()` 从 CAS 循环收敛为单次原子 `exchange`，降低接口实现复杂度；UI 写、推理线程读语义不变。
+- 变更：修正 `ImagePredict.cc` 无目标恢复分支缩进，修正 `RuntimeParams.hpp` 中与真实默认值不一致的注释。
+- 变更：同步 `04-integration-and-troubleshooting.md`，避免继续提示旧的 AimbotTarget 二值化发送契约。
+- 风险判断：低风险。以上改动不改变主程序逻辑链条，不合并 stage12/stage3 行为。
+- 当前状态：已于 2026-05-29 本地重新 `cmake --build build -j` 编译通过。
 
 0. 目标框处理链路收口为 `TargetTrackPipeline`
 - 文件：`include/ImageRecognize/TargetTrackPipeline.hpp`
@@ -37,7 +72,7 @@
 - 文件：`include/SerialTask/SerialSend.hpp`
 - 变更：新增 `LostTargetRecoveryController` Module，把以下原本散落在 `ImagePredictThread` 无目标分支中的逻辑收口：`stage3` 丢目标后固定速度续行准备、续行时长判断、续行控制量生成、续行结束后回退到扫描或清空 pending send。
 - 变更：`ImagePredict.cc` 不再直接维护 `stage3_lost_target_coast` 的内部状态，而是通过 `PrepareStage3Coast()` 和 `Update()` 统一处理恢复流程，主循环只消费 `has_command / pending_action` 结果。
-- 变更：顺手修正 `SerialSend.hpp` 中 `AimbotTarget` 实际发送值，改为真正使用 `ToWireAimbotTarget(AimbotTarget)`，同时消除未使用变量警告；这与既有二值化协议语义一致，不改变设计意图。
+- 历史说明：本条中 `SerialSend.hpp` 使用 `ToWireAimbotTarget(AimbotTarget)` 的描述已被 2026-05-29 条目 13 覆盖；当前线协议由 `stage1->stage2` 激光关闭窗口与 `stage3` 强制开激光规则决定，TCP 内部计数逻辑保留。
 - 变更：该次抽离不改变 `stage3` 续行触发条件、续行固定速度语义、进入扫描时机和 `ClearPendingSend/StartScanMode` 的既有时机，目标是继续降低主循环 shallow recovery handling，提升丢目标恢复逻辑的 locality。
 - 当前状态：已于 2026-05-27 本地重新 `cmake --build build -j` 编译通过。
 
@@ -103,15 +138,14 @@
 - 当前默认值：续行时长 `220 ms`，速度倍率 `1.0`。
 - 目的：缓解 stage3 缩画幅后，对较快目标因短时失配而立刻丢失的问题，优先向目标离开方向补一小段位移，争取重新把目标拉回视野。
 
-0. AimbotTarget 语义收敛（计数/二值化发送一致）
+0. AimbotTarget 语义收敛（历史：计数/二值化发送一致）
 - 文件：`include/SerialTask/Common.hpp`
 - 文件：`include/SerialTask/SerialSend.hpp`
 - 文件：`include/NetworkTask/AimbotTargetReceiver.hpp`
 - 文件：`src/ImagePredict.cc`
 - 变更：在 `SerialTask/Common.hpp` 新增 `ToWireAimbotTarget`、`SaturatingIncrementAimbotTarget`、`SaturatingDecrementAimbotTarget`，统一 AimbotTarget 计数与线协议二值化规则。
 - 变更：网络接收线程增量逻辑改为复用 `SaturatingIncrementAimbotTarget`；阶段切换扣减逻辑改为复用 `SaturatingDecrementAimbotTarget`，移除分散重复实现。
-- 变更：`SerialSend.hpp` 中 `AimbotFrame_SCM_t::AimbotTarget` 从固定 `0x01` 修正为使用 `ToWireAimbotTarget` 的二值化结果，避免“接口传参与实际发送语义不一致”。
-- 目的：与 `03-business-contracts.md` 第 4 条契约对齐，减少联调歧义，提升语义可维护性和测试可覆盖性。
+- 历史说明：本条记录的是旧契约；当前已被 2026-05-29 条目 13 覆盖，`SerialSend.hpp` 消费调用方传入线值，实际发送由 `stage1->stage2` 激光关闭窗口与 `stage3` 强制开激光规则决定；网络接收线程增量逻辑和阶段切换扣减逻辑仍保留。
 
 0. Yaw/Pitch 速度滤波调参激进档
 - 文件：`include/Tools/RuntimeParams.hpp`

@@ -102,7 +102,9 @@ TCP 端口默认 `5000`。完整联调说明见：
 1. 初始值 `0`
 2. 每收到一次网络 `1`，计数 `+1`，上限 `3`
 3. 每当锁定流程 `stage` 发生一次变化，计数 `-1`，下限 `0`
-4. 串口发送时采用二值化：`AimbotTarget >= 1` 则发送 `1`，否则发送 `0`
+4. `stage1 -> stage2` 完成后进入 55s 激光关闭窗口，串口帧 `AimbotTarget` 发送 `0x00`
+5. 关闭窗口结束后恢复发送 `0x01`；进入 `stage3` 时清除关闭窗口并固定发送 `0x01`
+6. 现存 TCP 接收、内部计数与 stage 切换扣减代码仍保留，供日志、联调与后续恢复线协议消费使用
 
 ## 运行参数文件
 
@@ -150,8 +152,6 @@ sudo apt-get install -y libeigen3-dev
 ### 4) OpenVINO 未找到
 
 确认 OpenVINO 环境已安装并能被 CMake 发现，或在仓库内提供可用的 `third_lib/openvino/build/OpenVINOConfig.cmake`。
-
-
 
 
 

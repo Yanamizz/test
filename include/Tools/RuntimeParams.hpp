@@ -47,10 +47,10 @@ struct RuntimeParams {
   bool stage3_roi_keep_centered; // stage3 是否保持中心点不动进行 ROI 裁剪
   int stage3_roi_width;          // stage3 ROI 宽（像素）
   int stage3_roi_height;         // stage3 ROI 高（像素）
-  int stage3_roi_offset_x;       // stage3 ROI 左上角 X 偏移（像素），仅在
-                                 // keep_centered=false 时生效
-  int stage3_roi_offset_y;       // stage3 ROI 左上角 Y 偏移（像素），仅在
-                                 // keep_centered=false 时生效
+  int stage3_roi_offset_x; // stage3 ROI 左上角 X 偏移（像素），仅在
+                           // keep_centered=false 时生效
+  int stage3_roi_offset_y; // stage3 ROI 左上角 Y 偏移（像素），仅在
+                           // keep_centered=false 时生效
   double stage12_exposure_time_us; // stage1/2 默认曝光时间（微秒）
   double stage3_exposure_time_us;  // stage3 默认曝光时间（微秒）
 
@@ -148,7 +148,7 @@ inline const RuntimeParams &Params() {
       "antidrone_stage12.xml",
       "/home/nuc/antidrone/src/model/antidrone_stage3_int8_openvino_model/"
       "antidrone_stage3.xml",
-      "CPU", "ONE_EURO", "ALL",
+      "CPU", "ONE_EURO", "BLUE",
 
       // ===== 相机采集与 ROI =====
       1000, // capture_timeout_ms: 相机抓帧超时 1000ms
@@ -162,8 +162,8 @@ inline const RuntimeParams &Params() {
       4000.0, // stage3_exposure_time_us: stage3 默认曝光 4000us
 
       // ===== 阶段切换与 stage3 丢失恢复 =====
-      300, // stage3_switch_target_lost_delay_ms: stage3 后丢目标 300ms 再切模型
-      300, // stage3_lost_target_coast_ms: stage3 丢目标后续行 300ms
+      200, // stage3_switch_target_lost_delay_ms: stage3 后丢目标 200ms 再切模型
+      500, // stage3_lost_target_coast_ms: stage3 丢目标后续行 500ms
       40, // stage3_lost_target_coast_trigger_delay_ms: 丢失 40ms 后才续行
       60, // stage3_lost_target_reacquire_confirm_ms: 重识别稳定 60ms 才退出续行
       1.2, // stage3_lost_target_reacquire_gate_deg: 回检接管最大允许角差 1.2 度
@@ -224,7 +224,7 @@ inline const RuntimeParams &Params() {
       200.0, // scan_send_hz: stage1/2 扫描发送频率 200Hz
       200.0, // stage3_scan_send_hz: stage3 扫描发送频率 200Hz
       16.0,  // scan_yaw_speed_deg_per_sec: stage1/2 扫描 yaw 速度 16deg/s
-      3.2, // stage3_scan_yaw_speed_deg_per_sec: stage3 扫描 yaw 速度 3.2deg/s
+      2, // stage3_scan_yaw_speed_deg_per_sec: stage3 扫描 yaw 速度 2deg/s
 
       100.0f, // scan_pitch_wavelength_percent: stage1/2 lambda 百分比
       50.0f,  // scan_pitch_amplitude_percent: stage1/2 A 百分比

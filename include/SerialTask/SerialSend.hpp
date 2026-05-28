@@ -79,8 +79,7 @@ inline void SendAimbotFrame(serial::Serial &serial_port,
   aimbot_frame.ID = 0x02;                 // 发送 ID
   aimbot_frame.AimbotState = AimbotState; ///< 0x00 无目标，0x01 有目标
   aimbot_frame.AimbotTarget =
-      0x01; //调试用
-            // ToWireAimbotTarget(AimbotTarget); ///< 0x01开激光，0x00关激光
+      ToWireAimbotTarget(AimbotTarget); ///< 0x00 关激光，0x01 开激光
   aimbot_frame.PitchRelativeAngle = pitch_relative_angle;
   aimbot_frame.YawRelativeAngle = yaw_relative_angle;
   aimbot_frame.PitchOffset = pitch_offset;

@@ -108,8 +108,14 @@ static Tools::LatencyStats g_send_latency_total;
 static Tools::LatencyStats g_send_latency_window;
 static std::atomic<bool> g_stage3_roi_mode{false};
 static std::atomic<bool> g_scan_stage3_mode{false};
+static std::atomic<bool> g_aimbot_target_suppressed_after_lock{false};
+static std::atomic<std::chrono::steady_clock::time_point::rep>
+    g_aimbot_target_suppressed_until_ticks{0};
 
 namespace {
+static constexpr auto kAimbotTargetSuppressAfterLockDuration =
+    std::chrono::seconds(55);
+
 static void RequestStop() {
   g_running.store(false, std::memory_order_release);
   g_frame_cv.notify_all();
@@ -159,6 +165,48 @@ static void DecrementAimbotTargetSaturated() {
   SerialTask::SaturatingDecrementAimbotTarget(g_aimbot_target);
 }
 
+static void SuppressAimbotTargetAfterLock(
+    const std::chrono::steady_clock::time_point &now) {
+  const auto suppressed_until = now + kAimbotTargetSuppressAfterLockDuration;
+  g_aimbot_target_suppressed_until_ticks.store(
+      suppressed_until.time_since_epoch().count(), std::memory_order_release);
+  g_aimbot_target_suppressed_after_lock.store(true, std::memory_order_release);
+  std::cout << "[AimbotTarget] stage1->stage2 完成，关闭激光 "
+            << std::chrono::duration_cast<std::chrono::seconds>(
+                   kAimbotTargetSuppressAfterLockDuration)
+                   .count()
+            << "s" << std::endl;
+}
+
+static void ClearAimbotTargetSuppressWindow() {
+  g_aimbot_target_suppressed_after_lock.store(false,
+                                             std::memory_order_release);
+  g_aimbot_target_suppressed_until_ticks.store(0, std::memory_order_release);
+}
+
+static uint8_t CurrentWireAimbotTarget() {
+  if (g_aerial_robot_stage.load(std::memory_order_acquire) >=
+      ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
+    return SerialTask::kAimbotTargetActiveThreshold;
+  }
+
+  if (g_aimbot_target_suppressed_after_lock.load(std::memory_order_acquire)) {
+    const auto now = std::chrono::steady_clock::now();
+    const auto suppressed_until = std::chrono::steady_clock::time_point(
+        std::chrono::steady_clock::duration(
+            g_aimbot_target_suppressed_until_ticks.load(
+                std::memory_order_acquire)));
+    if (now < suppressed_until) {
+      return SerialTask::kAimbotTargetMin;
+    }
+    g_aimbot_target_suppressed_after_lock.store(false,
+                                                std::memory_order_release);
+    std::cout << "[AimbotTarget] 55s 关闭窗口结束，恢复开激光" << std::endl;
+  }
+
+  return SerialTask::kAimbotTargetActiveThreshold;
+}
+
 static double MaxSerialAimbotFrameHz() {
   constexpr double kBitsPerByteOnSerial = 10.0;
   constexpr double kSafetyRatio = 0.85;
@@ -174,17 +222,12 @@ static Tools::StageRuntimeProfile StageProfile(bool stage3_mode) {
   return StageProfile(Tools::RuntimeStageFromBool(stage3_mode));
 }
 
-static double EffectiveScanSendHz(bool stage3_mode) {
-  return StageProfile(stage3_mode).scan.effective_send_hz;
-}
-
-static int EffectiveScanOriginHoldMs(bool stage3_mode) {
-  return StageProfile(stage3_mode).scan.origin_hold_ms;
-}
-
-static Tools::ScanController::Config EffectiveScanControllerConfig(
+static Tools::ScanSendController::TickConfig EffectiveScanTickConfig(
     bool stage3_mode) {
-  return StageProfile(stage3_mode).scan.controller_config;
+  const auto profile = StageProfile(stage3_mode);
+  return {profile.scan.effective_send_hz,
+          std::chrono::milliseconds(profile.scan.origin_hold_ms),
+          profile.scan.controller_config};
 }
 
 static std::chrono::milliseconds SerialReconnectInterval() {
@@ -224,7 +267,7 @@ static void SendAimbotCommand(serial::Serial &port,
   SerialTask::SerialSend(
       port, command.absolute_pitch, command.absolute_yaw, command.offset_pitch,
       command.offset_yaw, command.pitch_velocity, command.yaw_velocity,
-      command.aimbot_state, g_aimbot_target.load(std::memory_order_acquire));
+      command.aimbot_state, CurrentWireAimbotTarget());
 }
 
 static void CloseSerialPort(serial::Serial &port) {
@@ -433,9 +476,15 @@ static void UpdateAerialRobotStageAndSwitchFlag(
   if (stage != previous_stage) {
     DecrementAimbotTargetSaturated();
   }
+  if (previous_stage ==
+          ImageRecognize::AerialRobotLaserLockJudge::kInitialStage &&
+      stage == ImageRecognize::AerialRobotLaserLockJudge::kInitialStage + 1) {
+    SuppressAimbotTargetAfterLock(std::chrono::steady_clock::now());
+  }
   if (stage >= ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage &&
       previous_stage <
           ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
+    ClearAimbotTargetSuppressWindow();
     stage_predictor_controller->RequestStage3SwitchAfterTargetLoss();
   }
 }
@@ -758,8 +807,11 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   static const Tools::FilterType filter_type =
       Tools::AngleCalculator::ParseFilterType(
           Tools::Params().angle_filter_type);
-  static const ImageRecognize::TargetCampMode target_camp_mode =
-      ImageRecognize::ParseTargetCampMode(Tools::Params().target_camp_mode);
+  static ImageRecognize::TargetCampModeController target_camp_mode_controller(
+      ImageRecognize::ParseTargetCampMode(Tools::Params().target_camp_mode));
+  ImageRecognize::TargetCampMode target_camp_mode =
+      target_camp_mode_controller.Get();
+  ImageRecognize::TargetCampMode last_target_camp_mode = target_camp_mode;
   const bool enable_display = ResolveOption(command_line_options.enable_display,
                                             Tools::Params().enable_display);
   const bool enable_calibration_sliders =
@@ -978,6 +1030,13 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     std::array<float, 6> tracked_box{};
     bool has_tracked_box = false;
     const auto t_select_start = ProfileNow(enable_latency_profile);
+    target_camp_mode = target_camp_mode_controller.Get();
+    if (target_camp_mode != last_target_camp_mode) {
+      target_track_pipeline.Reset();
+      last_target_camp_mode = target_camp_mode;
+      std::cout << "[跟踪阵营] 切换为 "
+                << ImageRecognize::ToString(target_camp_mode) << std::endl;
+    }
     const auto track_pipeline_result = target_track_pipeline.Update(
         result, target_camp_mode,
         stage_predictor_controller.UsingStage3Predictor(), frame_dt);
@@ -1130,7 +1189,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       } else {
         ClearPendingSend();
       }
-      } else {
+    } else {
       const auto recovery_result = lost_target_recovery_controller.Update(
           Tools::LostTargetRecoveryController::UpdateInput{
               stage_predictor_controller.UsingStage3Predictor(),
@@ -1206,7 +1265,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         ImageRecognize::ImageShow::ShowDistance(frame, overlay_data.distance);
       }
       if (enable_calibration_sliders) {
-        Tools::CalibrationSliderPanel::Show(&g_exposure_controller);
+        Tools::CalibrationSliderPanel::Show(&g_exposure_controller,
+                                            &target_camp_mode_controller);
       }
       if (has_tracked_box) {
         ImageRecognize::DrawTrackedBox(frame, tracked_box);
@@ -1361,10 +1421,7 @@ void IMUSendThread(serial::Serial &port, Tools::ScanController &scan_controller,
       const auto now = Clock::now();
       const bool scan_stage3_mode =
           g_scan_stage3_mode.load(std::memory_order_acquire);
-      const Tools::ScanSendController::TickConfig tick_config{
-          EffectiveScanSendHz(scan_stage3_mode),
-          std::chrono::milliseconds(EffectiveScanOriginHoldMs(scan_stage3_mode)),
-          EffectiveScanControllerConfig(scan_stage3_mode)};
+      const auto tick_config = EffectiveScanTickConfig(scan_stage3_mode);
       scan_send_controller.EnterOrStayScanMode(
           tick_config, &scan_controller, &g_scan_controller_mutex, now);
 

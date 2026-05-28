@@ -13,14 +13,18 @@
 #include <opencv2/imgproc.hpp>
 
 #include "CameraTask/ExposureHotkeyController.hpp"
+#include "ImageRecognize/TargetClassFilter.hpp"
 #include "Tools/LaserAngleCalculate.hpp"
 
 namespace Tools {
 
 class CalibrationSliderPanel {
 public:
-  static void Show(CameraTask::ExposureHotkeyController *exposure_controller) {
+  static void Show(CameraTask::ExposureHotkeyController *exposure_controller,
+                   ImageRecognize::TargetCampModeController
+                       *target_camp_mode_controller = nullptr) {
     exposure_controller_ = exposure_controller;
+    target_camp_mode_controller_ = target_camp_mode_controller;
     EnsureInitialized();
     DrawPanel();
   }
@@ -34,6 +38,8 @@ private:
   static constexpr const char *kFarPitchDistTrackbar = "far pitch dist x0.1";
   static constexpr const char *kFarPitchCompTrackbar = "far pitch comp x0.01";
   static constexpr const char *kExposureTrackbar = "exposure x100us";
+  static constexpr const char *kTargetCampTrackbar =
+      "target camp 0R 1B 2All";
   static constexpr int kHeightScale = 100000;
   static constexpr int kStage12MinHeightTicks = 5500;
   static constexpr int kStage12MaxHeightTicks = 7000;
@@ -180,6 +186,8 @@ private:
                        kOffsetSliderMax, OnTrackbar);
     cv::createTrackbar(kExposureTrackbar, kWindowName, nullptr,
                        kExposureSliderMax, OnTrackbar);
+    cv::createTrackbar(kTargetCampTrackbar, kWindowName, nullptr, 2,
+                       OnTrackbar);
     cv::setTrackbarPos(kNearHeightTrackbar, kWindowName, near_height_slider_);
     cv::setTrackbarPos(kFarHeightTrackbar, kWindowName, far_height_slider_);
     cv::setTrackbarPos(kNearPitchDistTrackbar, kWindowName,
@@ -191,6 +199,7 @@ private:
     cv::setTrackbarPos(kFarPitchCompTrackbar, kWindowName,
                        far_pitch_comp_slider_);
     cv::setTrackbarPos(kExposureTrackbar, kWindowName, exposure_slider_);
+    SyncTargetCampSliderFromController(true);
 
     initialized_ = true;
     ApplySliderValues(false);
@@ -223,6 +232,10 @@ private:
       exposure_controller_->RequestEditingExposureTime(
           ToExposureUs(exposure_slider_));
     }
+
+    if (target_camp_mode_controller_ != nullptr) {
+      target_camp_mode_controller_->SetModeIndex(target_camp_slider_);
+    }
   }
 
   static void ReadSliderValues() {
@@ -244,10 +257,13 @@ private:
         cv::getTrackbarPos(kFarPitchCompTrackbar, kWindowName);
     exposure_slider_ =
         cv::getTrackbarPos(kExposureTrackbar, kWindowName);
+    target_camp_slider_ =
+        cv::getTrackbarPos(kTargetCampTrackbar, kWindowName);
   }
 
   static void DrawPanel() {
     SyncExposureSliderFromController();
+    SyncTargetCampSliderFromController(false);
     const auto edit_stage = CurrentEditCalibrationStage();
     const auto heights = DistanceCalculator::GetCalibrationTargetHeights(
         edit_stage);
@@ -273,7 +289,12 @@ private:
         exposure_controller_ != nullptr
             ? exposure_controller_->GetActiveMode()
             : CameraTask::ExposureHotkeyController::ExposureMode::Stage12;
-    cv::Mat panel(350, 620, CV_8UC3, cv::Scalar(28, 30, 32));
+    const auto target_camp_mode =
+        target_camp_mode_controller_ != nullptr
+            ? target_camp_mode_controller_->Get()
+            : ImageRecognize::TargetCampModeFromIndex(
+                  target_camp_slider_);
+    cv::Mat panel(382, 620, CV_8UC3, cv::Scalar(28, 30, 32));
     cv::putText(panel,
                 "near_calibration_target_height: " +
                     cv::format("%.5f m",
@@ -329,8 +350,13 @@ private:
                 {12, 284}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
                 cv::Scalar(170, 190, 200), 1, cv::LINE_AA);
     cv::putText(panel,
+                "target_camp_mode:              " +
+                    std::string(ImageRecognize::ToString(target_camp_mode)),
+                {12, 314}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
+    cv::putText(panel,
                 "pitch comp: positive value moves laser upward",
-                {12, 314}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                {12, 346}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
                 cv::Scalar(170, 190, 200), 1, cv::LINE_AA);
     cv::imshow(kWindowName, panel);
   }
@@ -359,6 +385,27 @@ private:
     if (edit_mode_changed) {
       ApplySliderValues(false);
     }
+  }
+
+  static void SyncTargetCampSliderFromController(bool force) {
+    if (!initialized_ && !force) {
+      return;
+    }
+    if (target_camp_mode_controller_ == nullptr) {
+      return;
+    }
+
+    const int desired_slider =
+        target_camp_mode_controller_->GetModeIndex();
+    if (!force && desired_slider == target_camp_slider_) {
+      return;
+    }
+
+    target_camp_slider_ = desired_slider;
+    syncing_sliders_ = true;
+    cv::setTrackbarPos(kTargetCampTrackbar, kWindowName,
+                       target_camp_slider_);
+    syncing_sliders_ = false;
   }
 
   static void SyncCalibrationSlidersFromStage(CalibrationStage stage,
@@ -407,11 +454,14 @@ private:
   inline static int far_pitch_distance_slider_ = 0;
   inline static int far_pitch_comp_slider_ = 0;
   inline static int exposure_slider_ = ToExposureSliderValue(1000.0);
+  inline static int target_camp_slider_ = 0;
   inline static CameraTask::ExposureHotkeyController::ExposureMode
       exposure_slider_mode_ =
           CameraTask::ExposureHotkeyController::ExposureMode::Stage12;
   inline static CameraTask::ExposureHotkeyController *exposure_controller_ =
       nullptr;
+  inline static ImageRecognize::TargetCampModeController
+      *target_camp_mode_controller_ = nullptr;
 };
 
 } // namespace Tools
