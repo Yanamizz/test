@@ -9,10 +9,10 @@
 #include <chrono>
 
 /**
- * @brief 统计帧率，在固定时间窗口更新一次显示值。
- * @brief FPS 计数器模块
- * @brief 说明：每经过一段时间（默认 500 ms）更新一次 FPS 值。
- * @brief 用法：在主循环每帧调用 `tick()`，并通过 `get()` 获取当前 FPS。
+ * @brief 统计帧率，并在固定时间窗口内更新一次显示值。
+ *
+ * 说明：每经过一段时间（默认 500 ms）更新一次 FPS 数值。
+ * 用法：在主循环每帧调用 `tick()`，并通过 `get()` 获取当前 FPS。
  */
 class FPSCounter {
  public:

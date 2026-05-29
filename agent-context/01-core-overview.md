@@ -12,21 +12,19 @@
 2. OpenVINO 推理目标
 3. 跟踪与角度/激光补偿计算
 4. 串口发送云台控制帧
-5. 网络线程接收外部 `AimbotTarget` 触发
+5. 旧 TCP 网络控制链路已删除，不参与主程序激光开关控制
 
 ## 代码分层
 
 - 主流程与线程编排：`src/ImagePredict.cc`
 - 识别与跟踪：`include/ImageRecognize/`
 - 串口协议与收发：`include/SerialTask/`
-- 网络 TCP 接收：`include/NetworkTask/`
 - 工具与控制算法：`include/Tools/`
 - 第三方依赖：`third_lib/`
 
 ## 重点文件
 
 - `src/ImagePredict.cc`
-- `include/NetworkTask/AimbotTargetReceiver.hpp`
 - `include/SerialTask/SerialSend.hpp`
 - `include/Tools/LaserAngleCalculate.hpp`
 - `include/Tools/RuntimeParams.hpp`

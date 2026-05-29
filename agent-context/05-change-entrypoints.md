@@ -19,11 +19,8 @@
 - `include/SerialTask/Common.hpp`
 - `include/SerialTask/SerialSend.hpp`
 
-5. 网络收发与连接  
-- `include/NetworkTask/AimbotTargetReceiver.hpp`
-- `include/NetworkTask/DeviceAServer.hpp`
-- `include/NetworkTask/DeviceBClient.hpp`
-- `include/NetworkTask/SocketCommon.hpp`
+5. TCP 网络控制链路
+- 旧 `include/NetworkTask/` 与独立 TCP 示例已删除；主程序不再通过网络控制激光。
 
 6. 角度/激光补偿与扫描控制  
 - `include/Tools/AngleCalculate.hpp`
@@ -35,7 +32,6 @@
 
 8. 人类使用文档  
 - `README.md`
-- `src/README.md`
 
 ## 变更范围约束
 

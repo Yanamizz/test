@@ -9,9 +9,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <iostream> // For std::cerr
+#include <iostream> // 提供 std::cerr
 #include <serial/serial.h>
-#include <vector> // For std::vector
+#include <vector> // 提供 std::vector
 
 namespace SerialTask {
 
@@ -117,8 +117,8 @@ inline size_t ReadAvailableIMUBytes(serial::Serial &serial_port,
 }
 
 /**
- * @brief 解析串口缓冲区并返回最新的
- * GimbalImuFrame_SCM_t（不做四元数->欧拉转换）
+ * @brief 解析串口缓冲区并返回最新的 GimbalImuFrame_SCM_t，
+ *        不执行四元数到欧拉角的转换。
  * @param serial_port 已打开的串口
  * @param out_frame 输出的最新帧（若找到返回 true）
  */
@@ -130,14 +130,14 @@ inline bool ReadIMUFrame(serial::Serial &serial_port,
 }
 
 /**
- * @brief 从串口读取字节流，解析 GimbalImuFrame_SCM_t
- * 数据，并将四元数转换为欧拉角
+ * @brief 从串口读取字节流，解析 GimbalImuFrame_SCM_t 数据，
+ *        并将四元数转换为欧拉角。
  *        策略：读取缓冲区所有数据，寻找并使用最后一个有效帧，以确保数据最新。
  * @param serial_port 已配置好的串口对象
  * @param angles 输出的欧拉角结构体（Roll, Pitch, Yaw）
  */
 inline bool ReadIMUData(serial::Serial &serial_port, EulerAngles &angles) {
-  // 现在 ReadIMUData 重用 ReadIMUFrame：先解析出最新帧再转换为欧拉角
+  // 这里复用 ReadIMUFrame：先解析出最新帧，再转换为欧拉角。
   GimbalImuFrame_SCM_t latest_frame;
   if (!ReadIMUFrame(serial_port, latest_frame))
     return false;

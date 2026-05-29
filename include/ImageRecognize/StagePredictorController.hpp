@@ -198,8 +198,6 @@ private:
     const auto calibration_start = std::chrono::steady_clock::now();
     Tools::DistanceCalculator::SetActiveStage(
         ToCalibrationStage_(profile.stage));
-    Tools::LaserAngleCalculator::SetActiveStage(
-        ToCalibrationStage_(profile.stage));
     const auto calibration_end = std::chrono::steady_clock::now();
     calibration_ms = ElapsedMilliseconds_(calibration_start, calibration_end);
 

@@ -50,6 +50,11 @@ public:
     Reset();
   }
 
+  void SetConfigPreserveProgress(const Config &config) {
+    config_ = config;
+    ClampStateToBounds_();
+  }
+
   void Reset() {
     current_yaw_deg_ = std::min(config_.min_yaw_deg, config_.max_yaw_deg);
     yaw_direction_sign_ = 1.0f;
@@ -155,6 +160,29 @@ private:
       current_yaw_deg_ = boundary_yaw_deg;
       remaining_step_deg -= available_step_deg;
       yaw_direction_sign_ *= -1.0f;
+    }
+  }
+
+  void ClampStateToBounds_() {
+    const float min_yaw_deg =
+        std::min(config_.min_yaw_deg, config_.max_yaw_deg);
+    const float max_yaw_deg =
+        std::max(config_.min_yaw_deg, config_.max_yaw_deg);
+    const float yaw_span_deg = max_yaw_deg - min_yaw_deg;
+    if (yaw_span_deg <= 1e-4f) {
+      current_yaw_deg_ = min_yaw_deg;
+      yaw_direction_sign_ = 1.0f;
+      return;
+    }
+
+    current_yaw_deg_ =
+        std::clamp(current_yaw_deg_, min_yaw_deg, max_yaw_deg);
+    if (current_yaw_deg_ <= min_yaw_deg + 1e-6f &&
+        yaw_direction_sign_ < 0.0f) {
+      yaw_direction_sign_ = 1.0f;
+    } else if (current_yaw_deg_ >= max_yaw_deg - 1e-6f &&
+               yaw_direction_sign_ > 0.0f) {
+      yaw_direction_sign_ = -1.0f;
     }
   }
 

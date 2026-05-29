@@ -29,7 +29,8 @@ class TargetTrackPipeline {
 
   void Reset() {
     tracker_.Reset();
-    stabilizer_.Reset();
+    stage12_stabilizer_.Reset();
+    stage3_stabilizer_.Reset();
   }
 
   TargetTrackPipelineResult Update(const PredictResult &result,
@@ -49,7 +50,11 @@ class TargetTrackPipeline {
 
     pipeline_result.tracked_box = pipeline_result.track_result.box;
     if (enable_box_stabilization) {
-      pipeline_result.tracked_box = stabilizer_.Update(
+      pipeline_result.tracked_box = stage3_stabilizer_.Update(
+          pipeline_result.tracked_box,
+          pipeline_result.track_result.matched_history, dt);
+    } else {
+      pipeline_result.tracked_box = stage12_stabilizer_.Update(
           pipeline_result.tracked_box,
           pipeline_result.track_result.matched_history, dt);
     }
@@ -58,8 +63,22 @@ class TargetTrackPipeline {
   }
 
  private:
+  static TemporalBoxStabilizer MakeStage12Stabilizer_() {
+    TemporalBoxStabilizerParams params;
+    params.min_iou_to_stabilize = 0.38f;
+    params.max_center_distance_ratio = 0.55f;
+    params.max_area_ratio = 1.45f;
+    params.max_height_expand_ratio = 1.06f;
+    params.center_min_cutoff_hz = 1.1;
+    params.center_beta = 0.18;
+    params.size_min_cutoff_hz = 0.85;
+    params.size_beta = 0.10;
+    return TemporalBoxStabilizer(params);
+  }
+
   CrossFrameTargetTracker tracker_{};
-  TemporalBoxStabilizer stabilizer_{};
+  TemporalBoxStabilizer stage12_stabilizer_{MakeStage12Stabilizer_()};
+  TemporalBoxStabilizer stage3_stabilizer_{};
 };
 
 } // namespace ImageRecognize

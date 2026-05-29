@@ -1,6 +1,6 @@
 /**
  * @file    include/Tools/SaveVideo.hpp
- * @brief   Save video segments while a target is detected.
+ * @brief   在检测到目标时按片段保存视频。
  */
 
 #pragma once
@@ -12,11 +12,13 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <opencv2/opencv.hpp>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "Tools/CpuAffinity.hpp"
 
@@ -25,10 +27,12 @@ namespace detail {
 
 class AsyncVideoWriterBase {
  public:
-  AsyncVideoWriterBase(int fps, cv::Size output_size, const char *log_tag)
+  AsyncVideoWriterBase(int fps, cv::Size output_size, const char *log_tag,
+                       int worker_aux_core_index = -1)
       : fps_(std::max(1, fps)),
         output_size_(output_size),
         log_tag_(log_tag == nullptr ? "[SaveVideo]" : log_tag),
+        worker_aux_core_index_(worker_aux_core_index),
         frame_interval_(std::chrono::duration<double>(1.0 / fps_)) {}
 
   AsyncVideoWriterBase(const AsyncVideoWriterBase &) = delete;
@@ -107,7 +111,12 @@ class AsyncVideoWriterBase {
   }
 
   void WorkerLoop_() {
-    Tools::BindCurrentThreadToAuxCores();
+    if (worker_aux_core_index_ >= 0) {
+      Tools::BindCurrentThreadToAuxCore(
+          static_cast<size_t>(worker_aux_core_index_));
+    } else {
+      Tools::BindCurrentThreadToAuxCores();
+    }
 
     while (true) {
       cv::Mat frame;
@@ -199,6 +208,7 @@ class AsyncVideoWriterBase {
   int fps_;
   cv::Size output_size_{};
   std::string log_tag_;
+  int worker_aux_core_index_ = -1;
   std::chrono::duration<double> frame_interval_;
   std::chrono::steady_clock::time_point next_sample_time_{};
   bool sampling_initialized_ = false;
@@ -235,7 +245,7 @@ class SaveVideoOnTarget : private detail::AsyncVideoWriterBase {
     ShutdownWorker();
   }
 
-  // Call once per frame. Record while should_record=true, stop otherwise.
+  // 每帧调用一次：should_record=true 时持续录制，否则停止录制。
   void Update(const cv::Mat &frame, bool should_record) {
     if (base_dir_.empty()) {
       return;
@@ -296,18 +306,21 @@ class SaveVideoOnTarget : private detail::AsyncVideoWriterBase {
   }
 };
 
-class SaveVideoFullRun : private detail::AsyncVideoWriterBase {
+class SaveVideoFullRunStream : private detail::AsyncVideoWriterBase {
  public:
-  explicit SaveVideoFullRun(int fps = 30,
-                            const std::string &base_dir = "full_run_videos",
-                            cv::Size output_size = cv::Size())
-      : detail::AsyncVideoWriterBase(fps, output_size, "[SaveVideoFullRun]"),
-        base_dir_(base_dir) {
-    PrepareBaseFolder();
+  SaveVideoFullRunStream(int fps, std::filesystem::path base_dir,
+                         std::string file_prefix, std::string stream_suffix,
+                         const char *log_tag, cv::Size output_size,
+                         int worker_aux_core_index)
+      : detail::AsyncVideoWriterBase(fps, output_size, log_tag,
+                                     worker_aux_core_index),
+        base_dir_(std::move(base_dir)),
+        file_prefix_(std::move(file_prefix)),
+        stream_suffix_(std::move(stream_suffix)) {
     StartWorker();
   }
 
-  ~SaveVideoFullRun() { ShutdownWorker(); }
+  ~SaveVideoFullRunStream() { ShutdownWorker(); }
 
   void Update(const cv::Mat &frame) {
     if (base_dir_.empty() || frame.empty()) {
@@ -320,6 +333,65 @@ class SaveVideoFullRun : private detail::AsyncVideoWriterBase {
   int file_index_ = 1;
   std::filesystem::path base_dir_;
   std::string file_prefix_;
+  std::string stream_suffix_;
+
+  bool ReadyForOutput_() const override {
+    return !base_dir_.empty() && !file_prefix_.empty() &&
+           !stream_suffix_.empty();
+  }
+
+  std::filesystem::path BuildNextOutputPath_() override {
+    std::ostringstream oss;
+    oss << file_prefix_ << "_" << stream_suffix_ << "_" << std::setw(3)
+        << std::setfill('0') << file_index_++ << ".avi";
+    return base_dir_ / oss.str();
+  }
+};
+
+class SaveVideoFullRun {
+ public:
+  explicit SaveVideoFullRun(int fps = 30,
+                            const std::string &base_dir = "full_run_videos",
+                            cv::Size output_size = cv::Size(),
+                            int worker_aux_core_index = 4)
+      : fps_(std::max(1, fps)),
+        base_dir_(base_dir),
+        output_size_(output_size),
+        worker_aux_core_index_(worker_aux_core_index) {
+    PrepareBaseFolder();
+    if (ReadyForOutput_()) {
+      raw_stream_ = std::make_unique<SaveVideoFullRunStream>(
+          fps_, base_dir_, file_prefix_, "raw", "[SaveVideoFullRunRaw]",
+          output_size_, worker_aux_core_index_);
+      overlay_stream_ = std::make_unique<SaveVideoFullRunStream>(
+          fps_, base_dir_, file_prefix_, "overlay",
+          "[SaveVideoFullRunOverlay]", output_size_,
+          worker_aux_core_index_);
+    }
+  }
+
+  void UpdateRaw(const cv::Mat &frame) {
+    if (raw_stream_) {
+      raw_stream_->Update(frame);
+    }
+  }
+
+  void UpdateOverlay(const cv::Mat &frame) {
+    if (overlay_stream_) {
+      overlay_stream_->Update(frame);
+    }
+  }
+
+  void Update(const cv::Mat &frame) { UpdateOverlay(frame); }
+
+ private:
+  int fps_ = 30;
+  std::filesystem::path base_dir_;
+  cv::Size output_size_{};
+  int worker_aux_core_index_ = 4;
+  std::string file_prefix_;
+  std::unique_ptr<SaveVideoFullRunStream> raw_stream_;
+  std::unique_ptr<SaveVideoFullRunStream> overlay_stream_;
 
   void PrepareBaseFolder() {
     try {
@@ -348,15 +420,8 @@ class SaveVideoFullRun : private detail::AsyncVideoWriterBase {
     }
   }
 
-  bool ReadyForOutput_() const override {
+  bool ReadyForOutput_() const {
     return !base_dir_.empty() && !file_prefix_.empty();
-  }
-
-  std::filesystem::path BuildNextOutputPath_() override {
-    std::ostringstream oss;
-    oss << file_prefix_ << "_" << std::setw(3) << std::setfill('0')
-        << file_index_++ << ".avi";
-    return base_dir_ / oss.str();
   }
 };
 

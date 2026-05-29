@@ -280,14 +280,14 @@ private:
 
     oneeuro_yaw.reset();
     oneeuro_pitch.reset();
-    oneeuro_yaw.setFrequency(params.oneeuro_freq_hz);
-    oneeuro_pitch.setFrequency(params.oneeuro_freq_hz);
-    oneeuro_yaw.setMinCutoff(params.oneeuro_min_cutoff_hz);
-    oneeuro_pitch.setMinCutoff(params.oneeuro_min_cutoff_hz);
-    oneeuro_yaw.setBeta(params.oneeuro_beta);
-    oneeuro_pitch.setBeta(params.oneeuro_beta);
-    oneeuro_yaw.setDerivativeCutoff(params.oneeuro_d_cutoff_hz);
-    oneeuro_pitch.setDerivativeCutoff(params.oneeuro_d_cutoff_hz);
+    oneeuro_yaw.setFrequency(params.oneeuro_yaw_freq_hz);
+    oneeuro_pitch.setFrequency(params.oneeuro_pitch_freq_hz);
+    oneeuro_yaw.setMinCutoff(params.oneeuro_yaw_min_cutoff_hz);
+    oneeuro_pitch.setMinCutoff(params.oneeuro_pitch_min_cutoff_hz);
+    oneeuro_yaw.setBeta(params.oneeuro_yaw_beta);
+    oneeuro_pitch.setBeta(params.oneeuro_pitch_beta);
+    oneeuro_yaw.setDerivativeCutoff(params.oneeuro_yaw_d_cutoff_hz);
+    oneeuro_pitch.setDerivativeCutoff(params.oneeuro_pitch_d_cutoff_hz);
   }
 
   template <typename KF, typename EKF, typename UKF, typename CKF,
@@ -366,10 +366,14 @@ private:
     double pitch_filter_q;
     double pitch_filter_r;
 
-    double oneeuro_freq_hz;
-    double oneeuro_min_cutoff_hz;
-    double oneeuro_beta;
-    double oneeuro_d_cutoff_hz;
+    double oneeuro_yaw_freq_hz;
+    double oneeuro_pitch_freq_hz;
+    double oneeuro_yaw_min_cutoff_hz;
+    double oneeuro_pitch_min_cutoff_hz;
+    double oneeuro_yaw_beta;
+    double oneeuro_pitch_beta;
+    double oneeuro_yaw_d_cutoff_hz;
+    double oneeuro_pitch_d_cutoff_hz;
 
     double velocity_dt_min_sec;
     double velocity_dt_max_sec;
@@ -413,6 +417,22 @@ private:
 };
 
 inline const AngleCalculator::TuningParams &AngleCalculator::Params() {
+  const double tuned_yaw_velocity_abs_limit =
+      Tools::Params().angle_velocity_yaw_abs_limit_deg_per_sec * 1.22;
+  const double tuned_yaw_velocity_max_accel =
+      Tools::Params().angle_velocity_yaw_max_accel_deg_per_sec2 * 1.30;
+  const double tuned_yaw_velocity_cutoff_hz =
+      Tools::Params().angle_velocity_yaw_cutoff_hz * 1.24;
+  const double tuned_yaw_velocity_deadband =
+      std::min(0.02, Tools::Params().angle_velocity_yaw_deadband_deg_per_sec);
+  const double tuned_pitch_velocity_abs_limit =
+      Tools::Params().angle_velocity_pitch_abs_limit_deg_per_sec * 0.78;
+  const double tuned_pitch_velocity_max_accel =
+      Tools::Params().angle_velocity_pitch_max_accel_deg_per_sec2 * 0.68;
+  const double tuned_pitch_velocity_cutoff_hz =
+      Tools::Params().angle_velocity_pitch_cutoff_hz * 0.80;
+  const double tuned_pitch_velocity_deadband =
+      std::max(0.04, Tools::Params().angle_velocity_pitch_deadband_deg_per_sec);
   static const TuningParams p{
       FilterType::ONE_EURO,
 
@@ -424,21 +444,25 @@ inline const AngleCalculator::TuningParams &AngleCalculator::Params() {
       0.1,  // pitch_filter_q
       1.0,  // pitch_filter_r
 
-      120.0, // oneeuro_freq_hz
-      4.6,   // oneeuro_min_cutoff_hz
-      6.5,   // oneeuro_beta
-      2.5,   // oneeuro_d_cutoff_hz
+      120.0, // oneeuro_yaw_freq_hz
+      120.0, // oneeuro_pitch_freq_hz
+      6.4,   // oneeuro_yaw_min_cutoff_hz
+      4.2,   // oneeuro_pitch_min_cutoff_hz
+      8.2,   // oneeuro_yaw_beta
+      5.8,   // oneeuro_pitch_beta
+      3.0,   // oneeuro_yaw_d_cutoff_hz
+      2.3,   // oneeuro_pitch_d_cutoff_hz
 
       Tools::Params().angle_velocity_dt_min_sec,
       Tools::Params().angle_velocity_dt_max_sec,
-      Tools::Params().angle_velocity_yaw_abs_limit_deg_per_sec,
-      Tools::Params().angle_velocity_pitch_abs_limit_deg_per_sec,
-      Tools::Params().angle_velocity_yaw_max_accel_deg_per_sec2,
-      Tools::Params().angle_velocity_pitch_max_accel_deg_per_sec2,
-      Tools::Params().angle_velocity_yaw_cutoff_hz,
-      Tools::Params().angle_velocity_pitch_cutoff_hz,
-      Tools::Params().angle_velocity_yaw_deadband_deg_per_sec,
-      Tools::Params().angle_velocity_pitch_deadband_deg_per_sec
+      tuned_yaw_velocity_abs_limit,
+      tuned_pitch_velocity_abs_limit,
+      tuned_yaw_velocity_max_accel,
+      tuned_pitch_velocity_max_accel,
+      tuned_yaw_velocity_cutoff_hz,
+      tuned_pitch_velocity_cutoff_hz,
+      tuned_yaw_velocity_deadband,
+      tuned_pitch_velocity_deadband
   };
   return p;
 }

@@ -34,8 +34,8 @@ class GalaxyCamera {
   GalaxyCamera(const GalaxyCamera &) = delete;
   GalaxyCamera &operator=(const GalaxyCamera &) = delete;
 
-  // 手动参数统一放到文件末尾，这里只保留操作接口
-  // 手动设置接口（优先使用这些 setter）
+  // 手动参数统一放到文件末尾，这里只保留操作接口。
+  // 手动设置接口（优先使用这些设置函数）。
   void setWhiteBalanceAuto(bool enable) { enable_auto_white_balance = enable; }
   void setWhiteBalanceChannel(const std::string &channel_name) { wb_channel_name_ = channel_name; }
   void setWhiteBalanceChannelIndex(int idx) { wb_channel_index_ = idx; }
@@ -140,7 +140,7 @@ class GalaxyCamera {
       open_param.openMode = GX_OPEN_MAC;
       open_param.pszContent = device_ip_info.szMAC;
     } else {
-      // U3V/USB devices: open by index
+      // U3V/USB 设备按索引打开。
       index_str_ = "1";
       open_param.openMode = GX_OPEN_INDEX;
       open_param.pszContent = const_cast<char *>(index_str_.c_str());
@@ -153,7 +153,7 @@ class GalaxyCamera {
       return false;
     }
 
-    // Query color filter (for Bayer to RGB)
+    // 查询颜色滤波器信息，供 Bayer 转 RGB 使用。
     GX_NODE_ACCESS_MODE access_mode;
     status = GXGetNodeAccessMode(device_handle_, "PixelColorFilter", &access_mode);
     const bool has_color_filter = (status == GX_STATUS_SUCCESS) &&
@@ -390,8 +390,7 @@ class GalaxyCamera {
 
   void applyCameraParams() {
     if (!device_handle_) return;
-    // 白平衡设置：支持自动/手动；手动时先选择通道（selector），再设置
-    // BalanceRatio
+    // 白平衡设置：支持自动/手动；手动时先选择通道，再写入 BalanceRatio。
     if (enable_auto_white_balance) {
       GX_STATUS status = GXSetEnumValueByString(device_handle_, "BalanceWhiteAuto", "Continuous");
       if (status != GX_STATUS_SUCCESS) logLastError("GXSetEnumValueByString(BalanceWhiteAuto:Continuous)");
@@ -399,7 +398,7 @@ class GalaxyCamera {
       GX_STATUS off_status = GXSetEnumValueByString(device_handle_, "BalanceWhiteAuto", "Off");
       if (off_status != GX_STATUS_SUCCESS) logLastError("GXSetEnumValueByString(BalanceWhiteAuto:Off)");
 
-      // 先设置通道：优先使用名称（如 "Red"/"Green"/"Blue"），否则使用索引
+      // 先设置通道：优先使用名称（如 "Red"/"Green"/"Blue"），否则使用索引。
       if (!wb_channel_name_.empty()) {
         GX_STATUS sel_status = GXSetEnumValueByString(device_handle_, "BalanceRatioSelector", wb_channel_name_.c_str());
         if (sel_status != GX_STATUS_SUCCESS) {
@@ -412,7 +411,7 @@ class GalaxyCamera {
         }
       }
 
-      // 再写入比率（节点名 BalanceRatio）
+      // 再写入白平衡比率（节点名为 BalanceRatio）。
       if (white_balance_red > 0.0) {
         GX_STATUS ratio_status = GXSetFloatValue(device_handle_, "BalanceRatio", white_balance_red);
         if (ratio_status != GX_STATUS_SUCCESS) logLastError("GXSetFloatValue(BalanceRatio)");
@@ -602,7 +601,7 @@ class GalaxyCamera {
     offset_x = ClampAlignInt(offset_x, offset_x_range);
     offset_y = ClampAlignInt(offset_y, offset_y_range);
 
-    // 使用 full-frame 缓存做边界限制，避免误用 Width/Height 当前节点的新上限。
+    // 使用整幅画面缓存的尺寸做边界限制，避免误用 Width/Height 当前节点的新上限。
     const int64_t full_frame_max_x =
         full_frame_offset_x_min_ + std::max<int64_t>(0, full_frame_width_ - width);
     const int64_t full_frame_max_y =

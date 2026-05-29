@@ -4,7 +4,6 @@
  */
 #pragma once
 
-#include <atomic>
 #include <cstdint>
 /**
  * @brief 目标侧欧拉角帧（Pitch, Yaw）
@@ -14,8 +13,8 @@ typedef struct __attribute__((packed)) {
   uint8_t ID;          ///< 接收 id 0x02
   uint8_t AimbotState; ///< 0x00 无目标，0x01 有目标
   uint8_t AimbotTarget; ///< 串口激光开关：0x00 关闭，0x01 开启
-  float PitchRelativeAngle; ///< Pitch (rad)
-  float YawRelativeAngle;   ///< Yaw   (rad)
+  float PitchRelativeAngle; ///< Pitch 角（弧度）
+  float YawRelativeAngle;   ///< Yaw 角（弧度）
   float PitchOffset;        ///< Pitch 偏差角 (rad)
   float YawOffset;          ///< Yaw 偏差角 (rad)
   float PitchVelocity;      ///< Pitch 角速度 (rad/s)
@@ -48,42 +47,15 @@ namespace SerialTask {
 
 inline constexpr uint8_t IMU_DATA_SEND_ID = 0x03;
 
-// AimbotTarget 内部计数语义：
-// - 计数范围 [kAimbotTargetMin, kAimbotTargetMax]
-// - TCP 接收与 stage 切换仍维护该计数
-// - 串口发送时按运行时激光窗口二值化为 0x00/0x01
+// AimbotTarget 线协议值：0x00 关激光，0x01 开激光。
+// 主程序不再通过 TCP 维护 AimbotTarget 计数；线值由运行时激光状态决定。
 inline constexpr uint8_t kAimbotTargetMin = 0x00;
 inline constexpr uint8_t kAimbotTargetActiveThreshold = 0x01;
-inline constexpr uint8_t kAimbotTargetMax = 0x03;
 
-inline uint8_t ToWireAimbotTarget(uint8_t counter_value) {
-  return (counter_value >= kAimbotTargetActiveThreshold)
+inline uint8_t ToWireAimbotTarget(uint8_t value) {
+  return (value >= kAimbotTargetActiveThreshold)
              ? kAimbotTargetActiveThreshold
              : kAimbotTargetMin;
-}
-
-inline void SaturatingIncrementAimbotTarget(std::atomic<uint8_t> &counter) {
-  uint8_t old_value = counter.load(std::memory_order_acquire);
-  while (old_value < kAimbotTargetMax) {
-    if (counter.compare_exchange_weak(old_value,
-                                      static_cast<uint8_t>(old_value + 1),
-                                      std::memory_order_acq_rel,
-                                      std::memory_order_acquire)) {
-      return;
-    }
-  }
-}
-
-inline void SaturatingDecrementAimbotTarget(std::atomic<uint8_t> &counter) {
-  uint8_t old_value = counter.load(std::memory_order_acquire);
-  while (old_value > kAimbotTargetMin) {
-    if (counter.compare_exchange_weak(old_value,
-                                      static_cast<uint8_t>(old_value - 1),
-                                      std::memory_order_acq_rel,
-                                      std::memory_order_acquire)) {
-      return;
-    }
-  }
 }
 
 } // namespace SerialTask

@@ -1,6 +1,6 @@
 /**
  * @file    include/Tools/RuntimeStats.hpp
- * @brief   定义主循环延迟与像素高度统计数据及其打印辅助函数。
+ * @brief   定义主循环延迟与像素尺寸统计数据及其打印辅助函数。
  */
 
 #pragma once
@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <vector>
 
 namespace Tools {
 
@@ -57,31 +58,69 @@ struct LatencyStats {
   void AddFrame() { ++frames; }
 };
 
-struct PixelHeightStats {
+struct PixelSizeStats {
   std::uint64_t samples = 0;
-  double sum = 0.0;
-  double min = 0.0;
-  double max = 0.0;
+  double width_sum = 0.0;
+  double width_min = 0.0;
+  double width_max = 0.0;
+  double height_sum = 0.0;
+  double height_min = 0.0;
+  double height_max = 0.0;
+  std::vector<double> width_samples;
+  std::vector<double> height_samples;
 
-  void Add(double height_px) {
-    if (height_px <= 0.0) {
+  void Add(double width_px, double height_px) {
+    if (width_px <= 0.0 || height_px <= 0.0) {
       return;
     }
 
     if (samples == 0) {
-      min = height_px;
-      max = height_px;
+      width_min = width_px;
+      width_max = width_px;
+      height_min = height_px;
+      height_max = height_px;
     } else {
-      min = std::min(min, height_px);
-      max = std::max(max, height_px);
+      width_min = std::min(width_min, width_px);
+      width_max = std::max(width_max, width_px);
+      height_min = std::min(height_min, height_px);
+      height_max = std::max(height_max, height_px);
     }
 
-    sum += height_px;
+    width_sum += width_px;
+    height_sum += height_px;
+    width_samples.push_back(width_px);
+    height_samples.push_back(height_px);
     ++samples;
   }
 
-  double Average() const {
-    return samples > 0 ? sum / static_cast<double>(samples) : 0.0;
+  double AverageWidth() const {
+    return samples > 0 ? width_sum / static_cast<double>(samples) : 0.0;
+  }
+
+  double AverageHeight() const {
+    return samples > 0 ? height_sum / static_cast<double>(samples) : 0.0;
+  }
+
+  double WidthMedian() const { return Percentile(width_samples, 0.5); }
+
+  double HeightMedian() const { return Percentile(height_samples, 0.5); }
+
+  double WidthP25() const { return Percentile(width_samples, 0.25); }
+
+  double HeightP25() const { return Percentile(height_samples, 0.25); }
+
+private:
+  static double Percentile(const std::vector<double> &values, double q) {
+    if (values.empty()) {
+      return 0.0;
+    }
+
+    std::vector<double> sorted = values;
+    std::sort(sorted.begin(), sorted.end());
+    const double clamped_q = std::clamp(q, 0.0, 1.0);
+    const std::size_t index = static_cast<std::size_t>(
+        clamped_q * static_cast<double>(sorted.size() - 1));
+    return sorted[index];
   }
 };
 
@@ -135,17 +174,24 @@ inline void PrintSerialLatencyStats(const LatencyStats &s, const char *tag) {
             << std::endl;
 }
 
-inline void PrintPixelHeightStats(const PixelHeightStats &s) {
+inline void PrintPixelSizeStats(const PixelSizeStats &s) {
   if (s.samples == 0) {
-    std::cout << "[像素高度] 无有效样本" << std::endl;
+    std::cout << "[像素尺寸] 无有效样本" << std::endl;
     return;
   }
 
   std::cout << std::fixed << std::setprecision(3);
-  std::cout << "[像素高度] 样本数=" << s.samples << " 平均=" << s.Average()
-            << " px"
-            << " 最小=" << s.min << " px"
-            << " 最大=" << s.max << " px" << std::endl;
+  std::cout << "[像素尺寸] 样本数=" << s.samples
+            << " 宽平均=" << s.AverageWidth() << " px"
+            << " 宽P25=" << s.WidthP25() << " px"
+            << " 宽中位=" << s.WidthMedian() << " px"
+            << " 宽最小=" << s.width_min << " px"
+            << " 宽最大=" << s.width_max << " px"
+            << " 高平均=" << s.AverageHeight() << " px"
+            << " 高P25=" << s.HeightP25() << " px"
+            << " 高中位=" << s.HeightMedian() << " px"
+            << " 高最小=" << s.height_min << " px"
+            << " 高最大=" << s.height_max << " px" << std::endl;
 }
 
 } // namespace Tools

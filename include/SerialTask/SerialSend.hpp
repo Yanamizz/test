@@ -6,7 +6,6 @@
 #include "Common.hpp"
 #include <cmath>
 #include <cstddef>
-#include <iostream>
 #include <serial/serial.h>
 #include <stdexcept>
 

@@ -13,20 +13,20 @@
 namespace Tools {
 
 /**
- * @brief Cubature Kalman Filter (CKF) for a 2D state [angle, velocity].
+ * @brief 用于二维状态 `[angle, velocity]` 的 Cubature Kalman Filter。
  *
- * State model:
+ * 状态模型：
  *   x0 = x0 + x1 * dt
  *   x1 = x1
  *
- * Measurement model:
+ * 观测模型：
  *   z = x0
  */
 class CubatureKalmanFilter {
  public:
   /**
-   * @param q Process noise scale.
-   * @param r Measurement noise.
+   * @param q 过程噪声缩放系数。
+   * @param r 量测噪声。
    */
   CubatureKalmanFilter(double q = 0.01, double r = 1.0) : Q_coeff(q), R(r), n(2) {
     X = (cv::Mat_<double>(2, 1) << 0.0, 0.0);
@@ -34,15 +34,15 @@ class CubatureKalmanFilter {
   }
 
   /**
-   * @brief Run one predict-update cycle.
-   * @param z_measurement Measured angle.
-   * @param dt Time step in seconds.
-   * @return Estimated angle.
+   * @brief 执行一次预测-更新循环。
+   * @param z_measurement 量测角度。
+   * @param dt 时间步长，单位为秒。
+   * @return 滤波后的角度估计值。
    */
   double update(double z_measurement, double dt) {
     if (dt <= 0.0) dt = 0.05;
 
-    // Predict
+    // 预测
     std::vector<cv::Mat> xi_pred = generateCubaturePoints(X, P);
     std::vector<cv::Mat> x_prop(xi_pred.size());
     for (size_t i = 0; i < xi_pred.size(); ++i) {
@@ -53,7 +53,7 @@ class CubatureKalmanFilter {
     cv::Mat P_pred = computeCovariance(x_prop, X_pred);
     P_pred += Q_coeff * cv::Mat::eye(n, n, CV_64F);
 
-    // Update
+    // 更新
     std::vector<cv::Mat> xi_upd = generateCubaturePoints(X_pred, P_pred);
 
     std::vector<double> z_sigma(xi_upd.size());
@@ -84,7 +84,7 @@ class CubatureKalmanFilter {
     X = X_pred + K * innovation;
     P = P_pred - K * Pzz * K.t();
 
-    // Keep covariance symmetric to limit numeric drift.
+    // 保持协方差矩阵对称，减小数值漂移。
     P = 0.5 * (P + P.t());
 
     return X.at<double>(0, 0);
@@ -102,7 +102,7 @@ class CubatureKalmanFilter {
   }
 
  private:
-  // Generate 2n cubature points x +/- sqrt(n) * S * e_i, where S*S^T = P.
+  // 生成 2n 个容积点：x +/- sqrt(n) * S * e_i，其中 S*S^T = P。
   std::vector<cv::Mat> generateCubaturePoints(const cv::Mat& mean, const cv::Mat& cov) const {
     std::vector<cv::Mat> points;
     points.reserve(2 * n);

@@ -1,7 +1,7 @@
 # Latest Handoff
 
 用途：记录最近一次交接结论与后续建议。  
-更新时间：2026-05-29
+更新时间：2026-05-30
 适用场景：新 Agent 快速接续、避免重复排查。
 
 ## 本轮完成事项（延迟优先）
@@ -25,9 +25,11 @@
 - 变更：`SerialSend.hpp` 中 `AimbotFrame_SCM_t::AimbotTarget` 恢复消费调用方传入线值，并通过 `ToWireAimbotTarget()` 统一规整为 `0x00/0x01`。
 - 变更：`src/ImagePredict.cc` 中只在锁定流程 `stage1 -> stage2` 完成时启动 55s 激光关闭窗口；窗口内串口帧发送 `AimbotTarget=0x00`，窗口结束后恢复 `0x01`。
 - 变更：进入 `stage3` 时清除关闭窗口，并且 `stage3` 期间 `AimbotTarget` 固定发送 `0x01`。
-- 变更：现存 TCP 接收、内部累积计数、stage 切换扣减逻辑保留，供日志、联调与后续恢复线协议消费使用。
+- 变更：首次获得有效目标距离时触发激光开启 flag，串口 `AimbotTarget` 开始保持 `0x01`；避免目标初始就在 24m 以内时激光一直不开。
+- 变更：首次获得有效目标距离时，阶段判断也初始化/重置唯一一次；避免目标初始就在 25m 以内时阶段判断不启动。距离不再直接关闭激光，`stage1 -> stage2` 后的关闭窗口仍可把线值压到 `0x00`。
+- 变更：主程序不再通过 TCP 网络通信控制激光开关，也不再维护 AimbotTarget 网络计数；旧 `NetworkTask` 示例后续已删除。
 - 风险判断：低风险业务语义变化。关闭窗口只绑定 stage1/2 锁定完成，不合并 stage12/stage3 行为；后续若要“55s 到点无论是否有 pending/扫描帧都主动补发 0x01”，需要另行评估串口发送线程时序。
-- 当前状态：已于 2026-05-29 本地执行 `cmake --build build -j` 与 `cmake --build build --target ImagePredict -j`，构建系统返回目标已是最新。
+- 当前状态：已于 2026-05-30 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
 
 14. 低风险架构/延迟/鲁棒性巡检收尾
 - 文件：`src/ImagePredict.cc`
@@ -40,6 +42,148 @@
 - 变更：同步 `04-integration-and-troubleshooting.md`，避免继续提示旧的 AimbotTarget 二值化发送契约。
 - 风险判断：低风险。以上改动不改变主程序逻辑链条，不合并 stage12/stage3 行为。
 - 当前状态：已于 2026-05-29 本地重新 `cmake --build build -j` 编译通过。
+
+15. 录像叠加左上角状态信息但不录制识别框
+- 文件：`include/ImageRecognize/ImageShow.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `ImageShow::DrawStatusText()`，仅绘制 FPS、锁定 Stage/进度和可用距离文字，不绘制检测框、检测中心、预测点或跟踪框。
+- 变更：目标录像与全程录像保存前单独 clone 一份视频帧并绘制上述状态文字；显示窗口仍沿用原有画框逻辑。
+- 风险判断：低风险。该改动只影响录像输出画面内容，不改变推理、跟踪、串口发送或保存触发条件。
+- 当前状态：已于 2026-05-29 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
+
+16. stage3 扫描边界支持 manual/auto
+- 文件：`include/Tools/RuntimeParams.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `stage3_scan_bounds_mode`，默认 `AUTO`；非 `AUTO` 时沿用原有手动 yaw/pitch 扫描上下限。
+- 变更：stage12 有目标且实际发送控制命令时，收集发送绝对 yaw/pitch 的最小/最大值；stage3 扫描进入 auto 模式时，用这组范围作为扫描上下限。
+- 变更：stage3 auto 模式下，stage3 识别到目标时会用视觉解算出的目标绝对 yaw/pitch 检查是否超出当前 auto 扫描上下限；若超出，则扩张 auto 上下限并触发扫描线程刷新配置。
+- 变更：auto 范围会被 clamp 到原手动上下限内；除 yaw/pitch 上下限外，stage3 扫描发送频率、yaw 速度、原点保持、lambda/A 等参数保持不变。若尚未收集到 stage12 控制发送范围，则自动回退手动边界。
+- 变更：`ScanSendController` 在扫描态内检测 tick config 变化并刷新 `ScanController` 配置，确保切入 stage3 或 auto 范围更新后立即应用新边界；配置刷新会保留当前扫描 yaw 进度并夹到新边界内。
+- 变更：扫描过程中识别到目标并退出扫描后，下一次丢目标重新进入扫描时不再回到原点，而是从上次扫描位置继续；首次进入扫描或非目标打断的扫描仍按原逻辑回原点并执行原点保持。
+- 风险判断：低风险。该改动只影响 stage3 扫描边界选择，不改变阶段切换、串口帧格式或 stage12 扫描配置。
+- 当前状态：已于 2026-05-30 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
+
+17. stage3 auto 扫描边界延迟优化
+- 文件：`src/ImagePredict.cc`
+- 变更：为 stage3 auto 扫描目标角范围增加轻量版本号，只有范围真实扩张时才递增；扫描发送线程据此判断 auto 边界是否需要重算。
+- 变更：`IMUSendThread` 缓存 `TickConfig`，仅在扫描 stage 模式变化或 auto 角范围版本变化时重新构造 `StageRuntimeProfile` 与扫描配置，避免高频扫描循环每 tick 重算 profile 和抢边界 mutex。
+- 风险判断：低风险。该优化不改变 stage12 采样条件、stage3 auto/manual 边界语义、扫描发送频率或阶段切换逻辑。
+- 当前状态：已于 2026-05-29 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
+
+18. 全逻辑链低风险延迟优化
+- 文件：`src/ImagePredict.cc`
+- 变更：预测主循环缓存静态运行参数，包括 IMU 匹配窗口、dt 上限、控制限幅、显示/GUI/延迟统计周期，避免每帧重复读取 `RuntimeParams` 与重复转换 duration/count。
+- 变更：主循环每帧缓存 `UsingStage3Predictor()` 结果，跟踪、重识别接管、stage12 角范围采样、stage3 丢目标续行共享同一个 stage 状态快照，减少重复函数调用且保持本帧逻辑一致。
+- 变更：`ClearPendingSend()` 与 `StartScanMode()` 仅在状态变化可能唤醒发送线程时通知条件变量；目标可见状态更新去掉同帧重复 atomic 写。
+- 变更：相机采集线程缓存 `capture_timeout_ms`，IMU 读/发线程缓存 IMU buffer 最大年龄、读失败休眠、发送空闲休眠；阶段启动距离阈值缓存为静态值。
+- 变更：串口发送线程只有在 `enable_latency_profile` 开启时才更新发送延迟统计，默认运行时避免每次正常发送都抢 `g_send_latency_mutex`。
+- 风险判断：低风险。该轮只减少重复读取、重复通知和默认关闭调试统计时的锁开销，不改变采集、推理、跟踪、阶段切换、扫描或串口线协议语义。
+- 当前状态：已于 2026-05-29 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
+
+19. 旧激光偏移角补偿下线
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/Tools/CalibrationSliderPanel.hpp`
+- 文件：`include/ImageRecognize/StagePredictorController.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：删除旧 `LaserAngleCalculator` 及其基于距离/参考距离/固定激光高度的 pitch 偏移角补偿算法；控制链路不再把 `laser_yaw_angle/laser_pitch_angle` 叠加到发送角。
+- 变更：保留 `DistanceCalculator`、目标高度标定、距离滤波和 stage12/stage3 距离标定阶段切换；当前首次有效目标距离触发激光开启 flag 并初始化/重置阶段判断，不再按距离直接关闭激光。
+- 变更：标定滑块面板移除 `near/far pitch dist` 与 `near/far pitch comp` 控件和显示，仅保留目标高度、曝光和 target camp 切换。
+- 风险判断：中低风险业务变更。该改动明确关闭旧激光偏移角补偿，但不改变目标检测、跟踪、距离估计、阶段切换、扫描或串口协议格式。
+- 当前状态：已于 2026-05-29 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。下一步需要重新设计激光偏移角算法。
+- 后续重构待确认问题：1) 激光相对相机光心的左右/上下/前后物理偏移；2) 激光应打目标框中心、几何中心、某个比例点还是锁定区域中心；3) 补偿模型建议采用“物理几何基础补偿 + 距离标定残差表”；4) stage12 与 stage3 是否使用独立补偿参数；5) 是否已有距离、yaw 误差、pitch 误差、stage、目标位置说明等实测数据。
+- 历史说明：本条下线后曾短暂回到纯视觉 yaw/pitch；当前已被 2026-05-30 条目 23 的第一版激光 pitch 几何补偿覆盖。
+
+20. 全程录像改为 raw/overlay 双路输出
+- 文件：`include/Tools/SaveVideo.hpp`
+- 文件：`include/ImageRecognize/ImageShow.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：启用全程录像后同时写两路 AVI：`full_run_YYYYmmdd_HHMMSS_raw_001.avi` 保存原始 `inflight_frame`，`full_run_YYYYmmdd_HHMMSS_overlay_001.avi` 保存与显示窗口一致的检测框、中心点、跟踪框、FPS、stage/进度和距离文字。
+- 变更：新增 `DrawFullOverlay()`，显示窗口和 overlay 全程录像复用同一套叠加绘制逻辑；overlay 信息不再依赖 `enable_display`，关闭窗口显示时仍能完整录下可视化信息。
+- 变更：目标片段录像继续只绘制左上角状态文字，不录制识别框、检测中心、预测点或跟踪框，保留 2026-05-29 条目 15 的行为。
+- 变更：全程录像 raw/overlay 两个写盘线程都绑定到辅助核索引 `4`，在 12900H 上优先落到 E-core 集合中的单个辅助核，避免占用推理线程使用的大核；若辅助核不足会自动夹到最后一个辅助核。
+- 风险判断：低风险。该改动只影响全程录像输出内容、文件命名和录像写盘线程亲和性，不改变采集、推理、跟踪、阶段切换或串口发送链路。
+- 当前状态：已于 2026-05-30 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
+
+21. 修复有目标时仍持续扫描
+- 文件：`src/ImagePredict.cc`
+- 现象：扫描状态下识别到目标后，发送线程可能继续清掉刚生成的目标控制帧，表现为“有目标也不锁定，而是持续扫描”。
+- 根因：`IMUSendThread` 在 `scan_mode && target_visible` 分支调用 `ClearPendingSend()`，该函数会同时退出扫描并清空 pending 控制命令；与识别线程 `StorePendingSend()` 竞争时会吞掉锁定命令。
+- 变更：新增 `StopScanModeKeepPendingSend()`，扫描线程因目标可见退出扫描时只关闭 `g_send_is_scan`，不清空 pending 目标控制帧；仍保留 `ExitScanModeAndResumeNextEntry()`，所以下次丢目标重新扫描会从上次扫描位置继续。
+- 风险判断：低风险。该修复只改变“扫描被目标打断”这一状态转换，不改变扫描参数、目标角度解算、阶段切换或串口帧格式。
+
+22. 删除网络通信控制激光开关链路
+- 文件：`src/ImagePredict.cc`
+- 历史文件：`include/NetworkTask/AimbotTargetReceiver.hpp`（后续已删除）
+- 文件：`include/SerialTask/Common.hpp`
+- 变更：主程序不再 include `NetworkTask/NetworkTask.hpp`，不再启动 `AimbotTargetReceiveThread`，不再维护 `g_aimbot_target` 网络计数，也不再在 stage 切换时扣减该计数。
+- 历史说明：当时 `AimbotTargetReceiver` 曾保留为独立网络联调工具；当前已被 2026-05-30 条目 25 删除。
+- 变更：删除 `kAimbotTargetMax`、`SaturatingIncrementAimbotTarget()`、`SaturatingDecrementAimbotTarget()` 计数 helper；串口 `AimbotTarget` 线值仍经 `ToWireAimbotTarget()` 规整为 `0x00/0x01`。
+- 风险判断：低风险。该改动删除网络到激光的控制链，不改变图像识别、阶段切换、关闭窗口、stage3 强制开激光或串口帧格式。
+
+23. 第一版激光 pitch 几何补偿模型
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/Tools/CalibrationSliderPanel.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：`DistanceCalculator` 扩展为宽度优先距离估计；bbox 宽度有效时按八棱柱对边宽 `0.05m` 与 `fx` 估距，宽度不可用时回退原高度距离。stage12/stage3 分别保留独立 `near/far_width_pixel` 调参入口，当前默认 `0` 表示尚未完成像素宽度标定。
+- 变更：新增第一版激光 pitch 几何补偿：激光在相机上方 `0.09m`，与相机光轴在 `14.313m` 前向距离交汇；补偿只在 `10m <= distance <= 24m` 内生效，距离外退回纯视觉 pitch。
+- 变更：补偿计算带入当前视觉 pitch 偏角，避免目标位于画面斜上/斜下时只按中心点距离套用补偿；yaw 仍保持纯视觉偏移，不做激光补偿。
+- 变更：`ImagePredict.cc` 在发送前将 `laser_pitch_comp_deg` 叠加到 `delta_pitch_raw`；不改变 stage 判断、扫描、AimbotTarget 关闭窗口或串口帧格式。
+- 变更：滑块面板提示更新为 `laser pitch comp: width-first, 10-24m`，暂不新增宽度/激光参数滑块，参数集中在 `LaserAngleCalculate.hpp` 调参区。
+- 风险判断：中低风险业务变更。该改动恢复激光 pitch 补偿并把距离来源切到宽度优先，需要实机确认宽度估距稳定性和补偿符号；代码影响面保持在角度/距离计算与发送前叠加。
+- 当前状态：已于 2026-05-30 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
+
+24. 宽度像素标定滑块与宽高统计
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/Tools/CalibrationSliderPanel.hpp`
+- 文件：`include/Tools/RuntimeStats.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：`DistanceCalculator` 新增 `GetCalibrationTargetWidths()` 与 `SetCalibrationTargetWidths()`，用于读取/调整当前编辑阶段的 `near/far_calibration_target_width`；`near_width_pixel / far_width_pixel` 保留在代码调参区，作为识别框观测像素值。
+- 变更：标定滑块面板新增 `near target width` 与 `far target width` 两个滑块，随 stage12/stage3 编辑模式切换同步不同阶段的等效目标宽度标定值；高度滑块、曝光滑块和 target camp 滑块语义不变。
+- 变更：主流程获取 bbox 高度时同步获取 bbox 宽度，并把收尾打印从 `[像素高度]` 升级为 `[像素尺寸]`，同时输出宽/高平均、最小、最大值，方便直接用运行日志确定宽度滑块应填的近/远像素中位数。
+- 风险判断：低风险。该改动只增加宽度标定入口和统计输出，不改变阶段切换、扫描、串口协议或激光补偿公式。
+- 当前状态：已于 2026-05-30 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
+
+24.1 宽度滑块语义修正与临时距离调试显示
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/Tools/CalibrationSliderPanel.hpp`
+- 文件：`include/ImageRecognize/ImageShow.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：宽度滑块从调 `near/far_width_pixel` 改为调 `near/far_calibration_target_width`；`near/far_width_pixel` 继续作为代码调参区中的识别框观测像素值，不再由滑块修改。
+- 变更：`DistanceCalculator` 新增 `DistanceDebugInfo` 与 `CalculateDistanceWithDebug()`，同时给出 `width_distance / height_distance / used_distance / source`，主控制仍沿用宽度优先、宽度无效回退高度的逻辑。
+- 变更：显示/录像状态文字临时增加 `Dw / Dh / Src`，用于标定阶段判断高度与宽度补偿是否有效；标定完成后可删除这组调试显示。
+- 变更：按“`Dw` 对应水平 10m”回推 near 等效宽度：stage12 `near_width_pixel=105.029` 对应 `near_calibration_target_width=0.05767m`，stage3 `near_width_pixel=85.880` 对应 `near_calibration_target_width=0.04715m`。这两个 near width 当前不再使用理论 `0.05m`，而是使用近点实测等效宽度。
+- 风险判断：低风险标定辅助。该改动只修正调参入口语义并增加临时可视化，不改变阶段切换、扫描、串口协议或激光补偿公式。
+- 当前状态：已于 2026-05-30 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
+
+25. 删除旧 TCP NetworkTask 死代码
+- 删除文件：`include/NetworkTask/AimbotTargetReceiver.hpp`
+- 删除文件：`include/NetworkTask/DeviceAServer.hpp`
+- 删除文件：`include/NetworkTask/DeviceBClient.hpp`
+- 删除文件：`include/NetworkTask/NetworkTask.hpp`
+- 删除文件：`include/NetworkTask/SocketCommon.hpp`
+- 删除文件：`src/device_a_server.cc`
+- 删除文件：`src/device_b_client.cc`
+- 删除文件：`src/README.md`
+- 变更：取消 TCP 控制激光后，旧 NetworkTask 头文件和两个独立 TCP 示例程序已无主链路引用；删除后 CMake 不再生成 `device_a_server` / `device_b_client` 示例目标。
+- 变更：同步 `README.md`、`AGENT.md`、`01-core-overview.md`、`04-integration-and-troubleshooting.md`、`05-change-entrypoints.md`，避免继续把 `NetworkTask` 或 `src/README.md` 作为有效入口。
+- 风险判断：低风险死代码清理。该改动不触碰 `ImagePredict` 主程序、串口发送、阶段切换、扫描或激光补偿逻辑。
+
+26. stage1/2 激光 pitch 补偿项抑抖
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `Stage12LaserPitchCompStabilizer`，复用现有 `OneEuroFilter` 对 `stage1/2` 的 `laser_pitch_comp_deg` 做单独平滑，并叠加变化率限幅，降低识别框抖动导致的补偿角快速跳变。
+- 变更：`stage3` 不使用该抑抖器，仍保持原有补偿行为；此次改动不钝化 `visual_pitch` 主角链，只抑制补偿项本身。
+- 变更：在丢目标、无匹配 IMU、阵营切换、stage 切换复位等场景下重置补偿抑抖状态，避免把旧目标或旧 stage 的滤波尾迹带入下一段控制。
+- 风险判断：低风险。该改动只影响 `stage1/2` 发送前的激光 pitch 补偿平滑，不改变距离估计、扫描、阶段切换、串口帧格式或 `stage3` 行为。
+- 当前状态：已于 2026-05-30 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
+
+27. 默认 calibration 改为由 pixel 自动反推
+- 文件：`include/Tools/CameraData.hpp`
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 变更：提取 `CameraData` 中的焦距常量 `kFocalX / kFocalY`，供距离标定默认值计算复用，避免在多个位置手抄内参数值。
+- 变更：`DistanceCalculator` 新增 `CalibrationTargetMetersFromPixel()`，默认 `near/far_calibration_target_width/height` 不再手填固定结果，而是按 `10m/24m` 水平距离、当前 `near/far pixel` 与焦距自动反推。
+- 变更：保留运行时滑块 `SetCalibrationTargetHeights/Widths()` 覆盖能力；因此“自动反推”只作用于默认初始值，不影响你在标定面板上的手调逻辑。
+- 风险判断：低风险。该改动只消除重复手算和默认值不一致风险，不改变距离估计公式、阶段切换、扫描或串口协议。
+- 当前状态：已于 2026-05-30 本地重新 `cmake --build build -j` 编译通过，仅有 Galaxy SDK 头文件既有 warning。
 
 0. 目标框处理链路收口为 `TargetTrackPipeline`
 - 文件：`include/ImageRecognize/TargetTrackPipeline.hpp`
@@ -72,7 +216,7 @@
 - 文件：`include/SerialTask/SerialSend.hpp`
 - 变更：新增 `LostTargetRecoveryController` Module，把以下原本散落在 `ImagePredictThread` 无目标分支中的逻辑收口：`stage3` 丢目标后固定速度续行准备、续行时长判断、续行控制量生成、续行结束后回退到扫描或清空 pending send。
 - 变更：`ImagePredict.cc` 不再直接维护 `stage3_lost_target_coast` 的内部状态，而是通过 `PrepareStage3Coast()` 和 `Update()` 统一处理恢复流程，主循环只消费 `has_command / pending_action` 结果。
-- 历史说明：本条中 `SerialSend.hpp` 使用 `ToWireAimbotTarget(AimbotTarget)` 的描述已被 2026-05-29 条目 13 覆盖；当前线协议由 `stage1->stage2` 激光关闭窗口与 `stage3` 强制开激光规则决定，TCP 内部计数逻辑保留。
+- 历史说明：本条中 `SerialSend.hpp` 使用 `ToWireAimbotTarget(AimbotTarget)` 的描述已被 2026-05-29 条目 13 覆盖；当前线协议由首次有效距离激光开启 flag、`stage1->stage2` 激光关闭窗口与 `stage3` 强制开激光规则决定，TCP 内部计数逻辑已删除。
 - 变更：该次抽离不改变 `stage3` 续行触发条件、续行固定速度语义、进入扫描时机和 `ClearPendingSend/StartScanMode` 的既有时机，目标是继续降低主循环 shallow recovery handling，提升丢目标恢复逻辑的 locality。
 - 当前状态：已于 2026-05-27 本地重新 `cmake --build build -j` 编译通过。
 
@@ -141,11 +285,9 @@
 0. AimbotTarget 语义收敛（历史：计数/二值化发送一致）
 - 文件：`include/SerialTask/Common.hpp`
 - 文件：`include/SerialTask/SerialSend.hpp`
-- 文件：`include/NetworkTask/AimbotTargetReceiver.hpp`
+- 历史文件：`include/NetworkTask/AimbotTargetReceiver.hpp`（后续已删除）
 - 文件：`src/ImagePredict.cc`
-- 变更：在 `SerialTask/Common.hpp` 新增 `ToWireAimbotTarget`、`SaturatingIncrementAimbotTarget`、`SaturatingDecrementAimbotTarget`，统一 AimbotTarget 计数与线协议二值化规则。
-- 变更：网络接收线程增量逻辑改为复用 `SaturatingIncrementAimbotTarget`；阶段切换扣减逻辑改为复用 `SaturatingDecrementAimbotTarget`，移除分散重复实现。
-- 历史说明：本条记录的是旧契约；当前已被 2026-05-29 条目 13 覆盖，`SerialSend.hpp` 消费调用方传入线值，实际发送由 `stage1->stage2` 激光关闭窗口与 `stage3` 强制开激光规则决定；网络接收线程增量逻辑和阶段切换扣减逻辑仍保留。
+- 历史说明：本条记录的是旧计数契约；当前已被 2026-05-30 条目 13/22 覆盖。`SerialSend.hpp` 仍用 `ToWireAimbotTarget()` 规整线值，但网络接收增量、stage 切换扣减和内部计数 helper 均已删除。
 
 0. Yaw/Pitch 速度滤波调参激进档
 - 文件：`include/Tools/RuntimeParams.hpp`
@@ -229,7 +371,7 @@
 - 文件：`include/Tools/LaserAngleCalculate.hpp`
 - 文件：`include/ImageRecognize/StagePredictorController.hpp`
 - 文件：`src/ImagePredict.cc`
-- 变更：`DistanceCalculator` 与 `LaserAngleCalculator` 的热路径改为每次计算只快照一次当前 runtime stage 参数，避免每帧多次读取阶段配置带来的额外锁/原子访问。
+- 历史说明：当时曾优化 `DistanceCalculator` 与旧 `LaserAngleCalculator` 的热路径快照；截至 2026-05-29 条目 19，旧 `LaserAngleCalculator` 已下线，当前只保留 `DistanceCalculator` 距离估计与目标高度标定。
 - 变更：`StagePredictorController::ApplyStageSideEffects_()` 新增分段耗时日志，拆出 `exposure / roi_flag / calibration / scan_config / total`，便于判断阶段切换剩余开销是否还卡在副作用应用链上。
 - 变更：`CaptureThread` 中 `apply_stage3_roi_mode()` 新增分段耗时日志，拆出 `config_ms / stop_ms / start_ms / total_ms`，用于确认 ROI 切换延迟是否主要来自 `camera->stop()` / `camera->start()`。
 - 变更：把 `RuntimeStats` 里原本只打印未采样的 `submit_stage3_preprocess_ns` 接上真实统计，当前记为 `stage3` 路径 `startAsync()` 时间，避免延迟日志出现误导性的长期 `0ms`。

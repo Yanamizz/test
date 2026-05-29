@@ -8,14 +8,13 @@
 - 相机采集 + OpenVINO 推理
 - 多线程目标跟踪与姿态解算
 - 串口 IMU 读写与云台控制帧发送
-- TCP 接收外部 `AimbotTarget` 触发信息
 
 ## 目录结构
 
 ```text
 .
 ├── CMakeLists.txt
-├── include/                 # 头文件（CameraTask / ImageRecognize / SerialTask / NetworkTask / Tools）
+├── include/                 # 头文件（CameraTask / ImageRecognize / SerialTask / Tools）
 ├── src/                     # 主程序与测试程序
 ├── third_lib/               # 第三方依赖（serial / kalman / openvino / Galaxy SDK 等）
 ├── camera_runtime_params.ini
@@ -86,25 +85,22 @@ build/bin/
 - `--display` / `--no-display`
 - `--calibration-sliders` / `--no-calibration-sliders`
 - `--latency-profile` / `--no-latency-profile`
-- `--motion-prediction` / `--no-motion-prediction`
 - `--scan-mode` / `--no-scan-mode`
 - `--save-no-target-images` / `--no-save-no-target-images`
 - `--send-log` / `--no-send-log`
 
-## 网络联调（AimbotTarget）
+## AimbotTarget 激光控制
 
-TCP 端口默认 `5000`。完整联调说明见：
-
-- [src/README.md](src/README.md)
+主程序不再通过 TCP 网络通信控制激光开关；旧 NetworkTask 联调示例已删除。
 
 当前主程序中的 `AimbotTarget` 规则：
 
-1. 初始值 `0`
-2. 每收到一次网络 `1`，计数 `+1`，上限 `3`
-3. 每当锁定流程 `stage` 发生一次变化，计数 `-1`，下限 `0`
-4. `stage1 -> stage2` 完成后进入 55s 激光关闭窗口，串口帧 `AimbotTarget` 发送 `0x00`
-5. 关闭窗口结束后恢复发送 `0x01`；进入 `stage3` 时清除关闭窗口并固定发送 `0x01`
-6. 现存 TCP 接收、内部计数与 stage 切换扣减代码仍保留，供日志、联调与后续恢复线协议消费使用
+1. 首次获得有效目标距离时，触发激光开启 flag，串口 `AimbotTarget` 开始保持 `0x01`
+2. 首次获得有效目标距离时，阶段判断也初始化/重置唯一一次；目标初始在 25m 以内也会执行
+3. `stage1 -> stage2` 完成后进入 55s 激光关闭窗口，串口帧 `AimbotTarget` 发送 `0x00`
+4. 关闭窗口结束后恢复发送 `0x01`
+5. 进入 `stage3` 时清除关闭窗口并固定发送 `0x01`
+6. 距离不再直接关闭激光；串口 `AimbotTarget` 只会被 `stage1 -> stage2` 后的关闭窗口压到 `0x00`
 
 ## 运行参数文件
 
@@ -118,6 +114,10 @@ TCP 端口默认 `5000`。完整联调说明见：
 stage12_exposure_time_us=700.0
 stage3_exposure_time_us=4000.0
 ```
+
+默认运行参数中的 `stage3_scan_bounds_mode` 为 `AUTO`：stage3 扫描边界会使用
+stage12 有目标控制发送时收集到的 yaw/pitch 最大最小值，并限制在手动扫描边界内。
+改为非 `AUTO` 时沿用手动扫描边界。
 
 ## 常见问题
 
@@ -152,6 +152,3 @@ sudo apt-get install -y libeigen3-dev
 ### 4) OpenVINO 未找到
 
 确认 OpenVINO 环境已安装并能被 CMake 发现，或在仓库内提供可用的 `third_lib/openvino/build/OpenVINOConfig.cmake`。
-
-
-

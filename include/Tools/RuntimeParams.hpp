@@ -85,6 +85,9 @@ struct RuntimeParams {
   float max_send_delta_deg; // 单次发送 yaw 偏角最大限幅（度）
   double dt_max_sec; // 帧间 dt 的有效上限，超过则视为异常（秒）
   float pitch_abs_limit; // 单次发送 pitch 偏角绝对值上限（度）
+  float stage12_pitch_micro_deadband_deg; // stage1/2 最终发送前 pitch
+                                          // 微抖死区（度）
+  float aimbot_target_laser_max_distance_m; // 保留的距离配置基准（米）
   double angle_velocity_dt_min_sec; // 速度估计使用的最小 dt（秒）
   double angle_velocity_dt_max_sec; // 速度估计使用的最大 dt（秒）
   double
@@ -121,6 +124,7 @@ struct RuntimeParams {
   int scan_origin_hold_ms; // 扫描模式起始时在原点保持时长（毫秒）
   int stage3_scan_origin_hold_ms; // stage3 扫描模式起始时在原点保持时长
                                   // （毫秒）
+  std::string stage3_scan_bounds_mode; // stage3 扫描边界模式：MANUAL/AUTO
   double max_infer_fps; // 推理提交帧率上限；<=0 表示不限速
   double scan_send_hz; // stage1/2 扫描发送频率（Hz），优先用于控制平滑度
   double stage3_scan_send_hz; // stage3 扫描发送频率（Hz），优先用于控制平滑度
@@ -146,9 +150,8 @@ inline const RuntimeParams &Params() {
       // ===== 基础模型与策略 =====
       "/home/nuc/antidrone/src/model/antidrone_stage12_int8_openvino_model/"
       "antidrone_stage12.xml",
-      "/home/nuc/antidrone/src/model/antidrone_stage3_int8_openvino_model/"
-      "antidrone_stage3.xml",
-      "CPU", "ONE_EURO", "BLUE",
+      "/home/nuc/antidrone/src/model/final_s_int8_openvino_model/final_s.xml",
+      "CPU", "ONE_EURO", "ALL",
 
       // ===== 相机采集与 ROI =====
       1000, // capture_timeout_ms: 相机抓帧超时 1000ms
@@ -183,6 +186,10 @@ inline const RuntimeParams &Params() {
       10.0f, // max_send_delta_deg: yaw 单次最大发送偏角 10 度
       1.0,   // dt_max_sec: 帧间隔有效上限 1.0 秒
       5.0f,  // pitch_abs_limit: pitch 单次最大发送偏角绝对值 5 度
+      0.025f, // stage12_pitch_micro_deadband_deg: stage1/2 pitch 微抖死区 0.025
+              // 度
+      20.0f, // aimbot_target_laser_max_distance_m:
+             // 首次开启激光/初始化阶段判断的距离上限（米）
       0.010, // angle_velocity_dt_min_sec: 速度估计最小 dt 10ms
       0.080, // angle_velocity_dt_max_sec: 速度估计最大 dt 80ms
       480.0, // angle_velocity_yaw_abs_limit_deg_per_sec: yaw
@@ -219,15 +226,16 @@ inline const RuntimeParams &Params() {
       1000, // scan_trigger_delay_ms: 丢目标后 1000ms 进入扫描
       1000, // scan_origin_hold_ms: 扫描起始在原点保持 1000ms
       1500, // stage3_scan_origin_hold_ms: stage3 扫描起始在原点保持 1500ms
+      "AUTO", // stage3_scan_bounds_mode: stage3 默认使用 stage12 目标角范围
       0.0, // max_infer_fps: 0 表示不限制推理提交帧率
 
       200.0, // scan_send_hz: stage1/2 扫描发送频率 200Hz
       200.0, // stage3_scan_send_hz: stage3 扫描发送频率 200Hz
       16.0,  // scan_yaw_speed_deg_per_sec: stage1/2 扫描 yaw 速度 16deg/s
-      2, // stage3_scan_yaw_speed_deg_per_sec: stage3 扫描 yaw 速度 2deg/s
+      1.25, // stage3_scan_yaw_speed_deg_per_sec: stage3 扫描 yaw 速度 1.25deg/s
 
       100.0f, // scan_pitch_wavelength_percent: stage1/2 lambda 百分比
-      50.0f,  // scan_pitch_amplitude_percent: stage1/2 A 百分比
+      25.0f,  // scan_pitch_amplitude_percent: stage1/2 A 百分比
 
       40.0f,  // stage3_scan_pitch_wavelength_percent: stage3 lambda 百分比
       100.0f, // stage3_scan_pitch_amplitude_percent: stage3 A 百分比

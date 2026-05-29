@@ -9,9 +9,7 @@ imgsz:
 channels: 3
 stride: 32
 names:
-  0: red
-  1: blue
-  2: purple
+  0: target
 args:
   nms: false
   dynamic: false

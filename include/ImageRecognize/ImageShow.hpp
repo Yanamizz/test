@@ -10,6 +10,20 @@
 #include <opencv2/opencv.hpp>
 #include <string>
 namespace ImageRecognize {
+
+struct OverlayData {
+  bool show_detection_center = false;
+  cv::Point2f detection_center{};
+  bool show_tracked_center = false;
+  cv::Point2f tracked_center{};
+  bool show_distance = false;
+  float distance = 0.0f;
+  bool show_distance_debug = false;
+  float width_distance = 0.0f;
+  float height_distance = 0.0f;
+  const char *distance_source = "NONE";
+};
+
 class ImageShow {
 public:
   static const char *ClassName(int class_id) {
@@ -57,6 +71,22 @@ public:
                 cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 0}, 2);
   }
 
+  static void DrawStatusText(cv::Mat &frame, double fps, int stage,
+                             double progress, int threshold,
+                             const OverlayData &overlay_data = {}) {
+    cv::putText(frame, "FPS: " + std::to_string(fps), {10, 30},
+                cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 0}, 2);
+    ShowLockProgress(frame, stage, progress, threshold);
+    if (overlay_data.show_distance) {
+      ShowDistance(frame, overlay_data.distance);
+    }
+    if (overlay_data.show_distance_debug) {
+      ShowDistanceDebug(frame, overlay_data.width_distance,
+                        overlay_data.height_distance,
+                        overlay_data.distance_source);
+    }
+  }
+
   static void ShowFrame(const cv::Mat &frame) {
     static bool window_initialized = false;
     if (!window_initialized) {
@@ -88,6 +118,18 @@ public:
   static void ShowDistance(cv::Mat &frame, float distance) {
     cv::putText(frame, "Distance: " + std::to_string(distance), {10, 60},
                 cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 0}, 2);
+  }
+
+  static void ShowDistanceDebug(cv::Mat &frame, float width_distance,
+                                float height_distance,
+                                const char *distance_source) {
+    const std::string source =
+        distance_source != nullptr ? distance_source : "NONE";
+    cv::putText(frame,
+                "Dw: " + cv::format("%.2f", width_distance) +
+                    " Dh: " + cv::format("%.2f", height_distance) +
+                    " Src: " + source,
+                {10, 122}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {255, 255, 0}, 2);
   }
 
   static void ShowLockProgress(cv::Mat &frame, int stage, double progress,
@@ -140,5 +182,35 @@ inline void DrawTrackedBox(cv::Mat &frame, const std::array<float, 6> &box) {
 
 inline cv::Point2f BoxCenter(const std::array<float, 6> &box) {
   return {0.5f * (box[0] + box[2]), 0.5f * (box[1] + box[3])};
+}
+
+inline void DrawFullOverlay(cv::Mat &frame,
+                            const ImageRecognize::DataProcessResult &result,
+                            double fps, int stage, double progress,
+                            int threshold,
+                            const OverlayData &overlay_data,
+                            bool has_tracked_box,
+                            const std::array<float, 6> &tracked_box) {
+  ImageShow::ShowLockProgress(frame, stage, progress, threshold);
+  ImageShow::DrawNow(frame, result, fps);
+  if (overlay_data.show_detection_center) {
+    ImageShow::ShowDetectionCenter(frame, overlay_data.detection_center.x,
+                                   overlay_data.detection_center.y);
+  }
+  if (overlay_data.show_tracked_center) {
+    ImageShow::ShowPred(frame, overlay_data.tracked_center.x,
+                        overlay_data.tracked_center.y);
+  }
+  if (overlay_data.show_distance) {
+    ImageShow::ShowDistance(frame, overlay_data.distance);
+  }
+  if (overlay_data.show_distance_debug) {
+    ImageShow::ShowDistanceDebug(frame, overlay_data.width_distance,
+                                 overlay_data.height_distance,
+                                 overlay_data.distance_source);
+  }
+  if (has_tracked_box) {
+    DrawTrackedBox(frame, tracked_box);
+  }
 }
 } // namespace ImageRecognize

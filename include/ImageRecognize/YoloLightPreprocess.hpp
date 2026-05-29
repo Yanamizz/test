@@ -1,6 +1,6 @@
 /**
  * @file    include/ImageRecognize/YoloLightPreprocess.hpp
- * @brief   Stage3 YOLO light-normalization preprocessing.
+ * @brief   提供 stage3 YOLO 的光照归一化预处理。
  */
 
 #pragma once
@@ -12,11 +12,10 @@
 namespace ImageRecognize {
 
 /**
- * @brief Mild CLAHE preprocessing for YOLO input.
+ * @brief 对 YOLO 输入执行轻量 CLAHE 预处理。
  *
- * The input and output are BGR frames with the same size and type. CLAHE is
- * applied only on the L channel in LAB space so that color channels are not
- * equalized directly.
+ * 输入与输出均为尺寸和类型一致的 BGR 图像帧。CLAHE 仅作用于 LAB 空间的
+ * L 通道，从而避免直接对颜色通道做均衡化。
  */
 class YoloLightPreprocessor {
  public:
@@ -35,8 +34,8 @@ class YoloLightPreprocessor {
     }
 
     if (frame.type() != CV_8UC3) {
-      // Camera frames in the main pipeline are expected to be BGR8. Avoid
-      // surprising color conversions if an unexpected format reaches here.
+      // 主流程中的相机图像默认应为 BGR8。若有非预期格式传入，这里直接拷贝，
+      // 避免发生难以察觉的颜色空间转换。
       frame.copyTo(*output);
       return;
     }

@@ -38,23 +38,40 @@ public:
     scan_waiting_at_origin_ = false;
     next_scan_send_time_ = Clock::now();
     scan_origin_deadline_ = Clock::now();
+    has_active_tick_config_ = false;
+    resume_from_last_scan_position_ = false;
   }
 
   bool EnterOrStayScanMode(const TickConfig &config, ScanController *controller,
                            std::mutex *controller_mutex,
                            const Clock::time_point &now) {
     if (last_scan_mode_) {
+      if (controller != nullptr && controller_mutex != nullptr &&
+          (!has_active_tick_config_ ||
+           !SameTickConfig_(active_tick_config_, config))) {
+        std::lock_guard<std::mutex> lk(*controller_mutex);
+        controller->SetConfigPreserveProgress(config.controller_config);
+        active_tick_config_ = config;
+        has_active_tick_config_ = true;
+      }
       return false;
     }
 
     next_scan_send_time_ = now;
     last_scan_mode_ = true;
-    scan_waiting_at_origin_ = true;
+    scan_waiting_at_origin_ = !resume_from_last_scan_position_;
     scan_origin_deadline_ = now + config.scan_origin_hold_duration;
     if (controller != nullptr && controller_mutex != nullptr) {
       std::lock_guard<std::mutex> lk(*controller_mutex);
-      controller->SetConfig(config.controller_config);
+      if (resume_from_last_scan_position_) {
+        controller->SetConfigPreserveProgress(config.controller_config);
+      } else {
+        controller->SetConfig(config.controller_config);
+      }
     }
+    resume_from_last_scan_position_ = false;
+    active_tick_config_ = config;
+    has_active_tick_config_ = true;
     return true;
   }
 
@@ -99,15 +116,43 @@ public:
     last_scan_mode_ = false;
     scan_waiting_at_origin_ = false;
     next_scan_send_time_ = Clock::now();
+    has_active_tick_config_ = false;
   }
 
+  void ExitScanModeAndResumeNextEntry() {
+    ExitScanMode();
+    resume_from_last_scan_position_ = true;
+  }
+
+  void ClearResumeNextEntry() { resume_from_last_scan_position_ = false; }
+
 private:
+  static bool SameControllerConfig_(const ScanController::Config &a,
+                                    const ScanController::Config &b) {
+    return a.min_pitch_deg == b.min_pitch_deg &&
+           a.max_pitch_deg == b.max_pitch_deg &&
+           a.min_yaw_deg == b.min_yaw_deg && a.max_yaw_deg == b.max_yaw_deg &&
+           a.yaw_step_deg_per_tick == b.yaw_step_deg_per_tick &&
+           a.tick_rate_hz == b.tick_rate_hz &&
+           a.pitch_wavelength_percent == b.pitch_wavelength_percent &&
+           a.pitch_amplitude_percent == b.pitch_amplitude_percent;
+  }
+
+  static bool SameTickConfig_(const TickConfig &a, const TickConfig &b) {
+    return a.scan_send_hz == b.scan_send_hz &&
+           a.scan_origin_hold_duration == b.scan_origin_hold_duration &&
+           SameControllerConfig_(a.controller_config, b.controller_config);
+  }
+
   static double scan_send_hz_(const TickConfig &config) {
     return config.scan_send_hz > 0.0 ? config.scan_send_hz : 1.0;
   }
 
   bool last_scan_mode_ = false;
   bool scan_waiting_at_origin_ = false;
+  bool has_active_tick_config_ = false;
+  bool resume_from_last_scan_position_ = false;
+  TickConfig active_tick_config_{};
   Clock::time_point next_scan_send_time_ = Clock::now();
   Clock::time_point scan_origin_deadline_ = Clock::now();
 };
