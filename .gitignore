@@ -64,4 +64,6 @@ __pycache__/
 .vscode/
 .cache/
 
-src/Vedio/**
+src/Video/**
+src/RawToClahe.cc
+full_run_videos/**
