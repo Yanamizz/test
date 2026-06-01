@@ -87,6 +87,13 @@ struct RuntimeParams {
                                                  // 进入 stage3（毫秒）
   int stage3_probe_no_target_rollback_ms; // stage3 probe 连续无目标多久回退
                                           // stage2（毫秒）
+  float stage3_fallback_motor_probe_yaw_offset_deg; // 异常兜底切换前探测电机
+                                                    // 上电的小 yaw 偏角（度）
+  float
+      stage3_fallback_motor_probe_min_imu_delta_deg; // 探测期间判定电机有响应的
+                                                     // 最小 IMU 变化（度）
+  int stage3_fallback_motor_probe_wait_ms; // 探测命令发出后等待 IMU 响应的
+                                           // 时长（毫秒）
 
   // ===== 线程等待与时序容差 =====
   int capture_empty_sleep_ms; // 相机空帧时休眠时长（毫秒）
@@ -198,14 +205,19 @@ inline const RuntimeParams &Params() {
       2.0, // stage3_lost_target_coast_pitch_speed_deg_per_sec: stage3 丢目标后
            // 续行固定 pitch 速度
       60.0, // stage3_fallback_min_stage2_progress: stage2 P>=60 后才允许兜底
-      400, // stage3_fallback_no_target_ms: 连续空框 400ms 后触发兜底
+      300, // stage3_fallback_no_target_ms: 连续空框 400ms 后触发兜底
       500, // stage3_fallback_recent_purple_ms: 最近 500ms 内必须见过紫色
       10000, // stage3_fallback_high_progress_no_target_probe_ms: P 曾达到阈值后
              // 连续无目标 10s，进入 stage3 probe
       60000, // stage3_fallback_stage2_no_target_force_ms: stage2 连续空框
-             // 90s 且 P 未达阈值后，强制兜底进入 stage3
+             // 60s 且 P 未达阈值后，强制兜底进入 stage3
       20000, // stage3_probe_no_target_rollback_ms: stage3 probe 连续无目标
              // 20s 后回退 stage2
+      0.30f, // stage3_fallback_motor_probe_yaw_offset_deg: 异常切换前发送
+             // 0.30deg yaw 探测电机是否上电
+      0.05f, // stage3_fallback_motor_probe_min_imu_delta_deg: IMU 变化超过
+             // 0.05deg 视为电机有响应
+      350,   // stage3_fallback_motor_probe_wait_ms: 探测后等待 350ms
 
       // ===== 线程等待与时序容差 =====
       5,   // capture_empty_sleep_ms: 空帧休眠 5ms

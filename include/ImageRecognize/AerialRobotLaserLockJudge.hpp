@@ -241,6 +241,14 @@ class Stage3FallbackSwitchGuard {
     stage2_progress_reached_min_ = false;
   }
 
+  void ResetNoTargetTimers() {
+    has_last_purple_seen_ = false;
+    no_target_since_initialized_ = false;
+    stage2_no_target_since_initialized_ = false;
+    triggered_ = false;
+    last_trigger_reason_ = TriggerReason::None;
+  }
+
   double MaxStage2Progress() const { return max_stage2_progress_; }
   TriggerReason LastTriggerReason() const { return last_trigger_reason_; }
 

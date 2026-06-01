@@ -1,10 +1,25 @@
 # Latest Handoff
 
 用途：记录最近一次交接结论与后续建议。  
-更新时间：2026-06-01
+更新时间：2026-06-02
 适用场景：新 Agent 快速接续、避免重复排查。
 
 ## 本轮完成事项（延迟优先）
+
+28. 四个架构候选全部完成
+- 文件：`include/ImageRecognize/Stage3FallbackController.hpp`
+- 文件：`include/Tools/AimbotCommand.hpp`
+- 文件：`include/Tools/AimbotCommandArbiter.hpp`
+- 文件：`include/Tools/RuntimeParamProfiles.hpp`
+- 文件：`include/ImageRecognize/OverlayFrameRenderer.hpp`
+- 文件：`src/ImagePredict.cc`
+- 文件：`agent-context/05-change-entrypoints.md`
+- 变更：阶段切换异常兜底、stage3 probe 回退与异常切换前电机响应探测收口到 `Stage3FallbackController`；主流程只负责严格 100ms tick、完成切 stage3 的全局副作用，以及消费 controller 输出。
+- 变更：目标控制帧、扫描模式和 pending-send 条件变量仲裁收口到 `AimbotCommandArbiter`，发送命令结构收口为 `AimbotSendCommand`；保留原有 `ClearPendingSend / StorePendingSend / StartScanMode / StopScanModeKeepPendingSend` 包装入口，避免扩大调用面。
+- 变更：把阶段兜底、控制限幅/前馈和显示节流这几组常一起读取的 `RuntimeParams` 组装到 `RuntimeParamProfiles`，降低主流程中散落的参数读取。
+- 变更：显示窗口、全程 overlay 录像和目标状态录像的帧生成收口到 `OverlayFrameRenderer`；仍保持显示/全程 overlay 画完整检测信息，目标录像只画左上角状态信息。
+- 风险判断：中低风险架构收口。该轮触及阶段兜底、发送仲裁和录像渲染，但保持 stage12/stage3 行为分离，不改阈值、阶段规则、扫描参数、串口线协议或激光开启语义。
+- 当前状态：已于 2026-06-02 本地执行 `cmake --build build -j --target ImagePredict` 编译通过，仅有 Galaxy SDK `GXDef.h` 既有 typedef warning。
 
 12. target_camp_mode 支持滑块面板运行时切换
 - 文件：`include/ImageRecognize/TargetClassFilter.hpp`

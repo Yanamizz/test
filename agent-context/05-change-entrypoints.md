@@ -1,13 +1,17 @@
 # Change Entrypoints
 
 用途：按任务类型快速定位改动入口。  
-更新时间：2026-05-19  
+更新时间：2026-06-02
 适用场景：准备改代码、评估影响面、做交接定位。
 
 ## 任务到入口映射
 
 1. 主流程与线程协作  
 - `src/ImagePredict.cc`
+- 阶段异常兜底与 stage3 probe：`include/ImageRecognize/Stage3FallbackController.hpp`
+- 目标控制/扫描发送仲裁：`include/Tools/AimbotCommandArbiter.hpp`
+- 发送命令数据结构：`include/Tools/AimbotCommand.hpp`
+- 显示/录像叠加帧生成：`include/ImageRecognize/OverlayFrameRenderer.hpp`
 
 2. CPU 亲和性与核心分配  
 - `include/Tools/CpuAffinity.hpp`
@@ -29,6 +33,7 @@
 
 7. 运行参数默认值  
 - `include/Tools/RuntimeParams.hpp`
+- 常用运行参数快照：`include/Tools/RuntimeParamProfiles.hpp`
 
 8. 人类使用文档  
 - `README.md`
