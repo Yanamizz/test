@@ -23,8 +23,52 @@ struct TemporalBoxStabilizerParams {
   double size_min_cutoff_hz;          // 框尺寸 One Euro 最小截止频率
   double size_beta;                   // 框尺寸 One Euro 速度增益
   double derivative_cutoff_hz;        // One Euro 导数低通截止频率
+  double center_x_min_cutoff_hz;      // X 方向中心点单独截止频率；<=0 时回退到 center_min_cutoff_hz
+  double center_y_min_cutoff_hz;      // Y 方向中心点单独截止频率；<=0 时回退到 center_min_cutoff_hz
+  double center_x_beta;               // X 方向中心点单独速度增益；<0 时回退到 center_beta
+  double center_y_beta;               // Y 方向中心点单独速度增益；<0 时回退到 center_beta
+  double width_min_cutoff_hz;         // 宽度单独截止频率；<=0 时回退到 size_min_cutoff_hz
+  double height_min_cutoff_hz;        // 高度单独截止频率；<=0 时回退到 size_min_cutoff_hz
+  double width_beta;                  // 宽度单独速度增益；<0 时回退到 size_beta
+  double height_beta;                 // 高度单独速度增益；<0 时回退到 size_beta
 
   TemporalBoxStabilizerParams();
+
+  double EffectiveCenterXMinCutoffHz() const {
+    return center_x_min_cutoff_hz > 0.0 ? center_x_min_cutoff_hz
+                                        : center_min_cutoff_hz;
+  }
+
+  double EffectiveCenterYMinCutoffHz() const {
+    return center_y_min_cutoff_hz > 0.0 ? center_y_min_cutoff_hz
+                                        : center_min_cutoff_hz;
+  }
+
+  double EffectiveCenterXBeta() const {
+    return center_x_beta >= 0.0 ? center_x_beta : center_beta;
+  }
+
+  double EffectiveCenterYBeta() const {
+    return center_y_beta >= 0.0 ? center_y_beta : center_beta;
+  }
+
+  double EffectiveWidthMinCutoffHz() const {
+    return width_min_cutoff_hz > 0.0 ? width_min_cutoff_hz
+                                     : size_min_cutoff_hz;
+  }
+
+  double EffectiveHeightMinCutoffHz() const {
+    return height_min_cutoff_hz > 0.0 ? height_min_cutoff_hz
+                                      : size_min_cutoff_hz;
+  }
+
+  double EffectiveWidthBeta() const {
+    return width_beta >= 0.0 ? width_beta : size_beta;
+  }
+
+  double EffectiveHeightBeta() const {
+    return height_beta >= 0.0 ? height_beta : size_beta;
+  }
 };
 
 class TemporalBoxStabilizer {
@@ -32,13 +76,17 @@ class TemporalBoxStabilizer {
   explicit TemporalBoxStabilizer(
       const TemporalBoxStabilizerParams &params = TemporalBoxStabilizerParams{})
       : params_(params),
-        center_x_filter_(120.0, params.center_min_cutoff_hz, params.center_beta,
+        center_x_filter_(120.0, params.EffectiveCenterXMinCutoffHz(),
+                         params.EffectiveCenterXBeta(),
                          params.derivative_cutoff_hz),
-        center_y_filter_(120.0, params.center_min_cutoff_hz, params.center_beta,
+        center_y_filter_(120.0, params.EffectiveCenterYMinCutoffHz(),
+                         params.EffectiveCenterYBeta(),
                          params.derivative_cutoff_hz),
-        width_filter_(120.0, params.size_min_cutoff_hz, params.size_beta,
+        width_filter_(120.0, params.EffectiveWidthMinCutoffHz(),
+                      params.EffectiveWidthBeta(),
                       params.derivative_cutoff_hz),
-        height_filter_(120.0, params.size_min_cutoff_hz, params.size_beta,
+        height_filter_(120.0, params.EffectiveHeightMinCutoffHz(),
+                       params.EffectiveHeightBeta(),
                        params.derivative_cutoff_hz) {}
 
   void Reset() {
@@ -214,6 +262,14 @@ inline TemporalBoxStabilizerParams::TemporalBoxStabilizerParams()
       center_beta(0.28),                // 中心移动加快时主动减小滞后
       size_min_cutoff_hz(1.2),          // 尺寸变化通常比中心更抖，适当更稳
       size_beta(0.16),                  // 尺寸运动时仍保留一定响应
-      derivative_cutoff_hz(1.0) {}
+      derivative_cutoff_hz(1.0),
+      center_x_min_cutoff_hz(0.0),
+      center_y_min_cutoff_hz(0.0),
+      center_x_beta(-1.0),
+      center_y_beta(-1.0),
+      width_min_cutoff_hz(0.0),
+      height_min_cutoff_hz(0.0),
+      width_beta(-1.0),
+      height_beta(-1.0) {}
 
 } // namespace ImageRecognize

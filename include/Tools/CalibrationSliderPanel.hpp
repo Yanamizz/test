@@ -321,7 +321,7 @@ private:
                 {12, 346}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
     cv::putText(panel,
-                "laser pitch comp: width-first, 10-24m",
+                "laser pitch comp: Dw-main + tilt-aware, 10-24m",
                 {12, 378}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
                 cv::Scalar(170, 190, 200), 1, cv::LINE_AA);
     cv::imshow(kWindowName, panel);

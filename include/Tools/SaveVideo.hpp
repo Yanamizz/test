@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -28,11 +30,13 @@ namespace detail {
 class AsyncVideoWriterBase {
  public:
   AsyncVideoWriterBase(int fps, cv::Size output_size, const char *log_tag,
-                       int worker_aux_core_index = -1)
+                       int worker_aux_core_index = -1,
+                       std::size_t max_pending_frames = 6)
       : fps_(std::max(1, fps)),
         output_size_(output_size),
         log_tag_(log_tag == nullptr ? "[SaveVideo]" : log_tag),
         worker_aux_core_index_(worker_aux_core_index),
+        max_pending_frames_(std::max<std::size_t>(1, max_pending_frames)),
         frame_interval_(std::chrono::duration<double>(1.0 / fps_)) {}
 
   AsyncVideoWriterBase(const AsyncVideoWriterBase &) = delete;
@@ -51,14 +55,16 @@ class AsyncVideoWriterBase {
 
     {
       std::lock_guard<std::mutex> lk(mutex_);
-      if (has_pending_frame_) {
+      if (pending_frames_.size() >= max_pending_frames_) {
+        pending_frames_.pop_front();
         ++dropped_frames_;
       }
-      pending_frame_ = frame;
-      has_pending_frame_ = true;
+      pending_frames_.push_back(frame);
     }
     cv_.notify_one();
   }
+
+  bool ShouldSubmitFrame() const { return IsSampleDue_(); }
 
   void RequestStop() {
     ResetSampling();
@@ -69,7 +75,10 @@ class AsyncVideoWriterBase {
     cv_.notify_one();
   }
 
-  void ResetSampling() { sampling_initialized_ = false; }
+  void ResetSampling() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    sampling_initialized_ = false;
+  }
 
   void ShutdownWorker() {
     {
@@ -91,6 +100,7 @@ class AsyncVideoWriterBase {
 
  private:
   bool ShouldSampleNow_() {
+    std::lock_guard<std::mutex> lk(mutex_);
     const auto now = std::chrono::steady_clock::now();
     if (!sampling_initialized_) {
       sampling_initialized_ = true;
@@ -102,6 +112,18 @@ class AsyncVideoWriterBase {
     }
     next_sample_time_ = now + ToSteadyDuration_(frame_interval_);
     return true;
+  }
+
+  bool IsSampleDue_() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return IsSampleDueLocked_();
+  }
+
+  bool IsSampleDueLocked_() const {
+    if (!sampling_initialized_) {
+      return true;
+    }
+    return std::chrono::steady_clock::now() >= next_sample_time_;
   }
 
   static std::chrono::steady_clock::duration
@@ -125,14 +147,17 @@ class AsyncVideoWriterBase {
       {
         std::unique_lock<std::mutex> lk(mutex_);
         cv_.wait(lk, [&]() {
-          return shutdown_ || pending_stop_ || has_pending_frame_;
+          return shutdown_ || pending_stop_ || !pending_frames_.empty();
         });
         should_shutdown = shutdown_;
         should_stop = pending_stop_;
         pending_stop_ = false;
-        if (has_pending_frame_) {
-          frame = pending_frame_;
-          has_pending_frame_ = false;
+        if (should_stop) {
+          pending_frames_.clear();
+        } else if (!pending_frames_.empty()) {
+          frame = pending_frames_.front();
+          pending_frames_.pop_front();
+          should_shutdown = shutdown_ && pending_frames_.empty();
         }
       }
 
@@ -197,32 +222,48 @@ class AsyncVideoWriterBase {
   }
 
   void PrepareOutputFrame_(const cv::Mat &frame) {
-    if (output_size_.width > 0 && output_size_.height > 0 &&
-        frame.size() != output_size_) {
-      cv::resize(frame, prepared_frame_, output_size_);
+    const cv::Size target_size = OutputSizeForFrame_(frame);
+    if (target_size.width <= 0 || target_size.height <= 0) {
+      prepared_frame_ = cv::Mat{};
+      return;
+    }
+
+    if (frame.size() != target_size) {
+      cv::resize(frame, prepared_frame_, target_size);
       return;
     }
     prepared_frame_ = frame;
+  }
+
+  cv::Size OutputSizeForFrame_(const cv::Mat &frame) {
+    if (output_size_.width > 0 && output_size_.height > 0) {
+      return output_size_;
+    }
+    if (locked_output_size_.width <= 0 || locked_output_size_.height <= 0) {
+      locked_output_size_ = frame.size();
+    }
+    return locked_output_size_;
   }
 
   int fps_;
   cv::Size output_size_{};
   std::string log_tag_;
   int worker_aux_core_index_ = -1;
+  std::size_t max_pending_frames_ = 6;
   std::chrono::duration<double> frame_interval_;
   std::chrono::steady_clock::time_point next_sample_time_{};
   bool sampling_initialized_ = false;
 
-  std::mutex mutex_;
+  mutable std::mutex mutex_;
   std::condition_variable cv_;
-  cv::Mat pending_frame_;
-  bool has_pending_frame_ = false;
+  std::deque<cv::Mat> pending_frames_;
   bool pending_stop_ = false;
   bool shutdown_ = false;
   std::thread worker_;
 
   cv::VideoWriter writer_;
   cv::Size current_size_{};
+  cv::Size locked_output_size_{};
   cv::Mat prepared_frame_;
   std::uint64_t dropped_frames_ = 0;
 };
@@ -322,6 +363,8 @@ class SaveVideoFullRunStream : private detail::AsyncVideoWriterBase {
 
   ~SaveVideoFullRunStream() { ShutdownWorker(); }
 
+  bool WantsFrame() const { return ShouldSubmitFrame(); }
+
   void Update(const cv::Mat &frame) {
     if (base_dir_.empty() || frame.empty()) {
       return;
@@ -360,14 +403,20 @@ class SaveVideoFullRun {
         worker_aux_core_index_(worker_aux_core_index) {
     PrepareBaseFolder();
     if (ReadyForOutput_()) {
+      const int raw_worker_aux_core_index = std::max(0, worker_aux_core_index_);
+      const int overlay_worker_aux_core_index = raw_worker_aux_core_index + 1;
       raw_stream_ = std::make_unique<SaveVideoFullRunStream>(
           fps_, base_dir_, file_prefix_, "raw", "[SaveVideoFullRunRaw]",
-          output_size_, worker_aux_core_index_);
+          output_size_, raw_worker_aux_core_index);
       overlay_stream_ = std::make_unique<SaveVideoFullRunStream>(
           fps_, base_dir_, file_prefix_, "overlay",
           "[SaveVideoFullRunOverlay]", output_size_,
-          worker_aux_core_index_);
+          overlay_worker_aux_core_index);
     }
+  }
+
+  bool WantsOverlayFrame() const {
+    return overlay_stream_ && overlay_stream_->WantsFrame();
   }
 
   void UpdateRaw(const cv::Mat &frame) {

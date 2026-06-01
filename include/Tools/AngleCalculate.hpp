@@ -135,8 +135,8 @@ public:
         UpdateAngleByType(filter_type, absolute_pitch, dt, kf_pitch, ekf_pitch,
                           ukf_pitch, ckf_pitch, oneeuro_pitch));
 
-    const double velocity_dt =
-        std::clamp(dt, Params().velocity_dt_min_sec, Params().velocity_dt_max_sec);
+    const double velocity_dt = std::clamp(dt, Params().velocity_dt_min_sec,
+                                          Params().velocity_dt_max_sec);
     const float safe_dt = static_cast<float>(std::max(velocity_dt, 1e-6));
     if (has_last_filtered_angles_) {
       const float raw_yaw_velocity =
@@ -144,13 +144,15 @@ public:
       const float raw_pitch_velocity =
           (result.pitch - last_filtered_pitch_) / safe_dt;
       result.yaw_velocity =
-          SmoothVelocityAxis(raw_yaw_velocity, safe_dt, Params().yaw_velocity_abs_limit_deg_per_sec,
+          SmoothVelocityAxis(raw_yaw_velocity, safe_dt,
+                             Params().yaw_velocity_abs_limit_deg_per_sec,
                              Params().yaw_velocity_max_accel_deg_per_sec2,
                              Params().yaw_velocity_cutoff_hz,
                              Params().yaw_velocity_deadband_deg_per_sec,
                              &last_smoothed_yaw_velocity_);
       result.pitch_velocity =
-          SmoothVelocityAxis(raw_pitch_velocity, safe_dt, Params().pitch_velocity_abs_limit_deg_per_sec,
+          SmoothVelocityAxis(raw_pitch_velocity, safe_dt,
+                             Params().pitch_velocity_abs_limit_deg_per_sec,
                              Params().pitch_velocity_max_accel_deg_per_sec2,
                              Params().pitch_velocity_cutoff_hz,
                              Params().pitch_velocity_deadband_deg_per_sec,
@@ -211,10 +213,9 @@ public:
   }
 
 private:
-  std::pair<double, double> ComputeRawAbsoluteAngles_(float targetX,
-                                                      float targetY,
-                                                      float currentYaw,
-                                                      float currentPitch) const {
+  std::pair<double, double>
+  ComputeRawAbsoluteAngles_(float targetX, float targetY, float currentYaw,
+                            float currentPitch) const {
     const double fx = cameraData.cameraMatrix.at<double>(0, 0);
     const double fy = cameraData.cameraMatrix.at<double>(1, 1);
     double cx = cameraData.cameraMatrix.at<double>(0, 2);
@@ -321,8 +322,8 @@ private:
                            float *last_smoothed_velocity) {
     const float velocity_limit =
         static_cast<float>(std::max(0.0, velocity_abs_limit_deg_per_sec));
-    const float clamped_raw_velocity = std::clamp(raw_velocity, -velocity_limit,
-                                                  velocity_limit);
+    const float clamped_raw_velocity =
+        std::clamp(raw_velocity, -velocity_limit, velocity_limit);
 
     if (!has_last_smoothed_velocity_) {
       *last_smoothed_velocity = clamped_raw_velocity;
@@ -338,13 +339,14 @@ private:
       const double cutoff_hz = std::max(0.0, velocity_cutoff_hz);
       float alpha = 1.0f;
       if (cutoff_hz > 0.0) {
-        const float tau =
-            1.0f / (2.0f * static_cast<float>(kPi) * static_cast<float>(cutoff_hz));
+        const float tau = 1.0f / (2.0f * static_cast<float>(kPi) *
+                                  static_cast<float>(cutoff_hz));
         alpha = dt_sec / (tau + dt_sec);
       }
       alpha = std::clamp(alpha, 0.0f, 1.0f);
       *last_smoothed_velocity =
-          *last_smoothed_velocity + alpha * (accel_limited_velocity - *last_smoothed_velocity);
+          *last_smoothed_velocity +
+          alpha * (accel_limited_velocity - *last_smoothed_velocity);
     }
 
     if (std::abs(*last_smoothed_velocity) <
@@ -418,11 +420,11 @@ private:
 
 inline const AngleCalculator::TuningParams &AngleCalculator::Params() {
   const double tuned_yaw_velocity_abs_limit =
-      Tools::Params().angle_velocity_yaw_abs_limit_deg_per_sec * 1.22;
+      Tools::Params().angle_velocity_yaw_abs_limit_deg_per_sec * 1.35;
   const double tuned_yaw_velocity_max_accel =
-      Tools::Params().angle_velocity_yaw_max_accel_deg_per_sec2 * 1.30;
+      Tools::Params().angle_velocity_yaw_max_accel_deg_per_sec2 * 1.48;
   const double tuned_yaw_velocity_cutoff_hz =
-      Tools::Params().angle_velocity_yaw_cutoff_hz * 1.24;
+      Tools::Params().angle_velocity_yaw_cutoff_hz * 1.38;
   const double tuned_yaw_velocity_deadband =
       std::min(0.02, Tools::Params().angle_velocity_yaw_deadband_deg_per_sec);
   const double tuned_pitch_velocity_abs_limit =
@@ -433,37 +435,35 @@ inline const AngleCalculator::TuningParams &AngleCalculator::Params() {
       Tools::Params().angle_velocity_pitch_cutoff_hz * 0.80;
   const double tuned_pitch_velocity_deadband =
       std::max(0.04, Tools::Params().angle_velocity_pitch_deadband_deg_per_sec);
-  static const TuningParams p{
-      FilterType::ONE_EURO,
+  static const TuningParams p{FilterType::ONE_EURO,
 
-      0.03, // default_dt_sec
-      5.0,  // max_offset_deg
+                              0.03, // default_dt_sec
+                              5.0,  // max_offset_deg
 
-      10.0, // yaw_filter_q
-      0.01, // yaw_filter_r
-      0.1,  // pitch_filter_q
-      1.0,  // pitch_filter_r
+                              10.0, // yaw_filter_q
+                              0.01, // yaw_filter_r
+                              0.1,  // pitch_filter_q
+                              1.0,  // pitch_filter_r
 
-      120.0, // oneeuro_yaw_freq_hz
-      120.0, // oneeuro_pitch_freq_hz
-      6.4,   // oneeuro_yaw_min_cutoff_hz
-      4.2,   // oneeuro_pitch_min_cutoff_hz
-      8.2,   // oneeuro_yaw_beta
-      5.8,   // oneeuro_pitch_beta
-      3.0,   // oneeuro_yaw_d_cutoff_hz
-      2.3,   // oneeuro_pitch_d_cutoff_hz
+                              120.0, // oneeuro_yaw_freq_hz
+                              120.0, // oneeuro_pitch_freq_hz
+                              7.4,   // oneeuro_yaw_min_cutoff_hz
+                              4.9,   // oneeuro_pitch_min_cutoff_hz
+                              9.6,   // oneeuro_yaw_beta
+                              6.6,   // oneeuro_pitch_beta
+                              3.6,   // oneeuro_yaw_d_cutoff_hz
+                              2.7,   // oneeuro_pitch_d_cutoff_hz
 
-      Tools::Params().angle_velocity_dt_min_sec,
-      Tools::Params().angle_velocity_dt_max_sec,
-      tuned_yaw_velocity_abs_limit,
-      tuned_pitch_velocity_abs_limit,
-      tuned_yaw_velocity_max_accel,
-      tuned_pitch_velocity_max_accel,
-      tuned_yaw_velocity_cutoff_hz,
-      tuned_pitch_velocity_cutoff_hz,
-      tuned_yaw_velocity_deadband,
-      tuned_pitch_velocity_deadband
-  };
+                              Tools::Params().angle_velocity_dt_min_sec,
+                              Tools::Params().angle_velocity_dt_max_sec,
+                              tuned_yaw_velocity_abs_limit,
+                              tuned_pitch_velocity_abs_limit,
+                              tuned_yaw_velocity_max_accel,
+                              tuned_pitch_velocity_max_accel,
+                              tuned_yaw_velocity_cutoff_hz,
+                              tuned_pitch_velocity_cutoff_hz,
+                              tuned_yaw_velocity_deadband,
+                              tuned_pitch_velocity_deadband};
   return p;
 }
 

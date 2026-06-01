@@ -105,6 +105,15 @@ struct RuntimeParams {
   double angle_velocity_pitch_cutoff_hz; // pitch 角速度低通截止频率（Hz）
   double angle_velocity_yaw_deadband_deg_per_sec; // yaw 角速度死区（度/秒）
   double angle_velocity_pitch_deadband_deg_per_sec; // pitch 角速度死区（度/秒）
+  float
+      yaw_velocity_feedforward_error_threshold_deg; // yaw
+                                                    // 误差超过该阈值后追加速度前馈
+  float
+      pitch_velocity_feedforward_error_threshold_deg; // pitch
+                                                      // 误差超过该阈值后追加速度前馈
+  float yaw_error_feedforward_gain_deg_per_sec_per_deg; // yaw 误差速度前馈增益
+  float pitch_error_feedforward_gain_deg_per_sec_per_deg; // pitch
+                                                          // 误差速度前馈增益
 
   // ===== 时延统计 =====
   bool enable_latency_profile;       // 是否开启时延统计
@@ -151,7 +160,7 @@ inline const RuntimeParams &Params() {
       "/home/nuc/antidrone/src/model/antidrone_stage12_int8_openvino_model/"
       "antidrone_stage12.xml",
       "/home/nuc/antidrone/src/model/final_s_int8_openvino_model/final_s.xml",
-      "CPU", "ONE_EURO", "ALL",
+      "CPU", "ONE_EURO", "RED",
 
       // ===== 相机采集与 ROI =====
       1000, // capture_timeout_ms: 相机抓帧超时 1000ms
@@ -186,28 +195,36 @@ inline const RuntimeParams &Params() {
       10.0f, // max_send_delta_deg: yaw 单次最大发送偏角 10 度
       1.0,   // dt_max_sec: 帧间隔有效上限 1.0 秒
       5.0f,  // pitch_abs_limit: pitch 单次最大发送偏角绝对值 5 度
-      0.025f, // stage12_pitch_micro_deadband_deg: stage1/2 pitch 微抖死区 0.025
+      0.018f, // stage12_pitch_micro_deadband_deg: stage1/2 pitch 微抖死区 0.018
               // 度
-      20.0f, // aimbot_target_laser_max_distance_m:
+      19.5f, // aimbot_target_laser_max_distance_m:
              // 首次开启激光/初始化阶段判断的距离上限（米）
       0.010, // angle_velocity_dt_min_sec: 速度估计最小 dt 10ms
       0.080, // angle_velocity_dt_max_sec: 速度估计最大 dt 80ms
-      480.0, // angle_velocity_yaw_abs_limit_deg_per_sec: yaw
+      560.0, // angle_velocity_yaw_abs_limit_deg_per_sec: yaw
              // 角速度限幅（调参激进档）
       520.0, // angle_velocity_pitch_abs_limit_deg_per_sec: pitch
              // 角速度限幅（调参激进档）
-      3600.0, // angle_velocity_yaw_max_accel_deg_per_sec2: yaw
+      4600.0, // angle_velocity_yaw_max_accel_deg_per_sec2: yaw
               // 角加速度限幅（调参激进档）
       4200.0, // angle_velocity_pitch_max_accel_deg_per_sec2: pitch
               // 角加速度限幅（调参激进档）
-      28.0,   // angle_velocity_yaw_cutoff_hz: yaw
+      36.0,   // angle_velocity_yaw_cutoff_hz: yaw
               // 角速度低通截止频率（调参激进档）
       32.0,   // angle_velocity_pitch_cutoff_hz: pitch
               // 角速度低通截止频率（调参激进档）
-      0.05,   // angle_velocity_yaw_deadband_deg_per_sec: yaw
+      0.02,   // angle_velocity_yaw_deadband_deg_per_sec: yaw
               // 角速度死区（抑制极小微抖）
       0.05,   // angle_velocity_pitch_deadband_deg_per_sec: pitch
               // 角速度死区（仅保留极小微抖抑制）
+      0.08f,  // yaw_velocity_feedforward_error_threshold_deg: yaw 超过
+              // 0.15deg 追加误差方向速度前馈
+      0.08f,  // pitch_velocity_feedforward_error_threshold_deg: pitch 超过
+              // 0.10deg 追加误差方向速度前馈
+      35.0f,  // yaw_error_feedforward_gain_deg_per_sec_per_deg: yaw
+              // 每 1deg 误差追加速度
+      10.0f,  // pitch_error_feedforward_gain_deg_per_sec_per_deg: pitch
+              // 每 1deg 误差追加速度
 
       // ===== 时延统计 =====
       false, // enable_latency_profile: 默认关闭时延统计
@@ -217,7 +234,7 @@ inline const RuntimeParams &Params() {
       true,  // enable_scan_mode: 默认开启扫描模式
       false, // enable_save_no_target_images: 默认不保存无目标图像
       false, // enable_save_target_videos: 默认不保存目标视频
-      false, // enable_save_full_run_video: 默认不保存全程视频
+      true,  // enable_save_full_run_video: 默认不保存全程视频
       true,  // enable_display: 默认开启显示窗口
       true,  // enable_calibration_sliders: 默认开启标定滑块
       true,  // enable_send_log: 默认开启发送日志
@@ -231,11 +248,11 @@ inline const RuntimeParams &Params() {
 
       200.0, // scan_send_hz: stage1/2 扫描发送频率 200Hz
       200.0, // stage3_scan_send_hz: stage3 扫描发送频率 200Hz
-      16.0,  // scan_yaw_speed_deg_per_sec: stage1/2 扫描 yaw 速度 16deg/s
+      14.0,  // scan_yaw_speed_deg_per_sec: stage1/2 扫描 yaw 速度 16deg/s
       1.25, // stage3_scan_yaw_speed_deg_per_sec: stage3 扫描 yaw 速度 1.25deg/s
 
-      100.0f, // scan_pitch_wavelength_percent: stage1/2 lambda 百分比
-      25.0f,  // scan_pitch_amplitude_percent: stage1/2 A 百分比
+      40.0f, // scan_pitch_wavelength_percent: stage1/2 lambda 百分比
+      50.0f, // scan_pitch_amplitude_percent: stage1/2 A 百分比
 
       40.0f,  // stage3_scan_pitch_wavelength_percent: stage3 lambda 百分比
       100.0f, // stage3_scan_pitch_amplitude_percent: stage3 A 百分比

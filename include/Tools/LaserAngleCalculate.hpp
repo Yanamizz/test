@@ -45,6 +45,9 @@ public:
     float used_distance = 0.0f;
     float width_distance = 0.0f;
     float height_distance = 0.0f;
+    float tilt_ratio_dh_over_dw = 1.0f;
+    float tilt_angle_deg = 0.0f;
+    float expected_height_pixel_from_width = 0.0f;
     DistanceSource source = DistanceSource::None;
   };
 
@@ -76,11 +79,66 @@ public:
     const float visual_pitch_rad = visual_pitch_offset_deg / kRadiansToDegrees;
     const float converge_angle =
         std::atan2(params.laser_z_offset_m, params.laser_converge_x_m);
-    const float required_laser_angle = std::atan2(
-        distance_m * std::tan(visual_pitch_rad) - params.laser_z_offset_m,
-        distance_m);
+    const float target_vertical_trim_m = params.laser_target_vertical_trim_m;
+    const float required_laser_angle =
+        std::atan2(distance_m * std::tan(visual_pitch_rad) -
+                       params.laser_z_offset_m - target_vertical_trim_m,
+                   distance_m);
     return (required_laser_angle + converge_angle - visual_pitch_rad) *
            kRadiansToDegrees;
+  }
+
+  static float
+  CalculateLaserPitchCompensationDeg(const DistanceDebugInfo &distance_debug,
+                                     float visual_pitch_offset_deg = 0.0f) {
+    const CalibrationStage active_stage = ActiveStage();
+    const auto params = ParamsForStage(active_stage);
+    float distance_m = distance_debug.used_distance;
+    if (active_stage == CalibrationStage::Stage3) {
+      distance_m = SelectStage3LaserCompDistance_(distance_debug, params);
+    }
+    if (!std::isfinite(distance_m) || distance_m <= 0.0f) {
+      return 0.0f;
+    }
+
+    if (!params.enable_laser_pitch_compensation ||
+        params.laser_z_offset_m <= 0.0f || params.laser_converge_x_m <= 0.0f) {
+      return 0.0f;
+    }
+    if (distance_m < params.laser_comp_min_distance_m ||
+        distance_m > params.laser_comp_max_distance_m) {
+      if (distance_m < params.laser_comp_min_distance_m) {
+        return CalculateLaserPitchCompensationDeg(
+            params.laser_comp_min_distance_m, visual_pitch_offset_deg);
+      } else {
+        return CalculateLaserPitchCompensationDeg(
+            params.laser_comp_max_distance_m, visual_pitch_offset_deg);
+      }
+    }
+    const float base_comp_deg =
+        CalculateLaserPitchCompensationDeg(distance_m, visual_pitch_offset_deg);
+    return base_comp_deg -
+           CalculateTiltPitchCorrectionDeg(distance_debug, params);
+  }
+
+  static float
+  CalculateTiltRatioDhOverDw(const DistanceDebugInfo &distance_debug) {
+    if (!IsValidDistance(distance_debug.width_distance) ||
+        !IsValidDistance(distance_debug.height_distance)) {
+      return 1.0f;
+    }
+    return distance_debug.height_distance /
+           std::max(distance_debug.width_distance, kLinearInterpEpsilon);
+  }
+
+  static float
+  CalculateTiltPitchCorrectionDeg(const DistanceDebugInfo &distance_debug) {
+    return CalculateTiltPitchCorrectionDeg(distance_debug,
+                                           ParamsForStage(ActiveStage()));
+  }
+
+  static float CurrentTiltRatioDeadbandDhOverDw() {
+    return ParamsForStage(ActiveStage()).tilt_ratio_deadband_dh_over_dw;
   }
 
   static CalibrationTargetHeights
@@ -177,11 +235,18 @@ private:
     float near_width_pixel;
     float far_calibration_target_width;
     float far_width_pixel;
+    float tilt_reference_target_width_m;
+    float tilt_reference_target_length_m;
     float laser_z_offset_m;
     float laser_converge_x_m;
     float laser_comp_min_distance_m;
     float laser_comp_max_distance_m;
     bool enable_laser_pitch_compensation;
+    float laser_target_vertical_trim_m;
+    bool enable_tilt_pitch_correction;
+    float tilt_ratio_deadband_dh_over_dw;
+    float tilt_pitch_correction_gain_deg_per_ratio;
+    float tilt_pitch_correction_max_deg;
   };
 
   struct TunableParams {
@@ -217,6 +282,12 @@ private:
         EstimateCalibratedDistanceByWidth(pixel_w, params.stage);
     result.height_distance =
         EstimateCalibratedDistanceByHeight(pixel_h, params.stage);
+    result.tilt_ratio_dh_over_dw = CalculateTiltRatioDhOverDw(result);
+    const auto tilt_debug = CalculateTiltAngleByWidthScale_(
+        pixel_w, pixel_h, params.stage);
+    result.tilt_angle_deg = tilt_debug.angle_deg;
+    result.expected_height_pixel_from_width =
+        tilt_debug.expected_height_pixel;
 
     if (IsValidDistance(result.width_distance)) {
       result.used_distance = FilterDistance(result.width_distance, params);
@@ -254,6 +325,13 @@ private:
   float
   EstimateCalibratedDistanceByWidth(float pixel_w,
                                     const StageTunableParams &params) const {
+    const float target_width =
+        EstimateCalibratedTargetWidthByPixelWidth(pixel_w, params);
+    return EstimateDistanceByWidth(target_width, pixel_w);
+  }
+
+  float EstimateCalibratedTargetWidthByPixelWidth(
+      float pixel_w, const StageTunableParams &params) const {
     const float near_width = params.near_calibration_target_width;
     const float far_width = params.far_calibration_target_width;
     const float near_pixel = params.near_width_pixel;
@@ -265,13 +343,12 @@ private:
     if (!IsValidPixel(near_pixel) || !IsValidPixel(far_pixel) ||
         near_width <= 0.0f || far_width <= 0.0f ||
         std::abs(far_pixel - near_pixel) <= kLinearInterpEpsilon) {
-      return EstimateDistanceByWidth(far_width, pixel_w);
+      return far_width;
     }
 
     const float t = std::clamp(
         (pixel_w - near_pixel) / (far_pixel - near_pixel), 0.0f, 1.0f);
-    const float target_width = near_width + t * (far_width - near_width);
-    return EstimateDistanceByWidth(target_width, pixel_w);
+    return near_width + t * (far_width - near_width);
   }
 
   float EstimateDistanceByHeight(float target_height, float pixel_h) const {
@@ -341,12 +418,72 @@ private:
     return std::isfinite(distance_m) && distance_m > 0.0f;
   }
 
+  static float
+  SelectStage3LaserCompDistance_(const DistanceDebugInfo &distance_debug,
+                                 const StageTunableParams &params) {
+    if (IsValidDistance(distance_debug.width_distance)) {
+      return distance_debug.width_distance;
+    }
+
+    const float min_distance = params.laser_comp_min_distance_m;
+    const float max_distance = params.laser_comp_max_distance_m;
+    if (!IsValidDistance(min_distance) || !IsValidDistance(max_distance)) {
+      return 0.0f;
+    }
+
+    const float low = std::min(min_distance, max_distance);
+    const float high = std::max(min_distance, max_distance);
+    if (!IsValidDistance(distance_debug.used_distance)) {
+      return high;
+    }
+
+    const float mid = 0.5f * (low + high);
+    return distance_debug.used_distance <= mid ? low : high;
+  }
+
   static constexpr float
   CalibrationTargetMetersFromPixel(float horizontal_distance_m, float pixel,
                                    double focal_px) {
     return (horizontal_distance_m > 0.0f && pixel > 0.0f && focal_px > 0.0)
                ? static_cast<float>(horizontal_distance_m * pixel / focal_px)
                : 0.0f;
+  }
+
+  struct TiltAngleDebug {
+    float angle_deg = 0.0f;
+    float expected_height_pixel = 0.0f;
+  };
+
+  TiltAngleDebug
+  CalculateTiltAngleByWidthScale_(float pixel_w, float pixel_h,
+                                  const StageTunableParams &params) const {
+    TiltAngleDebug result{};
+    if (!IsValidPixel(pixel_w) || !IsValidPixel(pixel_h) ||
+        params.tilt_reference_target_length_m <= 0.0f) {
+      return result;
+    }
+
+    if (params.tilt_reference_target_width_m <= 0.0f) {
+      return result;
+    }
+
+    const float meters_per_pixel =
+        params.tilt_reference_target_width_m / pixel_w;
+    if (meters_per_pixel <= 0.0f || !std::isfinite(meters_per_pixel)) {
+      return result;
+    }
+
+    result.expected_height_pixel =
+        params.tilt_reference_target_length_m / meters_per_pixel;
+    if (!IsValidPixel(result.expected_height_pixel)) {
+      result.expected_height_pixel = 0.0f;
+      return result;
+    }
+
+    const float visible_ratio =
+        std::clamp(pixel_h / result.expected_height_pixel, 0.0f, 1.0f);
+    result.angle_deg = std::acos(visible_ratio) * kRadiansToDegrees;
+    return result;
   }
 
   static TunableParams &MutableParams() {
@@ -376,11 +513,20 @@ private:
          CalibrationTargetMetersFromPixel(kFarCalibrationHorizontalDistanceM,
                                           43.274f, CameraData::kFocalX),
          43.274f, // stage12 far_width_pixel（px，未标定时置 0）
+         0.05f,   // stage12 tilt_reference_target_width_m: 目标理论宽度
+                  // （米），用于由当前 Wpx 反推单像素长度
+         0.05f,   // stage12 tilt_reference_target_length_m: 目标理论长度
+                  // （米），用于由宽度尺度反推倾斜角
          0.090f,  // stage12 laser_z_offset_m: 激光在相机上方 0.09m
          14.313f, // stage12 laser_converge_x_m: 光轴交汇前向距离
          10.0f,   // stage12 laser_comp_min_distance_m
          24.0f,   // stage12 laser_comp_max_distance_m
-         true},   // stage12 enable_laser_pitch_compensation
+         true,    // stage12 enable_laser_pitch_compensation
+         0.004f, // stage12 laser_target_vertical_trim_m: 目标面整体下移 4mm
+         true,   // stage12 enable_tilt_pitch_correction
+         1.20f,  // stage12 tilt_ratio_deadband_dh_over_dw
+         1.8f,   // stage12 tilt_pitch_correction_gain_deg_per_ratio
+         0.22f}, // stage12 tilt_pitch_correction_max_deg
 
         {CalibrationTargetMetersFromPixel(kNearCalibrationHorizontalDistanceM,
                                           102.006f, CameraData::kFocalY),
@@ -396,16 +542,46 @@ private:
          CalibrationTargetMetersFromPixel(kFarCalibrationHorizontalDistanceM,
                                           49.605f, CameraData::kFocalX),
          49.605f, // stage3 far_width_pixel（px，未标定时置 0）
+         0.05f,   // stage3 tilt_reference_target_width_m: stage3 独立目标理论宽度
+                  // （米）
+         0.05f,   // stage3 tilt_reference_target_length_m: stage3 独立目标理论长度
+                  // （米）
          0.090f,  // stage3 laser_z_offset_m: 激光在相机上方 0.09m
          14.313f, // stage3 laser_converge_x_m: 光轴交汇前向距离
          10.0f,   // stage3 laser_comp_min_distance_m
          24.0f,   // stage3 laser_comp_max_distance_m
-         true},   // stage3 enable_laser_pitch_compensation
+         true,    // stage3 enable_laser_pitch_compensation
+         0.004f, // stage3 laser_target_vertical_trim_m: 复用 stage1/2 基础
+                 // 激光偏移角，但不启用高度相关倾斜修正
+         false,  // stage3 enable_tilt_pitch_correction
+         1.03f,   // stage3 tilt_ratio_deadband_dh_over_dw
+         0.0f,    // stage3 tilt_pitch_correction_gain_deg_per_ratio
+         0.0f},   // stage3 tilt_pitch_correction_max_deg
         0.25f, // distance_filter_alpha: 一阶滤波系数，越大响应越快
         0.5f,  // filter_reset_ratio: 距离突变超过该比例时重置滤波
         CalibrationStage::Stage12 // active_stage: 当前使用的标定阶段
     };
     return p;
+  }
+
+  static float
+  CalculateTiltPitchCorrectionDeg(const DistanceDebugInfo &distance_debug,
+                                  const StageTunableParams &params) {
+    if (!params.enable_tilt_pitch_correction) {
+      return 0.0f;
+    }
+
+    const float tilt_ratio = CalculateTiltRatioDhOverDw(distance_debug);
+    if (!std::isfinite(tilt_ratio) ||
+        tilt_ratio <= params.tilt_ratio_deadband_dh_over_dw) {
+      return 0.0f;
+    }
+
+    const float raw_correction_deg =
+        (tilt_ratio - params.tilt_ratio_deadband_dh_over_dw) *
+        params.tilt_pitch_correction_gain_deg_per_ratio;
+    return std::clamp(raw_correction_deg, 0.0f,
+                      params.tilt_pitch_correction_max_deg);
   }
 
   bool has_filtered_distance_ = false;

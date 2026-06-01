@@ -82,8 +82,8 @@ public:
     return version_.load(std::memory_order_acquire);
   }
 
-  ScanController::Config EffectiveControllerConfig() const {
-    auto controller_config = MakeStage3ScanControllerConfig();
+  ScanController::Config
+  EffectiveControllerConfig(ScanController::Config controller_config) const {
     if (!IsAutoMode()) {
       return controller_config;
     }
@@ -94,10 +94,14 @@ public:
     }
 
     bounds = ClampToManual_(bounds);
+    const auto limits = ManualBoundsLimits_();
     controller_config.min_yaw_deg = bounds.min_yaw_deg;
     controller_config.max_yaw_deg = bounds.max_yaw_deg;
     controller_config.min_pitch_deg = bounds.min_pitch_deg;
     controller_config.max_pitch_deg = bounds.max_pitch_deg;
+    controller_config.yaw_step_deg_per_tick =
+        ScaleYawStepForAutoBounds_(controller_config.yaw_step_deg_per_tick,
+                                   bounds, limits);
     return controller_config;
   }
 
@@ -131,6 +135,18 @@ private:
     bounds.max_pitch_deg = std::clamp(bounds.max_pitch_deg, limits.min_pitch_deg,
                                       limits.max_pitch_deg);
     return bounds;
+  }
+
+  static float ScaleYawStepForAutoBounds_(float manual_yaw_step_deg_per_tick,
+                                          const AngleBounds &auto_bounds,
+                                          const Limits &manual_limits) {
+    const float manual_yaw_span =
+        std::max(manual_limits.max_yaw_deg - manual_limits.min_yaw_deg, 1e-4f);
+    const float auto_yaw_span =
+        std::max(auto_bounds.max_yaw_deg - auto_bounds.min_yaw_deg, 0.0f);
+    const float yaw_span_ratio =
+        std::clamp(auto_yaw_span / manual_yaw_span, 0.0f, 1.0f);
+    return manual_yaw_step_deg_per_tick * yaw_span_ratio;
   }
 
   void UpdateBounds_(float yaw_deg, float pitch_deg) {

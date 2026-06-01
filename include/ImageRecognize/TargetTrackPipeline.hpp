@@ -67,18 +67,47 @@ class TargetTrackPipeline {
     TemporalBoxStabilizerParams params;
     params.min_iou_to_stabilize = 0.38f;
     params.max_center_distance_ratio = 0.55f;
-    params.max_area_ratio = 1.45f;
-    params.max_height_expand_ratio = 1.06f;
+    params.max_area_ratio = 1.30f;
+    params.max_height_expand_ratio = 1.03f;
     params.center_min_cutoff_hz = 1.1;
     params.center_beta = 0.18;
-    params.size_min_cutoff_hz = 0.85;
-    params.size_beta = 0.10;
+    params.size_min_cutoff_hz = 0.55;
+    params.size_beta = 0.04;
+    params.center_x_min_cutoff_hz = 2.25;
+    params.center_y_min_cutoff_hz = 1.05;
+    params.center_x_beta = 0.42;
+    params.center_y_beta = 0.16;
+    params.width_min_cutoff_hz = 0.90;
+    params.height_min_cutoff_hz = 0.38;
+    params.width_beta = 0.06;
+    params.height_beta = 0.015;
+    return TemporalBoxStabilizer(params);
+  }
+
+  static TemporalBoxStabilizer MakeStage3Stabilizer_() {
+    TemporalBoxStabilizerParams params;
+    params.min_iou_to_stabilize = 0.42f;
+    params.max_center_distance_ratio = 0.48f;
+    params.max_area_ratio = 1.22f;
+    params.max_height_expand_ratio = 1.02f;
+    params.center_min_cutoff_hz = 0.85;
+    params.center_beta = 0.06;
+    params.size_min_cutoff_hz = 0.40;
+    params.size_beta = 0.012;
+    params.center_x_min_cutoff_hz = 0.95;
+    params.center_y_min_cutoff_hz = 0.62;
+    params.center_x_beta = 0.08;
+    params.center_y_beta = 0.04;
+    params.width_min_cutoff_hz = 0.42;
+    params.height_min_cutoff_hz = 0.24;
+    params.width_beta = 0.012;
+    params.height_beta = 0.004;
     return TemporalBoxStabilizer(params);
   }
 
   CrossFrameTargetTracker tracker_{};
   TemporalBoxStabilizer stage12_stabilizer_{MakeStage12Stabilizer_()};
-  TemporalBoxStabilizer stage3_stabilizer_{};
+  TemporalBoxStabilizer stage3_stabilizer_{MakeStage3Stabilizer_()};
 };
 
 } // namespace ImageRecognize

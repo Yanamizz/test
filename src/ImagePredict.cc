@@ -66,6 +66,31 @@ struct TrackedTargetAbsoluteAngles {
   float yaw = 0.0f;
   float pitch = 0.0f;
 };
+
+static float ApplyErrorVelocityFeedforward(float measured_velocity_deg_per_sec,
+                                           float angle_error_deg,
+                                           float threshold_deg,
+                                           float gain_deg_per_sec_per_deg,
+                                           double velocity_abs_limit) {
+  if (!std::isfinite(measured_velocity_deg_per_sec) ||
+      !std::isfinite(angle_error_deg) || !std::isfinite(threshold_deg) ||
+      !std::isfinite(gain_deg_per_sec_per_deg) ||
+      !std::isfinite(velocity_abs_limit)) {
+    return measured_velocity_deg_per_sec;
+  }
+
+  const float safe_threshold = std::max(0.0f, threshold_deg);
+  const float excess_error = std::abs(angle_error_deg) - safe_threshold;
+  if (excess_error <= 0.0f || gain_deg_per_sec_per_deg <= 0.0f) {
+    return measured_velocity_deg_per_sec;
+  }
+
+  const float boosted_velocity =
+      measured_velocity_deg_per_sec +
+      std::copysign(excess_error * gain_deg_per_sec_per_deg, angle_error_deg);
+  const float safe_limit = static_cast<float>(std::max(0.0, velocity_abs_limit));
+  return std::clamp(boosted_velocity, -safe_limit, safe_limit);
+}
 } // namespace
 
 std::atomic<bool> g_running(true); // 全局运行标志
@@ -191,7 +216,8 @@ EffectiveScanTickConfig(bool stage3_mode) {
   auto controller_config = profile.scan.controller_config;
   if (stage3_mode && g_stage3_auto_scan_bounds_controller.IsAutoMode()) {
     controller_config =
-        g_stage3_auto_scan_bounds_controller.EffectiveControllerConfig();
+        g_stage3_auto_scan_bounds_controller.EffectiveControllerConfig(
+            controller_config);
   }
   return {profile.scan.effective_send_hz,
           std::chrono::milliseconds(profile.scan.origin_hold_ms),
@@ -530,12 +556,11 @@ static void EnsureOptionalSaversInitialized(
   }
   if (enable_save_target_videos && !*target_video_saver) {
     *target_video_saver = std::make_unique<Tools::SaveVideoOnTarget>(
-        Tools::Params().target_video_fps, "target_videos", cv::Size(480, 480));
+        Tools::Params().target_video_fps, "target_videos");
   }
   if (enable_save_full_run_video && !*full_run_video_saver) {
     *full_run_video_saver = std::make_unique<Tools::SaveVideoFullRun>(
-        Tools::Params().target_video_fps, "full_run_videos", cv::Size(480, 480),
-        4);
+        Tools::Params().target_video_fps, "full_run_videos", cv::Size(), 3);
   }
 }
 
@@ -832,6 +857,18 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   const float pitch_abs_limit = Tools::Params().pitch_abs_limit;
   const float stage12_pitch_micro_deadband_deg =
       std::max(0.0f, Tools::Params().stage12_pitch_micro_deadband_deg);
+  const float yaw_velocity_feedforward_error_threshold_deg = std::max(
+      0.0f, Tools::Params().yaw_velocity_feedforward_error_threshold_deg);
+  const float pitch_velocity_feedforward_error_threshold_deg = std::max(
+      0.0f, Tools::Params().pitch_velocity_feedforward_error_threshold_deg);
+  const float yaw_error_feedforward_gain_deg_per_sec_per_deg = std::max(
+      0.0f, Tools::Params().yaw_error_feedforward_gain_deg_per_sec_per_deg);
+  const float pitch_error_feedforward_gain_deg_per_sec_per_deg = std::max(
+      0.0f, Tools::Params().pitch_error_feedforward_gain_deg_per_sec_per_deg);
+  const double yaw_velocity_abs_limit_deg_per_sec =
+      std::max(0.0, Tools::Params().angle_velocity_yaw_abs_limit_deg_per_sec);
+  const double pitch_velocity_abs_limit_deg_per_sec =
+      std::max(0.0, Tools::Params().angle_velocity_pitch_abs_limit_deg_per_sec);
   const std::uint64_t display_every_n_frames = static_cast<std::uint64_t>(
       std::max(1, Tools::Params().display_every_n_frames));
   const std::uint64_t gui_poll_every_n_frames = static_cast<std::uint64_t>(
@@ -1084,10 +1121,15 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       const float center_x = tracked_center.x;
       const float center_y = tracked_center.y;
       const auto &distance_box =
-          track_result.has_box ? track_result.box : tracked_box;
+          (!using_stage3_predictor && has_tracked_box)
+              ? tracked_box
+              : (track_result.has_box ? track_result.box : tracked_box);
       const float width = ImageRecognize::BoxWidth(distance_box);
       const float height = ImageRecognize::BoxHeight(distance_box);
       pixel_size_stats.Add(width, height);
+      overlay_data.show_box_size_debug = true;
+      overlay_data.box_width_px = width;
+      overlay_data.box_height_px = height;
       const auto distance_debug = distance_calculator.CalculateDistanceWithDebug(
           distance_box[0], distance_box[1], distance_box[2], distance_box[3]);
       const float distance = distance_debug.used_distance;
@@ -1099,6 +1141,16 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         overlay_data.show_distance_debug = true;
         overlay_data.width_distance = distance_debug.width_distance;
         overlay_data.height_distance = distance_debug.height_distance;
+        overlay_data.tilt_ratio_dh_over_dw =
+            distance_debug.tilt_ratio_dh_over_dw;
+        overlay_data.tilt_angle_deg = distance_debug.tilt_angle_deg;
+        overlay_data.expected_height_pixel_from_width =
+            distance_debug.expected_height_pixel_from_width;
+        overlay_data.tilt_ratio_deadband_dh_over_dw =
+            Tools::DistanceCalculator::CurrentTiltRatioDeadbandDhOverDw();
+        overlay_data.tilt_pitch_correction_deg =
+            Tools::DistanceCalculator::CalculateTiltPitchCorrectionDeg(
+                distance_debug);
         overlay_data.distance_source =
             Tools::DistanceCalculator::DistanceSourceName(
                 distance_debug.source);
@@ -1134,7 +1186,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         const auto t_control_start = ProfileNow(enable_latency_profile);
         const float laser_pitch_comp_deg_raw =
             Tools::DistanceCalculator::CalculateLaserPitchCompensationDeg(
-                distance, offset_pitch_angle);
+                distance_debug, offset_pitch_angle);
         const float laser_pitch_comp_deg =
             using_stage3_predictor
                 ? (stage12_laser_pitch_comp_stabilizer.Reset(),
@@ -1150,6 +1202,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           delta_pitch_raw = Tools::ApplySoftDeadband(
               delta_pitch_raw, stage12_pitch_micro_deadband_deg);
         }
+        overlay_data.show_angle_offset_debug = true;
+        overlay_data.yaw_offset_deg = delta_yaw_raw;
+        overlay_data.pitch_offset_deg = delta_pitch_raw;
         if (using_stage3_predictor) {
           g_stage3_auto_scan_bounds_controller.ExpandForStage3Target(
               filtered_yaw, filtered_pitch);
@@ -1163,20 +1218,31 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
           const float send_abs_yaw = matched_imu.yaw + cmd_delta_yaw;
           const float send_abs_pitch = matched_imu.pitch + cmd_delta_pitch;
+          const float cmd_yaw_velocity = ApplyErrorVelocityFeedforward(
+              yaw_velocity, cmd_delta_yaw,
+              yaw_velocity_feedforward_error_threshold_deg,
+              yaw_error_feedforward_gain_deg_per_sec_per_deg,
+              yaw_velocity_abs_limit_deg_per_sec);
+          const float cmd_pitch_velocity = ApplyErrorVelocityFeedforward(
+              pitch_velocity, cmd_delta_pitch,
+              pitch_velocity_feedforward_error_threshold_deg,
+              pitch_error_feedforward_gain_deg_per_sec_per_deg,
+              pitch_velocity_abs_limit_deg_per_sec);
           const auto command_enqueue_time = std::chrono::steady_clock::now();
 
           StorePendingSend(AimbotSendCommand{send_abs_pitch, send_abs_yaw,
                                              cmd_delta_pitch, cmd_delta_yaw,
-                                             pitch_velocity, yaw_velocity, 0x01,
-                                             frame_ts, command_enqueue_time});
+                                             cmd_pitch_velocity,
+                                             cmd_yaw_velocity, 0x01, frame_ts,
+                                             command_enqueue_time});
           if (!using_stage3_predictor) {
             g_stage3_auto_scan_bounds_controller.UpdateFromStage12Target(
-                send_abs_yaw, send_abs_pitch);
+                filtered_yaw, filtered_pitch);
           }
           if (using_stage3_predictor) {
             lost_target_recovery_controller.PrepareStage3Coast(
-                true, send_abs_pitch, send_abs_yaw, pitch_velocity,
-                yaw_velocity, stage3_profile.lost_target_coast);
+                true, send_abs_pitch, send_abs_yaw, cmd_pitch_velocity,
+                cmd_yaw_velocity, stage3_profile.lost_target_coast);
           }
           AddLatencySample(enable_latency_profile, latency_total,
                            latency_window, &LatencyStats::result_to_control_ns,
@@ -1235,8 +1301,11 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     ++ui_frame_counter;
 
     cv::Mat full_overlay_frame;
+    const bool full_run_overlay_due =
+        enable_save_full_run_video && full_run_video_saver &&
+        full_run_video_saver->WantsOverlayFrame();
     const bool need_full_overlay_frame =
-        do_display || (enable_save_full_run_video && full_run_video_saver);
+        do_display || full_run_overlay_due;
     if (need_full_overlay_frame) {
       full_overlay_frame = inflight_frame.clone();
       ImageRecognize::DrawFullOverlay(
@@ -1276,10 +1345,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       }
     }
     if (enable_save_target_videos && target_video_saver) {
-      target_video_saver->Update(video_frame, has_tracked_box);
+      target_video_saver->Update(video_frame, true);
     }
     if (enable_save_full_run_video && full_run_video_saver) {
-      full_run_video_saver->UpdateOverlay(full_overlay_frame);
+      if (full_run_overlay_due) {
+        full_run_video_saver->UpdateOverlay(full_overlay_frame);
+      }
       full_run_video_saver->UpdateRaw(inflight_frame);
     }
 

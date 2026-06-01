@@ -18,10 +18,21 @@ struct OverlayData {
   cv::Point2f tracked_center{};
   bool show_distance = false;
   float distance = 0.0f;
+  bool show_box_size_debug = false;
+  float box_width_px = 0.0f;
+  float box_height_px = 0.0f;
   bool show_distance_debug = false;
   float width_distance = 0.0f;
   float height_distance = 0.0f;
+  float tilt_ratio_dh_over_dw = 1.0f;
+  float tilt_angle_deg = 0.0f;
+  float expected_height_pixel_from_width = 0.0f;
+  float tilt_ratio_deadband_dh_over_dw = 1.0f;
+  float tilt_pitch_correction_deg = 0.0f;
   const char *distance_source = "NONE";
+  bool show_angle_offset_debug = false;
+  float yaw_offset_deg = 0.0f;
+  float pitch_offset_deg = 0.0f;
 };
 
 class ImageShow {
@@ -80,10 +91,23 @@ public:
     if (overlay_data.show_distance) {
       ShowDistance(frame, overlay_data.distance);
     }
+    if (overlay_data.show_box_size_debug) {
+      ShowBoxSizeDebug(frame, overlay_data.box_width_px,
+                       overlay_data.box_height_px);
+    }
     if (overlay_data.show_distance_debug) {
       ShowDistanceDebug(frame, overlay_data.width_distance,
                         overlay_data.height_distance,
+                        overlay_data.tilt_ratio_dh_over_dw,
+                        overlay_data.tilt_angle_deg,
+                        overlay_data.expected_height_pixel_from_width,
+                        overlay_data.tilt_ratio_deadband_dh_over_dw,
+                        overlay_data.tilt_pitch_correction_deg,
                         overlay_data.distance_source);
+    }
+    if (overlay_data.show_angle_offset_debug) {
+      ShowAngleOffsetDebug(frame, overlay_data.yaw_offset_deg,
+                           overlay_data.pitch_offset_deg);
     }
   }
 
@@ -120,16 +144,43 @@ public:
                 cv::FONT_HERSHEY_SIMPLEX, 1.0, {0, 255, 0}, 2);
   }
 
+  static void ShowBoxSizeDebug(cv::Mat &frame, float box_width_px,
+                               float box_height_px) {
+    cv::putText(frame,
+                "Wpx: " + cv::format("%.1f", box_width_px) +
+                    " Hpx: " + cv::format("%.1f", box_height_px),
+                {10, 122}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {255, 255, 0}, 2);
+  }
+
   static void ShowDistanceDebug(cv::Mat &frame, float width_distance,
                                 float height_distance,
+                                float tilt_ratio_dh_over_dw,
+                                float tilt_angle_deg,
+                                float expected_height_pixel_from_width,
+                                float tilt_ratio_deadband_dh_over_dw,
+                                float tilt_pitch_correction_deg,
                                 const char *distance_source) {
     const std::string source =
         distance_source != nullptr ? distance_source : "NONE";
     cv::putText(frame,
                 "Dw: " + cv::format("%.2f", width_distance) +
                     " Dh: " + cv::format("%.2f", height_distance) +
+                    " TiltAng: " + cv::format("%.1f", tilt_angle_deg) +
+                    " Eh: " +
+                    cv::format("%.1f", expected_height_pixel_from_width) +
+                    " R: " + cv::format("%.3f", tilt_ratio_dh_over_dw) + "/" +
+                    cv::format("%.3f", tilt_ratio_deadband_dh_over_dw) +
+                    " Tc: " + cv::format("%.3f", tilt_pitch_correction_deg) +
                     " Src: " + source,
-                {10, 122}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {255, 255, 0}, 2);
+                {10, 150}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {255, 255, 0}, 2);
+  }
+
+  static void ShowAngleOffsetDebug(cv::Mat &frame, float yaw_offset_deg,
+                                   float pitch_offset_deg) {
+    cv::putText(frame,
+                "YawOff: " + cv::format("%.3f", yaw_offset_deg) +
+                    " PitchOff: " + cv::format("%.3f", pitch_offset_deg),
+                {10, 178}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {255, 255, 0}, 2);
   }
 
   static void ShowLockProgress(cv::Mat &frame, int stage, double progress,
@@ -204,10 +255,23 @@ inline void DrawFullOverlay(cv::Mat &frame,
   if (overlay_data.show_distance) {
     ImageShow::ShowDistance(frame, overlay_data.distance);
   }
+  if (overlay_data.show_box_size_debug) {
+    ImageShow::ShowBoxSizeDebug(frame, overlay_data.box_width_px,
+                                overlay_data.box_height_px);
+  }
   if (overlay_data.show_distance_debug) {
     ImageShow::ShowDistanceDebug(frame, overlay_data.width_distance,
                                  overlay_data.height_distance,
+                                 overlay_data.tilt_ratio_dh_over_dw,
+                                 overlay_data.tilt_angle_deg,
+                                 overlay_data.expected_height_pixel_from_width,
+                                 overlay_data.tilt_ratio_deadband_dh_over_dw,
+                                 overlay_data.tilt_pitch_correction_deg,
                                  overlay_data.distance_source);
+  }
+  if (overlay_data.show_angle_offset_debug) {
+    ImageShow::ShowAngleOffsetDebug(frame, overlay_data.yaw_offset_deg,
+                                    overlay_data.pitch_offset_deg);
   }
   if (has_tracked_box) {
     DrawTrackedBox(frame, tracked_box);
