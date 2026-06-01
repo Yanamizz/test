@@ -454,33 +454,126 @@ NormalizeStage3PredictResult(ImageRecognize::PredictResult *result) {
   }
 }
 
-static void UpdateAerialRobotStageAndSwitchFlag(
-    bool has_predict_result, const ImageRecognize::PredictResult &result,
-    double stage_dt, ImageRecognize::AerialRobotLaserLockJudge *stage_judge,
-    ImageRecognize::StagePredictorController *stage_predictor_controller) {
+static void PrintStage3ReachElapsed(
+    const char *reason, const std::chrono::steady_clock::time_point &now,
+    std::chrono::steady_clock::time_point *stage_progress_start,
+    bool *stage_progress_start_initialized) {
+  const char *safe_reason = reason == nullptr ? "unknown" : reason;
+  if (stage_progress_start_initialized == nullptr ||
+      stage_progress_start == nullptr || !*stage_progress_start_initialized) {
+    std::cout << "[空中机器人阶段] 到达 stage3，原因=" << safe_reason
+              << "，未记录到 P 从 0 首次增加时间" << std::endl;
+    return;
+  }
+
+  const double elapsed_sec =
+      std::chrono::duration<double>(now - *stage_progress_start).count();
+  std::cout << "[空中机器人阶段] P 从 0 首次增加到到达 stage3 耗时="
+            << elapsed_sec << "s，原因=" << safe_reason << std::endl;
+  *stage_progress_start_initialized = false;
+}
+
+static void UpdateAerialRobotStageOnJudgeTick(
+    bool illuminated, int laser_judge_class_id, bool has_boxes,
+    const std::chrono::steady_clock::time_point &now,
+    ImageRecognize::AerialRobotLaserLockJudge *stage_judge,
+    ImageRecognize::Stage3FallbackSwitchGuard *stage3_fallback_guard,
+    const ImageRecognize::Stage3FallbackSwitchGuard::Config
+        &stage3_fallback_config,
+    ImageRecognize::StagePredictorController *stage_predictor_controller,
+    std::chrono::steady_clock::time_point *stage_progress_start,
+    bool *stage_progress_start_initialized) {
   if (!g_aimbot_laser_state_controller.IsStageJudgeInitialized() ||
-      !has_predict_result ||
       g_aimbot_laser_state_controller.CurrentStage() >=
           ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
     return;
   }
 
   const int previous_stage = g_aimbot_laser_state_controller.CurrentStage();
-  const int laser_judge_class_id = ResolveLaserJudgeClassId(result);
-  const int stage = stage_judge->Update(laser_judge_class_id, stage_dt);
+  const auto tick_result = stage_judge->Tick100ms(illuminated);
+  const int stage = tick_result.stage;
   g_aimbot_laser_state_controller.SetCurrentStage(stage);
+  if (tick_result.progress_increased &&
+      tick_result.previous_progress <= 0.0 &&
+      stage_progress_start_initialized != nullptr &&
+      stage_progress_start != nullptr &&
+      !*stage_progress_start_initialized) {
+    *stage_progress_start = now;
+    *stage_progress_start_initialized = true;
+  }
   if (previous_stage ==
           ImageRecognize::AerialRobotLaserLockJudge::kInitialStage &&
       stage == ImageRecognize::AerialRobotLaserLockJudge::kInitialStage + 1) {
-    g_aimbot_laser_state_controller.OnStage1ToStage2Locked(
-        std::chrono::steady_clock::now());
+    if (stage3_fallback_guard != nullptr) {
+      stage3_fallback_guard->Reset();
+    }
   }
   if (stage >= ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage &&
       previous_stage <
           ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
-    g_aimbot_laser_state_controller.ClearSuppressWindow();
-    stage_predictor_controller->RequestStage3SwitchAfterTargetLoss();
+    if (stage3_fallback_guard != nullptr) {
+      stage3_fallback_guard->Reset();
+    }
+    PrintStage3ReachElapsed("strict_progress", now, stage_progress_start,
+                            stage_progress_start_initialized);
+    stage_predictor_controller->RequestStage3SwitchAfterTargetLoss(
+        "strict_progress");
+    return;
   }
+
+  if (stage3_fallback_guard == nullptr) {
+    return;
+  }
+  const bool should_fallback_to_stage3 = stage3_fallback_guard->Update(
+      ImageRecognize::Stage3FallbackSwitchGuard::UpdateInput{
+          g_aimbot_laser_state_controller.IsStageJudgeInitialized(),
+          stage_predictor_controller->UsingStage3Predictor(), stage,
+          laser_judge_class_id, has_boxes, stage_judge->Progress(),
+          stage3_fallback_config, now});
+  if (!should_fallback_to_stage3) {
+    return;
+  }
+
+  const double max_progress = stage3_fallback_guard->MaxStage2Progress();
+  const auto fallback_reason = stage3_fallback_guard->LastTriggerReason();
+  const char *fallback_reason_tag =
+      ImageRecognize::Stage3FallbackSwitchGuard::TriggerReasonTag(
+          fallback_reason);
+  stage_judge->ForceFinished();
+  g_aimbot_laser_state_controller.SetCurrentStage(
+      ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage);
+  std::cout << "[空中机器人阶段] stage3 保守兜底触发：原因="
+            << fallback_reason_tag << "，stage2 最高P=" << max_progress;
+  if (fallback_reason == ImageRecognize::Stage3FallbackSwitchGuard::
+                             TriggerReason::Stage2LongNoTarget) {
+    std::cout << "，stage2 连续空框达到 "
+              << stage3_fallback_config.stage2_no_target_force_duration.count()
+              << "ms，直接兜底进入 stage3";
+  } else if (fallback_reason ==
+             ImageRecognize::Stage3FallbackSwitchGuard::TriggerReason::
+                 HighProgressLongNoTarget) {
+    std::cout << "，P 曾达到阈值后连续空框达到 "
+              << stage3_fallback_config
+                     .high_progress_no_target_probe_duration.count()
+              << "ms，进入 stage3 probe";
+  } else {
+    std::cout << "，连续空框达到 "
+              << stage3_fallback_config.no_target_duration.count()
+              << "ms，最近紫色窗口="
+              << stage3_fallback_config.recent_purple_duration.count()
+              << "ms，进入 stage3 probe";
+  }
+  std::cout << std::endl;
+  const bool fallback_is_probe =
+      fallback_reason == ImageRecognize::Stage3FallbackSwitchGuard::
+                             TriggerReason::HighProgressRecentPurpleLostTarget ||
+      fallback_reason == ImageRecognize::Stage3FallbackSwitchGuard::
+                             TriggerReason::HighProgressLongNoTarget;
+  PrintStage3ReachElapsed(fallback_reason_tag, now, stage_progress_start,
+                          stage_progress_start_initialized);
+  stage3_fallback_guard->Reset();
+  stage_predictor_controller->RequestStage3SwitchAfterTargetLoss(
+      fallback_reason_tag, fallback_is_probe);
 }
 
 static void
@@ -798,6 +891,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       stage12_laser_pitch_comp_stabilizer;
   static ImageRecognize::TargetTrackPipeline target_track_pipeline;
   static ImageRecognize::AerialRobotLaserLockJudge aerial_robot_stage_judge;
+  static ImageRecognize::Stage3FallbackSwitchGuard stage3_fallback_guard;
   static const Tools::FilterType filter_type =
       Tools::AngleCalculator::ParseFilterType(
           Tools::Params().angle_filter_type);
@@ -849,6 +943,21 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   const auto scan_trigger_delay = std::chrono::milliseconds(
       std::max(0, Tools::Params().scan_trigger_delay_ms));
   const auto stage3_profile = StageProfile(Tools::RuntimeStage::Stage3);
+  const ImageRecognize::Stage3FallbackSwitchGuard::Config
+      stage3_fallback_config{
+          std::max(0.0, Tools::Params().stage3_fallback_min_stage2_progress),
+          std::chrono::milliseconds(
+              std::max(0, Tools::Params().stage3_fallback_no_target_ms)),
+          std::chrono::milliseconds(
+              std::max(0,
+                       Tools::Params().stage3_fallback_recent_purple_ms)),
+          std::chrono::milliseconds(std::max(
+              0, Tools::Params()
+                     .stage3_fallback_high_progress_no_target_probe_ms)),
+          std::chrono::milliseconds(std::max(
+              0, Tools::Params().stage3_fallback_stage2_no_target_force_ms))};
+  const auto stage3_probe_no_target_rollback = std::chrono::milliseconds(
+      std::max(0, Tools::Params().stage3_probe_no_target_rollback_ms));
   const auto imu_buffer_max_age =
       std::chrono::milliseconds(Tools::Params().imu_buffer_max_age_ms);
   const double dt_max_sec = Tools::Params().dt_max_sec;
@@ -878,6 +987,17 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           std::max(1, Tools::Params().latency_print_interval_frames));
   std::chrono::steady_clock::time_point target_lost_since{};
   bool target_lost_since_initialized = false;
+  std::chrono::steady_clock::time_point stage3_probe_no_target_since{};
+  bool stage3_probe_no_target_since_initialized = false;
+  const auto stage_judge_period = std::chrono::milliseconds(100);
+  std::chrono::steady_clock::time_point next_stage_judge_tick{};
+  bool stage_judge_tick_initialized = false;
+  bool stage_tick_has_purple_observation = false;
+  bool stage_tick_has_any_boxes = false;
+  bool stage_tick_interrupted = false;
+  int stage_tick_laser_judge_class_id = -1;
+  std::chrono::steady_clock::time_point stage_progress_start{};
+  bool stage_progress_start_initialized = false;
   bool infer_inflight = false;
   bool has_last_submitted_frame_ts = false;
   cv::Mat inflight_frame;
@@ -898,7 +1018,15 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     target_track_pipeline.Reset();
     distance_calculator.ResetFilter();
     stage12_laser_pitch_comp_stabilizer.Reset();
+    stage3_fallback_guard.Reset();
     lost_target_recovery_controller.Reset();
+    stage3_probe_no_target_since_initialized = false;
+    stage_judge_tick_initialized = false;
+    stage_tick_has_purple_observation = false;
+    stage_tick_has_any_boxes = false;
+    stage_tick_interrupted = false;
+    stage_tick_laser_judge_class_id = -1;
+    stage_progress_start_initialized = false;
     ClearPendingSend();
   };
   ImageRecognize::StagePredictorController stage_predictor_controller(
@@ -992,8 +1120,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     SerialTask::EulerAngles matched_imu{};
     bool has_matched_imu = false;
     double frame_dt = 0.0;
-    double stage_dt =
-        ImageRecognize::AerialRobotLaserLockJudge::kDefaultDeltaSeconds;
     bool has_realtime_frame_dt = false;
     bool has_predict_result = false;
     std::chrono::steady_clock::time_point infer_end_time{};
@@ -1018,9 +1144,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       if (has_prev_frame_ts) {
         frame_dt =
             std::chrono::duration<double>(frame_ts - prev_frame_ts).count();
-        if (frame_dt > 0.0) {
-          stage_dt = frame_dt;
-        }
         has_realtime_frame_dt = true;
       }
       prev_frame_ts = frame_ts;
@@ -1041,9 +1164,65 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       std::cerr << "ImagePredictThread 异常：" << e.what() << std::endl;
     }
 
-    UpdateAerialRobotStageAndSwitchFlag(has_predict_result, result, stage_dt,
-                                        &aerial_robot_stage_judge,
-                                        &stage_predictor_controller);
+    const auto stage_now = std::chrono::steady_clock::now();
+    if (!g_aimbot_laser_state_controller.IsStageJudgeInitialized() ||
+        g_aimbot_laser_state_controller.CurrentStage() >=
+            ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
+      stage_judge_tick_initialized = false;
+      stage_tick_has_purple_observation = false;
+      stage_tick_has_any_boxes = false;
+      stage_tick_interrupted = false;
+      stage_tick_laser_judge_class_id = -1;
+    } else {
+      if (!stage_judge_tick_initialized) {
+        next_stage_judge_tick = stage_now + stage_judge_period;
+        stage_judge_tick_initialized = true;
+        stage_tick_has_purple_observation = false;
+        stage_tick_has_any_boxes = false;
+        stage_tick_interrupted = false;
+        stage_tick_laser_judge_class_id = -1;
+      }
+
+      while (stage_judge_tick_initialized &&
+             next_stage_judge_tick <= stage_now &&
+             g_aimbot_laser_state_controller.CurrentStage() <
+                 ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
+        const bool illuminated =
+            stage_tick_has_purple_observation && !stage_tick_interrupted;
+        UpdateAerialRobotStageOnJudgeTick(
+            illuminated, stage_tick_laser_judge_class_id,
+            stage_tick_has_any_boxes, next_stage_judge_tick,
+            &aerial_robot_stage_judge, &stage3_fallback_guard,
+            stage3_fallback_config, &stage_predictor_controller,
+            &stage_progress_start, &stage_progress_start_initialized);
+        next_stage_judge_tick += stage_judge_period;
+        stage_tick_has_purple_observation = false;
+        stage_tick_has_any_boxes = false;
+        stage_tick_interrupted = false;
+        stage_tick_laser_judge_class_id = -1;
+      }
+
+      if (has_predict_result &&
+          g_aimbot_laser_state_controller.CurrentStage() <
+              ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage) {
+        const int laser_judge_class_id = ResolveLaserJudgeClassId(result);
+        const bool purple_observed =
+            ImageRecognize::AerialRobotLaserLockJudge::IsPurpleClassId(
+                laser_judge_class_id);
+        stage_tick_has_any_boxes =
+            stage_tick_has_any_boxes || !result.boxes.empty();
+        if (purple_observed) {
+          stage_tick_has_purple_observation = true;
+          stage_tick_laser_judge_class_id =
+              ImageRecognize::AerialRobotLaserLockJudge::kPurpleClassId;
+        } else {
+          stage_tick_interrupted = true;
+          if (!result.boxes.empty()) {
+            stage_tick_laser_judge_class_id = laser_judge_class_id;
+          }
+        }
+      }
+    }
 
     std::array<float, 6> tracked_box{};
     bool has_tracked_box = false;
@@ -1070,6 +1249,43 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     UpdateTargetLostSince(track_alive, now, &target_lost_since,
                           &target_lost_since_initialized);
     g_target_visible.store(track_result.has_box, std::memory_order_release);
+
+    if (stage_predictor_controller.Stage3ProbeActive()) {
+      if (track_pipeline_result.has_tracked_box) {
+        stage_predictor_controller.ConfirmStage3Probe();
+        stage3_probe_no_target_since_initialized = false;
+      } else if (stage3_probe_no_target_rollback.count() > 0) {
+        if (!stage3_probe_no_target_since_initialized) {
+          stage3_probe_no_target_since = now;
+          stage3_probe_no_target_since_initialized = true;
+        } else if ((now - stage3_probe_no_target_since) >=
+                   stage3_probe_no_target_rollback) {
+          std::cout << "[空中机器人阶段] stage3 probe 连续无目标 "
+                    << stage3_probe_no_target_rollback.count()
+                    << "ms，回退 stage2" << std::endl;
+          stage_predictor_controller.SwitchToStage12(
+              "stage3_probe_no_target_rollback");
+          aerial_robot_stage_judge.ForceStage2();
+          g_aimbot_laser_state_controller.SetCurrentStage(
+              ImageRecognize::AerialRobotLaserLockJudge::kInitialStage + 1);
+          stage3_fallback_guard.Reset();
+          lost_target_recovery_controller.Reset();
+          ClearPendingSend();
+          stage3_probe_no_target_since_initialized = false;
+
+          const auto t_loop_end = ProfileNow(enable_latency_profile);
+          AddLatencySample(enable_latency_profile, latency_total,
+                           latency_window, &LatencyStats::loop_ns,
+                           t_loop_start, t_loop_end);
+          AddLatencyFrame(enable_latency_profile, latency_total,
+                          latency_window);
+          continue;
+        }
+      }
+    } else {
+      stage3_probe_no_target_since_initialized = false;
+    }
+
     TrackedTargetAbsoluteAngles tracked_target_absolute_angles{};
     if (track_pipeline_result.has_tracked_box && has_matched_imu) {
       const cv::Point2f tracked_center =

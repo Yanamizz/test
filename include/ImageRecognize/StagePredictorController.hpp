@@ -68,14 +68,32 @@ public:
                                                 : stage12_profile_;
   }
 
-  void RequestStage3SwitchAfterTargetLoss() {
+  void RequestStage3SwitchAfterTargetLoss(const char *reason = "strict_progress",
+                                          bool probe_switch = false) {
     if (using_stage3_predictor_ || pending_stage3_switch_) {
       return;
     }
     StartStage3WarmupIfNeeded_();
     pending_stage3_switch_ = true;
-    std::cout << "[空中机器人阶段] 达到 stage=3，等待目标丢失持续 "
+    pending_stage3_probe_switch_ = probe_switch;
+    std::cout << "[空中机器人阶段] 请求 stage3，原因="
+              << (reason == nullptr ? "unknown" : reason)
+              << "，probe=" << (probe_switch ? "true" : "false")
+              << "，等待目标丢失持续 "
               << stage3_switch_target_lost_delay_.count() << "ms 后切换模型"
+              << std::endl;
+  }
+
+  bool Stage3ProbeActive() const {
+    return using_stage3_predictor_ && stage3_probe_active_;
+  }
+
+  void ConfirmStage3Probe() {
+    if (!stage3_probe_active_) {
+      return;
+    }
+    stage3_probe_active_ = false;
+    std::cout << "[空中机器人阶段] stage3 probe 已识别到目标，确认保持 stage3"
               << std::endl;
   }
 
@@ -100,6 +118,8 @@ public:
       active_predictor_ = stage3_predictor_.get();
       using_stage3_predictor_ = true;
       pending_stage3_switch_ = false;
+      stage3_probe_active_ = pending_stage3_probe_switch_;
+      pending_stage3_probe_switch_ = false;
       if (hooks_.on_stage_changed) {
         hooks_.on_stage_changed();
       }
@@ -131,6 +151,8 @@ public:
     active_predictor_ = stage12_predictor_;
     using_stage3_predictor_ = false;
     pending_stage3_switch_ = false;
+    pending_stage3_probe_switch_ = false;
+    stage3_probe_active_ = false;
     if (hooks_.on_stage_changed) {
       hooks_.on_stage_changed();
     }
@@ -301,6 +323,8 @@ private:
   Hooks hooks_{};
   bool using_stage3_predictor_ = false;
   bool pending_stage3_switch_ = false;
+  bool pending_stage3_probe_switch_ = false;
+  bool stage3_probe_active_ = false;
 };
 
 } // namespace ImageRecognize

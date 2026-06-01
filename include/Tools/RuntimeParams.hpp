@@ -73,6 +73,20 @@ struct RuntimeParams {
   double
       stage3_lost_target_coast_pitch_speed_deg_per_sec; // stage3 丢目标后
                                                         // 续行固定 pitch 速度
+  double stage3_fallback_min_stage2_progress; // stage2 进度达到该值后，允许
+                                              // 丢目标兜底进入 stage3 候选
+  int stage3_fallback_no_target_ms; // 高进度后连续空框多久触发 stage3 兜底
+                                    // （毫秒）
+  int stage3_fallback_recent_purple_ms; // 兜底触发前，最近一次紫色观测必须在
+                                        // 该窗口内（毫秒）
+  int stage3_fallback_high_progress_no_target_probe_ms; // stage2 P 曾达到阈值后
+                                                        // 连续无目标多久进入
+                                                        // stage3 probe（毫秒）
+  int stage3_fallback_stage2_no_target_force_ms; // 进入 stage2 后连续无目标多久
+                                                 // 且 P 未达阈值时，强制兜底
+                                                 // 进入 stage3（毫秒）
+  int stage3_probe_no_target_rollback_ms; // stage3 probe 连续无目标多久回退
+                                          // stage2（毫秒）
 
   // ===== 线程等待与时序容差 =====
   int capture_empty_sleep_ms; // 相机空帧时休眠时长（毫秒）
@@ -160,7 +174,7 @@ inline const RuntimeParams &Params() {
       "/home/nuc/antidrone/src/model/antidrone_stage12_int8_openvino_model/"
       "antidrone_stage12.xml",
       "/home/nuc/antidrone/src/model/final_s_int8_openvino_model/final_s.xml",
-      "CPU", "ONE_EURO", "RED",
+      "CPU", "ONE_EURO", "ALL",
 
       // ===== 相机采集与 ROI =====
       1000, // capture_timeout_ms: 相机抓帧超时 1000ms
@@ -175,7 +189,7 @@ inline const RuntimeParams &Params() {
 
       // ===== 阶段切换与 stage3 丢失恢复 =====
       200, // stage3_switch_target_lost_delay_ms: stage3 后丢目标 200ms 再切模型
-      500, // stage3_lost_target_coast_ms: stage3 丢目标后续行 500ms
+      2000, // stage3_lost_target_coast_ms: stage3 丢目标后续行 2000ms
       40, // stage3_lost_target_coast_trigger_delay_ms: 丢失 40ms 后才续行
       60, // stage3_lost_target_reacquire_confirm_ms: 重识别稳定 60ms 才退出续行
       1.2, // stage3_lost_target_reacquire_gate_deg: 回检接管最大允许角差 1.2 度
@@ -183,6 +197,15 @@ inline const RuntimeParams &Params() {
            // 续行固定 yaw 速度
       2.0, // stage3_lost_target_coast_pitch_speed_deg_per_sec: stage3 丢目标后
            // 续行固定 pitch 速度
+      60.0, // stage3_fallback_min_stage2_progress: stage2 P>=60 后才允许兜底
+      400, // stage3_fallback_no_target_ms: 连续空框 400ms 后触发兜底
+      500, // stage3_fallback_recent_purple_ms: 最近 500ms 内必须见过紫色
+      10000, // stage3_fallback_high_progress_no_target_probe_ms: P 曾达到阈值后
+             // 连续无目标 10s，进入 stage3 probe
+      60000, // stage3_fallback_stage2_no_target_force_ms: stage2 连续空框
+             // 90s 且 P 未达阈值后，强制兜底进入 stage3
+      20000, // stage3_probe_no_target_rollback_ms: stage3 probe 连续无目标
+             // 20s 后回退 stage2
 
       // ===== 线程等待与时序容差 =====
       5,   // capture_empty_sleep_ms: 空帧休眠 5ms
@@ -221,9 +244,9 @@ inline const RuntimeParams &Params() {
               // 0.15deg 追加误差方向速度前馈
       0.08f,  // pitch_velocity_feedforward_error_threshold_deg: pitch 超过
               // 0.10deg 追加误差方向速度前馈
-      35.0f,  // yaw_error_feedforward_gain_deg_per_sec_per_deg: yaw
+      50.0f,  // yaw_error_feedforward_gain_deg_per_sec_per_deg: yaw
               // 每 1deg 误差追加速度
-      10.0f,  // pitch_error_feedforward_gain_deg_per_sec_per_deg: pitch
+      15.0f,  // pitch_error_feedforward_gain_deg_per_sec_per_deg: pitch
               // 每 1deg 误差追加速度
 
       // ===== 时延统计 =====
@@ -240,7 +263,7 @@ inline const RuntimeParams &Params() {
       true,  // enable_send_log: 默认开启发送日志
 
       // ===== 扫描与推理节流 =====
-      1000, // scan_trigger_delay_ms: 丢目标后 1000ms 进入扫描
+      2000, // scan_trigger_delay_ms: 丢目标后 2000ms 进入扫描
       1000, // scan_origin_hold_ms: 扫描起始在原点保持 1000ms
       1500, // stage3_scan_origin_hold_ms: stage3 扫描起始在原点保持 1500ms
       "AUTO", // stage3_scan_bounds_mode: stage3 默认使用 stage12 目标角范围
