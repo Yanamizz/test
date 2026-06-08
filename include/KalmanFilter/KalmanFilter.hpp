@@ -1,6 +1,9 @@
 /**
  * @file    include/KalmanFilter/KalmanFilter.hpp
  * @brief   实现基于线性角度模型的 Kalman Filter 角度估计器。
+ *
+ * 该文件提供标准线性 KF 版本的角度平滑与角速度估计，适用于模型近似线性且希望
+ * 控制响应稳定的场景。它与 EKF/UKF/CKF 封装共享相近接口，便于运行时选择滤波策略。
  */
 
 #pragma once

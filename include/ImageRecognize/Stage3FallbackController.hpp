@@ -1,6 +1,10 @@
 /**
  * @file    include/ImageRecognize/Stage3FallbackController.hpp
  * @brief   收口 stage2 异常无目标兜底、stage3 probe 与电机响应探测。
+ *
+ * Stage3FallbackController 跟踪 stage2 进度、无目标持续时间、近期紫色观测
+ * 和电机探测反馈，用于决定是否进入 stage3 候选/探测路径。它输出阶段兜底
+ * 意图和探测动作，具体模型切换、ROI、曝光和扫描副作用由主流程其它模块执行。
  */
 
 #pragma once

@@ -1,6 +1,10 @@
 /**
  * @file    include/SerialTask/ImuBuffer.hpp
  * @brief   提供 IMU 姿态序列缓存、插值匹配与速度估计能力。
+ *
+ * ImuBuffer 保存串口读取线程产生的 yaw/pitch 时间序列，支持按图像帧时间戳
+ * 查询最近姿态、限制最大匹配年龄，并估计角速度供控制前馈使用。它是图像
+ * 时间与 IMU 时间对齐的关键缓冲层，不负责串口解析或控制命令发送。
  */
 
 #pragma once

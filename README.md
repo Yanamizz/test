@@ -35,7 +35,7 @@
   - kalman (<https://github.com/mherb/kalman.git>)
   - OneEuroFilter (<https://github.com/casiez/OneEuroFilter.git>)
   - OpenVINO（可选）
-    - `ImagePredict`/`OpenvinoTest` 在未找到 OpenVINO 时仍可编译，但运行会走报错路径
+    - `ImagePredict` 在未找到 OpenVINO 时仍可编译，但运行会走报错路径
     - <https://www.intel.cn/content/www/cn/zh/developer/tools/openvino-toolkit/overview.html>
 ## 构建
 

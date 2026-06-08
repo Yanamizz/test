@@ -1,6 +1,10 @@
 /**
  * @file    include/ImageRecognize/YoloLightPreprocess.hpp
  * @brief   提供 stage3 YOLO 的光照归一化预处理。
+ *
+ * 该模块在模型输入尺寸上执行轻量 LAB/CLAHE 光照增强，用于 stage3 远距或
+ * 小目标场景下提升低对比度目标可见性。它只处理进入推理前的图像内容，
+ * 不改变原始保存帧、检测后处理和控制链路。
  */
 
 #pragma once

@@ -1,6 +1,10 @@
 /**
  * @file    include/KalmanFilter/AngleKalmanModels.hpp
  * @brief   定义角度滤波所需的状态、观测以及系统和量测模型。
+ *
+ * 该文件为 KF/EKF/UKF/CKF 等滤波器提供统一的角度状态定义，通常包含角度与角速度，
+ * 并描述状态转移和观测模型。Tools::AngleCalculator 通过这些模型在不同滤波器实现
+ * 之间保持一致的输入输出语义。
  */
 
 #pragma once

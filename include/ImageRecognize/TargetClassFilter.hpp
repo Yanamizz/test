@@ -1,16 +1,21 @@
 /**
  * @file    include/ImageRecognize/TargetClassFilter.hpp
  * @brief   根据阵营模式筛选可跟踪目标类别并输出过滤后的检测框。
+ *
+ * TargetClassFilter 定义红/蓝/全选等阵营模式，把原始检测结果过滤为当前
+ * 允许跟踪和控制的候选框集合。该模块同时提供阵营模式控制器，用于 GUI
+ * 调参面板和主流程共享同一份筛选状态。
  */
 
 #pragma once
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cctype>
 #include <string>
 #include <vector>
+
+#include "ImageRecognize/OutputDataProcess.hpp"
 
 namespace ImageRecognize {
 
@@ -117,14 +122,12 @@ inline bool ShouldTrackClassId(int class_id, TargetCampMode mode) {
   }
 }
 
-inline std::vector<std::array<float, 6>>
-FilterTrackBoxes(const std::vector<std::array<float, 6>> &boxes,
-                 TargetCampMode mode) {
-  std::vector<std::array<float, 6>> filtered;
+inline std::vector<DetectionBox>
+FilterTrackBoxes(const std::vector<DetectionBox> &boxes, TargetCampMode mode) {
+  std::vector<DetectionBox> filtered;
   filtered.reserve(boxes.size());
   for (const auto &box : boxes) {
-    const int class_id = static_cast<int>(box[5]);
-    if (ShouldTrackClassId(class_id, mode)) {
+    if (ShouldTrackClassId(BoxClassId(box), mode)) {
       filtered.push_back(box);
     }
   }

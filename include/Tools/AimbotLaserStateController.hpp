@@ -1,6 +1,10 @@
 /**
  * @file    include/Tools/AimbotLaserStateController.hpp
  * @brief   收口激光开启阈值与阶段初始化逻辑。
+ *
+ * AimbotLaserStateController 根据首次有效目标距离触发激光开启 flag，并维护
+ * 阶段判断初始化状态与当前锁定阶段。当前业务约定是触发后 AimbotTarget 保持
+ * 开启，距离不再直接关闭激光；该控制器只管理这些语义，不发送串口帧。
  */
 
 #pragma once

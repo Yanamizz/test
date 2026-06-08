@@ -1,6 +1,10 @@
 /**
  * @file    include/Tools/CameraRoiRuntime.hpp
  * @brief   保存相机 ROI 运行时实际生效状态，供控制链路读取。
+ *
+ * CameraRoiRuntime 记录采集线程最终应用到相机的 ROI 开关、尺寸和偏移，用于
+ * 角度计算时修正主点位置。该结构反映“实际生效”的相机状态，而不是单纯的
+ * RuntimeParams 请求值。
  */
 
 #pragma once
@@ -43,4 +47,3 @@ inline int CameraRoiRuntimeOffsetY() {
 }
 
 } // namespace Tools
-

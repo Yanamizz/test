@@ -1,6 +1,13 @@
 /**
  * @file    include/Tools/StageRuntimeProfile.hpp
  * @brief   收口 stage1/2 与 stage3 的运行时差异配置。
+ *
+ * 本文件把不同阶段会变化的运行资源整理成只读 profile，包括模型路径、
+ * 曝光时间、stage3 光照预处理开关、相机 ROI 参数、扫描发送频率和
+ * ScanController 配置。主流程通过 MakeStageRuntimeProfile() 获取当前
+ * 阶段的统一快照，避免在 ImagePredict.cc 中反复散落 stage3 条件判断。
+ * 这里不保存跨帧状态，也不直接操作相机/推理器/串口，只负责把
+ * RuntimeParams 中的默认参数转换成阶段语义明确的运行配置。
  */
 
 #pragma once
@@ -49,15 +56,6 @@ struct StageScanProfile {
   ScanController::Config controller_config{};
 };
 
-struct StageLostTargetCoastProfile {
-  int duration_ms = 0;
-  int trigger_delay_ms = 0;
-  int reacquire_confirm_ms = 0;
-  double reacquire_gate_deg = 0.0;
-  double yaw_speed_deg_per_sec = 0.0;
-  double pitch_speed_deg_per_sec = 0.0;
-};
-
 struct StageRuntimeProfile {
   RuntimeStage stage = RuntimeStage::Stage12;
   const std::string *model_path = nullptr;
@@ -66,7 +64,6 @@ struct StageRuntimeProfile {
   int switch_target_lost_delay_ms = 0;
   StageCameraRoiProfile roi{};
   StageScanProfile scan{};
-  StageLostTargetCoastProfile lost_target_coast{};
 
   const char *DisplayName() const { return RuntimeStageDisplayName(stage); }
   bool UsesStage3Resources() const { return IsStage3(stage); }
@@ -120,22 +117,6 @@ inline StageRuntimeProfile MakeStageRuntimeProfile(RuntimeStage stage,
       static_cast<float>(profile.scan.yaw_speed_deg_per_sec /
                          std::max(profile.scan.controller_config.tick_rate_hz,
                                   1.0f));
-
-  if (stage3_mode) {
-    profile.lost_target_coast.duration_ms =
-        std::max(0, params.stage3_lost_target_coast_ms);
-    profile.lost_target_coast.trigger_delay_ms =
-        std::max(0, params.stage3_lost_target_coast_trigger_delay_ms);
-    profile.lost_target_coast.reacquire_confirm_ms =
-        std::max(0, params.stage3_lost_target_reacquire_confirm_ms);
-    profile.lost_target_coast.reacquire_gate_deg =
-        std::max(0.0, params.stage3_lost_target_reacquire_gate_deg);
-    profile.lost_target_coast.yaw_speed_deg_per_sec =
-        params.stage3_lost_target_coast_yaw_speed_deg_per_sec;
-    profile.lost_target_coast.pitch_speed_deg_per_sec =
-        params.stage3_lost_target_coast_pitch_speed_deg_per_sec;
-  }
-
   return profile;
 }
 

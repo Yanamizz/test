@@ -1,6 +1,9 @@
 /**
  * @file    include/KalmanFilter/CubatureKalmanFilter.hpp
  * @brief   实现用于角度与角速度估计的 Cubature Kalman Filter。
+ *
+ * 该封装基于第三方 Kalman 库实现 CKF 角度滤波器，面向非线性角度系统的平滑与
+ * 速度估计。对外接口保持与其它角度滤波器一致，便于 AngleCalculator 按配置切换。
  */
 
 #pragma once

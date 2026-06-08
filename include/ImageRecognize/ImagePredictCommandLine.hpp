@@ -1,6 +1,10 @@
 /**
  * @file    include/ImageRecognize/ImagePredictCommandLine.hpp
  * @brief   解析图像识别主程序的命令行开关并生成运行选项。
+ *
+ * 该文件定义 ImagePredict 启动参数解析结果，覆盖显示、标定滑块、录像、
+ * 扫描、发送日志、视频输入等开关。解析逻辑会把命令行覆盖值与
+ * RuntimeParams 默认值合并，供 src/ImagePredict.cc 初始化各线程和功能。
  */
 
 #pragma once

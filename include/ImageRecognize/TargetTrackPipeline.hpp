@@ -1,11 +1,14 @@
 /**
  * @file    include/ImageRecognize/TargetTrackPipeline.hpp
  * @brief   收口目标框筛选、跨帧关联与可选稳定化逻辑。
+ *
+ * TargetTrackPipeline 是主流程检测后处理的组合入口，依次执行阵营过滤、
+ * 目标关联、stage3 检测框稳定化和跟踪结果生成。它把多模块中间状态收口
+ * 为统一结果，方便 ImagePredict.cc 只消费 tracked_box / tracked_center 等输出。
  */
 
 #pragma once
 
-#include <array>
 #include <vector>
 
 #include "ImageRecognize/OutputDataProcess.hpp"
@@ -16,10 +19,10 @@
 namespace ImageRecognize {
 
 struct TargetTrackPipelineResult {
-  std::vector<std::array<float, 6>> candidate_boxes;
+  std::vector<DetectionBox> candidate_boxes;
   CrossFrameTargetTrackerResult track_result;
   bool has_tracked_box = false;
-  std::array<float, 6> tracked_box{};
+  DetectionBox tracked_box{};
   bool track_alive = false;
 };
 

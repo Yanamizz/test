@@ -1,6 +1,9 @@
 /**
  * @file    include/KalmanFilter/UnscentedKalmanFilter.hpp
  * @brief   实现用于角度与角速度估计的 Unscented Kalman Filter。
+ *
+ * 该封装使用 UKF 处理非线性角度状态估计，避免显式线性化模型带来的部分误差。
+ * 对外保持与其它滤波器一致的更新接口，供 AngleCalculator 根据运行参数选择。
  */
 
 #pragma once

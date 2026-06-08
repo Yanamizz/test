@@ -1,6 +1,10 @@
 /**
  * @file    include/ImageRecognize/AerialRobotLaserLockJudge.hpp
  * @brief   根据目标类别连续观测结果判断空中机器人激光锁定阶段。
+ *
+ * AerialRobotLaserLockJudge 将逐帧检测类别转换为阶段进度，处理红/蓝/紫等
+ * 目标状态的连续确认、阈值推进和阶段输出。主流程依赖它判断激光阶段和
+ * stage3 切换条件；该模块只消费识别结果，不直接控制串口或扫描状态。
  */
 
 #pragma once

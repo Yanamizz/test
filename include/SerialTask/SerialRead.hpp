@@ -1,6 +1,10 @@
 /**
  * @file    include/SerialTask/SerialRead.hpp
  * @brief   提供 IMU 串口帧解析、四元数转欧拉角与姿态读取能力。
+ *
+ * SerialRead 负责从串口输入流中同步帧边界、校验/解析 IMU 数据，并把四元数
+ * 姿态转换成 yaw/pitch/roll 等主流程使用的角度。解析出的姿态通常写入
+ * ImuBuffer，供图像线程按时间匹配。
  */
 
 #pragma once

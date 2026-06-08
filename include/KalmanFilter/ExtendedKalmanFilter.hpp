@@ -1,6 +1,10 @@
 /**
  * @file    include/KalmanFilter/ExtendedKalmanFilter.hpp
  * @brief   实现用于角度与角速度估计的 Extended Kalman Filter。
+ *
+ * 该封装使用线性化模型估计角度和角速度，适合需要比简单一阶滤波更强状态估计的
+ * 控制链路。它隐藏第三方滤波器细节，只向 AngleCalculator 暴露统一的 reset/update
+ * 风格接口。
  */
 
 #pragma once

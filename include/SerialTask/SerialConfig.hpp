@@ -1,6 +1,9 @@
 /**
  * @file    include/SerialTask/SerialConfig.hpp
  * @brief   提供串口默认端口、波特率与超时等基础配置。
+ *
+ * 该文件集中保存串口设备名、baudrate、timeout 等默认连接参数，供读线程
+ * 和发送线程复用。它只表达默认配置，不打开设备，也不包含协议帧结构。
  */
 
 #pragma once

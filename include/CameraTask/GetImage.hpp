@@ -1,6 +1,10 @@
 /**
  * @file    include/CameraTask/GetImage.hpp
  * @brief   封装 Galaxy 相机的打开、取流、参数设置与运行时曝光配置能力。
+ *
+ * GalaxyCamera 负责大恒相机 SDK 生命周期、设备打开/关闭、开始/停止取流、
+ * 图像 buffer 管理、曝光参数写入和相机侧 ROI 应用。该文件也维护 ROI
+ * 切换后 payload 尺寸刷新与全画幅恢复逻辑，是实机相机接入的主要边界。
  */
 
 #pragma once
@@ -208,9 +212,6 @@ class GalaxyCamera {
     started_ = true;
     return true;
   }
-
-  // 性能调优接口：允许外部开启/关闭去畸变（去畸变较耗时）
-  void setUndistort(bool enable) { enable_undistort_ = enable; }
 
   void stop() {
     if (!opened_ || !started_) return;
@@ -662,13 +663,6 @@ class GalaxyCamera {
   }
 
   cv::Mat postProcess(cv::Mat &img) {
-    // 去畸变（如果启用且内参已设置）
-    if (enable_undistort_ && !img.empty() && !camera_matrix_.empty()) {
-      cv::Mat undistorted;
-      cv::undistort(img, undistorted, camera_matrix_, dist_coeffs_);
-      img = undistorted;
-    }
-
     if (enable_invert) {
       cv::flip(img, img, -1);  // flip both vertically and horizontally
     }
@@ -701,9 +695,6 @@ class GalaxyCamera {
 
  public:
   // ===== 手动配置区（统一放在文件末尾）=====
-  cv::Mat camera_matrix_ =
-      (cv::Mat_<double>(3, 3) << 1576.303044, 0.0, 952.451125, 0.0, 1578.069737, 599.901423, 0.0, 0.0, 1.0);
-  cv::Mat dist_coeffs_ = (cv::Mat_<double>(1, 5) << -0.275212, 0.210437, -0.000083, 0.000589, 0.0);
   bool enable_invert = false;              // 是否翻转图像
   bool enable_auto_white_balance = false;  // 是否持续自动白平衡
   bool enable_auto_exposure = false;       // 启动时是否执行一次自动曝光
@@ -711,7 +702,6 @@ class GalaxyCamera {
   double white_balance_red = 1.75;         // 手动白平衡红通道比例
   double exposure_time_us = 1000.0;        // 手动曝光时间（微秒）
   double gain_db = 24.0;                   // 手动增益（dB）
-  bool enable_undistort_ = false;          // 是否启用去畸变（默认关闭以降低延迟）
   std::string wb_channel_name_ = "Red";    // 白平衡通道名，可改为 "Green" / "Blue"
   int wb_channel_index_ = 0;               // 白平衡通道索引，通道名为空时使用
   bool enable_roi_ = false;                // 是否开启相机侧 ROI（裁剪画幅）

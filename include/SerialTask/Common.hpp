@@ -1,6 +1,10 @@
 /**
  * @file    include/SerialTask/Common.hpp
  * @brief   定义串口通信协议中使用的公共帧结构与常量。
+ *
+ * 该文件是串口读写双方共享的线协议契约，包含帧头帧尾、AimbotTarget
+ * 线值范围、发送/接收数据结构和必要的转换辅助。修改这里会直接影响
+ * 与下位机通信的二进制兼容性，需同步检查 SerialRead 与 SerialSend。
  */
 #pragma once
 

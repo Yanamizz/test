@@ -1,6 +1,9 @@
 /**
  * @file    include/Tools/CpuAffinity.hpp
  * @brief   提供线程 CPU 亲和性设置与 CPU 拓扑查询能力。
+ *
+ * 该模块根据 Linux CPU 拓扑识别性能核/辅助核，并为推理、预热、保存视频和主线程
+ * 提供绑定接口。目标是在不改变业务逻辑的前提下降低线程抢占与尾延迟抖动。
  */
 
 #pragma once

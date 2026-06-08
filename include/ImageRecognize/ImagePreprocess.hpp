@@ -1,6 +1,10 @@
 /**
  * @file    include/ImageRecognize/ImagePreprocess.hpp
  * @brief   执行图像缩放、颜色转换、归一化和张量重排等推理前预处理。
+ *
+ * 该文件把 OpenCV 图像转换为模型输入张量需要的 layout 和数值范围，
+ * 包括 letterbox/resize、BGR/RGB 转换、归一化和 CHW 排布。预处理结果
+ * 同时保留缩放与填充信息，供后处理阶段把模型坐标映射回原图坐标。
  */
 
 #pragma once

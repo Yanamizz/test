@@ -1,6 +1,10 @@
 /**
  * @file    include/Tools/Stage3AutoScanBoundsController.hpp
  * @brief   收口 stage3 auto 扫描上下限学习、钳制与版本追踪。
+ *
+ * 该控制器根据 stage3 已锁定目标的绝对 yaw 逐步扩展扫描边界，在目标丢失后为
+ * 自动扫描提供更贴近近期目标活动范围的 yaw 上下限。它只维护边界学习状态，
+ * 实际扫描轨迹和串口发送由 ScanController/ScanSendController 完成。
  */
 
 #pragma once

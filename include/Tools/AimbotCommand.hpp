@@ -1,6 +1,10 @@
 /**
  * @file    include/Tools/AimbotCommand.hpp
  * @brief   定义图像主流程与串口发送线程之间传递的云台控制命令。
+ *
+ * AimbotCommand 是目标控制和扫描控制共用的线程间数据结构，保存绝对 yaw/pitch、
+ * 速度前馈、AimbotTarget 线值、命令时间和有效性标记。该文件只定义命令契约，
+ * 不负责仲裁、生成轨迹或实际串口发送。
  */
 
 #pragma once

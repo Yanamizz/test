@@ -1,6 +1,9 @@
 /**
  * @file    include/Tools/RuntimeStats.hpp
  * @brief   定义主循环延迟与像素尺寸统计数据及其打印辅助函数。
+ *
+ * RuntimeStats 保存推理、跟踪、角度计算、控制发送等阶段的耗时采样，并提供窗口
+ * 统计输出。PixelSizeStats 用于记录目标框宽高分布，辅助实机距离标定和抖动排查。
  */
 
 #pragma once

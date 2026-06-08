@@ -1,6 +1,10 @@
 /**
  * @file    include/ImageRecognize/StagePredictorController.hpp
  * @brief   收口阶段预测器切换、副作用应用与待切换状态。
+ *
+ * StagePredictorController 管理 stage1/2 与 stage3 推理器选择、stage3 后台预热、
+ * 目标丢失延时切换、GUI 手动切换和切换副作用应用。副作用包括曝光模式、
+ * 相机 ROI 请求、扫描配置、距离标定阶段和相关状态重置。
  */
 
 #pragma once

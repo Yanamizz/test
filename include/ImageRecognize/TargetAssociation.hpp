@@ -1,13 +1,15 @@
 /**
  * @file    include/ImageRecognize/TargetAssociation.hpp
  * @brief   提供跨帧目标框关联、粘连跟踪与丢失容忍逻辑。
+ *
+ * 该文件通过中心距离、IoU、类别和时间窗口等信息，在多帧检测框之间维持
+ * 当前目标身份，减少同类多目标或短时漏检造成的锁定跳变。输出结果供
+ * TargetTrackPipeline 使用，不直接参与角度计算或阶段判断。
  */
 
 #pragma once
 
 #include <algorithm>
-#include <array>
-#include <cmath>
 #include <cstddef>
 #include <vector>
 
@@ -16,44 +18,13 @@
 namespace ImageRecognize {
 
 inline float Clamp01(float value) {
-  if (value < 0.0f) return 0.0f;
-  if (value > 1.0f) return 1.0f;
+  if (value < 0.0f) {
+    return 0.0f;
+  }
+  if (value > 1.0f) {
+    return 1.0f;
+  }
   return value;
-}
-
-inline float BoxWidth(const std::array<float, 6> &box) { return std::max(0.0f, box[2] - box[0]); }
-
-inline float BoxHeight(const std::array<float, 6> &box) { return std::max(0.0f, box[3] - box[1]); }
-
-inline float BoxArea(const std::array<float, 6> &box) { return BoxWidth(box) * BoxHeight(box); }
-
-inline float BoxIoU(const std::array<float, 6> &a, const std::array<float, 6> &b) {
-  const float xx1 = std::max(a[0], b[0]);
-  const float yy1 = std::max(a[1], b[1]);
-  const float xx2 = std::min(a[2], b[2]);
-  const float yy2 = std::min(a[3], b[3]);
-  const float inter_w = std::max(0.0f, xx2 - xx1);
-  const float inter_h = std::max(0.0f, yy2 - yy1);
-  const float inter = inter_w * inter_h;
-  const float uni = BoxArea(a) + BoxArea(b) - inter;
-  return (uni <= 0.0f) ? 0.0f : (inter / uni);
-}
-
-inline float BoxCenterScore(const std::array<float, 6> &reference, const std::array<float, 6> &candidate) {
-  const float ref_cx = 0.5f * (reference[0] + reference[2]);
-  const float ref_cy = 0.5f * (reference[1] + reference[3]);
-  const float cand_cx = 0.5f * (candidate[0] + candidate[2]);
-  const float cand_cy = 0.5f * (candidate[1] + candidate[3]);
-
-  const float dx = cand_cx - ref_cx;
-  const float dy = cand_cy - ref_cy;
-  const float center_distance = std::sqrt(dx * dx + dy * dy);
-
-  const float ref_w = std::max(1.0f, BoxWidth(reference));
-  const float ref_h = std::max(1.0f, BoxHeight(reference));
-  const float ref_diag = std::sqrt(ref_w * ref_w + ref_h * ref_h);
-  const float normalized_distance = center_distance / std::max(1.0f, 0.5f * ref_diag);
-  return 1.0f / (1.0f + normalized_distance);
 }
 
 struct CrossFrameTargetTrackerParams {
@@ -73,12 +44,14 @@ struct CrossFrameTargetTrackerResult {
   bool matched_history = false;
   float association_score = 0.0f;
   std::size_t selected_index = 0;
-  std::array<float, 6> box{};
+  DetectionBox box{};
 };
 
 class CrossFrameTargetTracker {
  public:
-  explicit CrossFrameTargetTracker(const CrossFrameTargetTrackerParams &params = CrossFrameTargetTrackerParams{})
+  explicit CrossFrameTargetTracker(
+      const CrossFrameTargetTrackerParams &params =
+          CrossFrameTargetTrackerParams{})
       : params_(params) {}
 
   void Reset() {
@@ -87,7 +60,7 @@ class CrossFrameTargetTracker {
     anchor_box_ = {};
   }
 
-  CrossFrameTargetTrackerResult Update(const std::vector<std::array<float, 6>> &boxes) {
+  CrossFrameTargetTrackerResult Update(const std::vector<DetectionBox> &boxes) {
     CrossFrameTargetTrackerResult result;
 
     // 没有检测结果时，只累计丢失帧数；在容忍窗口内保持锁定，避免一帧漏检就立刻抖动或放开。
@@ -110,7 +83,7 @@ class CrossFrameTargetTracker {
       selected_index = SelectHighestScoreIndex_(boxes);
       matched_history = false;
       initialized_ = true;
-    } else if (anchor_box_[4] >= params_.sticky_confidence_threshold) {
+    } else if (BoxScore(anchor_box_) >= params_.sticky_confidence_threshold) {
       // 上一帧框本身置信度还足够高时，不再单纯追求“谁更高置信”，
       // 而是优先挑与上一帧最连续的框，减少高置信新框把目标抢走造成的跳变。
       selected_index = SelectStickyIndex_(boxes, &association_score);
@@ -134,32 +107,41 @@ class CrossFrameTargetTracker {
     return result;
   }
 
-  bool HasRecentLock() const { return initialized_ && missed_frames_ <= params_.max_lost_frames; }
+  bool HasRecentLock() const {
+    return initialized_ && missed_frames_ <= params_.max_lost_frames;
+  }
 
  private:
-  std::size_t SelectHighestScoreIndex_(const std::vector<std::array<float, 6>> &boxes) const {
+  std::size_t SelectHighestScoreIndex_(
+      const std::vector<DetectionBox> &boxes) const {
     std::size_t best_index = 0;
     for (std::size_t i = 1; i < boxes.size(); ++i) {
-      if (boxes[i][4] > boxes[best_index][4]) best_index = i;
+      if (BoxScore(boxes[i]) > BoxScore(boxes[best_index])) {
+        best_index = i;
+      }
     }
     return best_index;
   }
 
-  float AssociationScore_(const std::array<float, 6> &reference, const std::array<float, 6> &candidate) const {
+  float AssociationScore_(const DetectionBox &reference,
+                          const DetectionBox &candidate) const {
     const float iou = BoxIoU(reference, candidate);
-    const float center_score = BoxCenterScore(reference, candidate);
-    const float confidence = Clamp01(candidate[4]);
-    return params_.iou_weight * iou + params_.center_weight * center_score + params_.confidence_weight * confidence;
+    const float center_score = BoxCenterSimilarity(reference, candidate);
+    const float confidence = Clamp01(BoxScore(candidate));
+    return params_.iou_weight * iou + params_.center_weight * center_score +
+           params_.confidence_weight * confidence;
   }
 
-  float StickyScore_(const std::array<float, 6> &reference, const std::array<float, 6> &candidate) const {
+  float StickyScore_(const DetectionBox &reference,
+                     const DetectionBox &candidate) const {
     const float iou = BoxIoU(reference, candidate);
-    const float center_score = BoxCenterScore(reference, candidate);
+    const float center_score = BoxCenterSimilarity(reference, candidate);
     // 粘连分支故意不看候选框置信度，避免“新的高置信框”打断上一帧已经稳定的目标。
     return params_.sticky_iou_weight * iou + params_.sticky_center_weight * center_score;
   }
 
-  std::size_t SelectStickyIndex_(const std::vector<std::array<float, 6>> &boxes, float *sticky_score) const {
+  std::size_t SelectStickyIndex_(const std::vector<DetectionBox> &boxes,
+                                 float *sticky_score) const {
     std::size_t best_index = 0;
     float best_score = StickyScore_(anchor_box_, boxes[0]);
 
@@ -177,7 +159,8 @@ class CrossFrameTargetTracker {
     return best_index;
   }
 
-  std::size_t SelectAssociatedIndex_(const std::vector<std::array<float, 6>> &boxes, float *association_score) const {
+  std::size_t SelectAssociatedIndex_(
+      const std::vector<DetectionBox> &boxes, float *association_score) const {
     std::size_t best_index = 0;
     float best_score = AssociationScore_(anchor_box_, boxes[0]);
 
@@ -198,7 +181,7 @@ class CrossFrameTargetTracker {
   CrossFrameTargetTrackerParams params_;
   bool initialized_ = false;
   std::size_t missed_frames_ = 0;
-  std::array<float, 6> anchor_box_{};
+  DetectionBox anchor_box_{};
 };
 
 inline CrossFrameTargetTrackerParams::CrossFrameTargetTrackerParams()

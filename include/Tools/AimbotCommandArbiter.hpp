@@ -1,6 +1,10 @@
 /**
  * @file    include/Tools/AimbotCommandArbiter.hpp
  * @brief   收口目标控制、扫描和清空发送状态之间的线程仲裁。
+ *
+ * AimbotCommandArbiter 是图像线程与发送线程之间的共享状态边界，决定当前发送
+ * 线程应消费目标锁定命令、扫描命令还是保持空闲。它提供线程安全的 pending
+ * command、scan mode 和状态变更通知，避免主流程直接操作发送线程内部状态。
  */
 
 #pragma once

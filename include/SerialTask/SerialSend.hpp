@@ -1,6 +1,10 @@
 /**
  * @file    include/SerialTask/SerialSend.hpp
  * @brief   提供云台控制指令的串口封包、角度转换与发送能力。
+ *
+ * SerialSend 将主流程生成的绝对角、速度前馈和 AimbotTarget 状态编码为下位机
+ * 期望的二进制帧，并处理角度单位/范围转换与发送频率相关逻辑。它消费
+ * AimbotCommand，不参与目标识别、距离估计或阶段判断。
  */
 #pragma once
 #include "Common.hpp"

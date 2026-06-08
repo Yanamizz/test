@@ -1,6 +1,12 @@
 /**
  * @file    include/Tools/Stage12PitchPostprocess.hpp
- * @brief   收口 stage1/2 pitch 微抖抑制与激光补偿平滑后处理。
+ * @brief   Pitch 控制后处理工具，包含微死区和激光补偿平滑。
+ *
+ * 该文件提供两个轻量后处理能力：ApplySoftDeadband() 用于在最终发送前
+ * 压制极小 pitch 抖动，LaserPitchCompStabilizer 用 One Euro Filter 与
+ * 单帧变化率限制平滑 LaserPc 激光 pitch 补偿角。激光补偿平滑器不绑定
+ * 特定 stage，stage1/2 与 stage3 使用同一条处理链路，只由
+ * LaserAngleCalculate.hpp 中的阶段参数决定补偿数值。
  */
 
 #pragma once
@@ -28,7 +34,7 @@ inline float ApplySoftDeadband(float value, float deadband) {
   return std::copysign(scaled_magnitude, value);
 }
 
-class Stage12LaserPitchCompStabilizer {
+class LaserPitchCompStabilizer {
 public:
   float Filter(float raw_comp_deg, double dt_sec) {
     if (!std::isfinite(raw_comp_deg)) {

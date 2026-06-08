@@ -1,6 +1,14 @@
 /**
  * @file    include/Tools/LaserAngleCalculate.hpp
- * @brief   提供目标距离估计、目标尺寸标定与激光 pitch 几何补偿能力。
+ * @brief   目标距离估计、实机尺寸标定与激光 pitch 几何补偿工具。
+ *
+ * 本文件负责把检测框像素尺寸转换为目标水平距离，并根据相机/激光的
+ * 物理安装偏移计算需要追加到视觉 pitch 偏角上的补偿角。距离估计按
+ * stage1/2 与 stage3 分别维护标定参数：近/远距离处的检测框高度像素、
+ * 宽度像素，以及由实机数据反推得到的等效目标高度/宽度。运行时会同时
+ * 计算宽度距离 Dw 与高度距离 Dh，优先在二者一致时做加权融合，单一路径
+ * 不可信时回退到有效路径，并对反距离做一阶滤波以降低远距离像素抖动
+ * 放大的 pitch 震荡风险。
  */
 
 #pragma once
@@ -39,20 +47,18 @@ public:
     None,
     Width,
     Height,
+    Fused,
   };
 
   struct DistanceDebugInfo {
     float used_distance = 0.0f;
     float width_distance = 0.0f;
     float height_distance = 0.0f;
-    float tilt_ratio_dh_over_dw = 1.0f;
-    float tilt_angle_deg = 0.0f;
-    float expected_height_pixel_from_width = 0.0f;
     DistanceSource source = DistanceSource::None;
   };
 
   static CalibrationTargetHeights GetCalibrationTargetHeights() {
-    const auto params = ParamsForStage(ActiveStage());
+    const auto params = DistanceCalibrationParamsForStage(ActiveStage());
     return {params.near_calibration_target_height,
             params.far_calibration_target_height};
   }
@@ -68,7 +74,7 @@ public:
       return 0.0f;
     }
 
-    const auto params = ParamsForStage(ActiveStage());
+    const auto params = LaserCompensationParamsForStage(ActiveStage());
     if (!params.enable_laser_pitch_compensation ||
         distance_m < params.laser_comp_min_distance_m ||
         distance_m > params.laser_comp_max_distance_m ||
@@ -91,12 +97,8 @@ public:
   static float
   CalculateLaserPitchCompensationDeg(const DistanceDebugInfo &distance_debug,
                                      float visual_pitch_offset_deg = 0.0f) {
-    const CalibrationStage active_stage = ActiveStage();
-    const auto params = ParamsForStage(active_stage);
-    float distance_m = distance_debug.used_distance;
-    if (active_stage == CalibrationStage::Stage3) {
-      distance_m = SelectStage3LaserCompDistance_(distance_debug, params);
-    }
+    const auto params = LaserCompensationParamsForStage(ActiveStage());
+    const float distance_m = distance_debug.used_distance;
     if (!std::isfinite(distance_m) || distance_m <= 0.0f) {
       return 0.0f;
     }
@@ -117,40 +119,19 @@ public:
     }
     const float base_comp_deg =
         CalculateLaserPitchCompensationDeg(distance_m, visual_pitch_offset_deg);
-    return base_comp_deg -
-           CalculateTiltPitchCorrectionDeg(distance_debug, params);
-  }
-
-  static float
-  CalculateTiltRatioDhOverDw(const DistanceDebugInfo &distance_debug) {
-    if (!IsValidDistance(distance_debug.width_distance) ||
-        !IsValidDistance(distance_debug.height_distance)) {
-      return 1.0f;
-    }
-    return distance_debug.height_distance /
-           std::max(distance_debug.width_distance, kLinearInterpEpsilon);
-  }
-
-  static float
-  CalculateTiltPitchCorrectionDeg(const DistanceDebugInfo &distance_debug) {
-    return CalculateTiltPitchCorrectionDeg(distance_debug,
-                                           ParamsForStage(ActiveStage()));
-  }
-
-  static float CurrentTiltRatioDeadbandDhOverDw() {
-    return ParamsForStage(ActiveStage()).tilt_ratio_deadband_dh_over_dw;
+    return base_comp_deg;
   }
 
   static CalibrationTargetHeights
   GetCalibrationTargetHeights(CalibrationStage stage) {
-    const auto params = ParamsForStage(stage);
+    const auto params = DistanceCalibrationParamsForStage(stage);
     return {params.near_calibration_target_height,
             params.far_calibration_target_height};
   }
 
   static CalibrationTargetWidths
   GetCalibrationTargetWidths(CalibrationStage stage) {
-    const auto params = ParamsForStage(stage);
+    const auto params = DistanceCalibrationParamsForStage(stage);
     return {params.near_calibration_target_width,
             params.far_calibration_target_width, params.near_width_pixel,
             params.far_width_pixel};
@@ -164,7 +145,7 @@ public:
                                           float near_height, float far_height) {
     std::lock_guard<std::mutex> lk(ParamsMutex());
     auto &params = MutableParams();
-    auto &stage_params = StageParams(params, stage);
+    auto &stage_params = StageDistanceCalibrationParams(params, stage);
     stage_params.near_calibration_target_height = near_height;
     stage_params.far_calibration_target_height = far_height;
   }
@@ -173,7 +154,7 @@ public:
                                          float near_width, float far_width) {
     std::lock_guard<std::mutex> lk(ParamsMutex());
     auto &params = MutableParams();
-    auto &stage_params = StageParams(params, stage);
+    auto &stage_params = StageDistanceCalibrationParams(params, stage);
     stage_params.near_calibration_target_width = near_width;
     stage_params.far_calibration_target_width = far_width;
   }
@@ -191,10 +172,11 @@ public:
   void ResetFilter() {
     has_filtered_distance_ = false;
     filtered_distance_ = 0.0f;
+    filtered_inverse_distance_ = 0.0f;
   }
 
-  float CalculateDistance(float pixel_h) {
-    return CalculateDistanceByPixelHeight(pixel_h);
+  float CalculateDistance(float box_height_pixel) {
+    return CalculateDistanceByPixelHeight(box_height_pixel);
   }
 
   float CalculateDistance(float x1, float y1, float x2, float y2) {
@@ -203,18 +185,20 @@ public:
 
   DistanceDebugInfo CalculateDistanceWithDebug(float x1, float y1, float x2,
                                                float y2) {
-    const float raw_w = std::abs(x2 - x1);
-    const float raw_h = std::abs(y2 - y1);
-    if ((!std::isfinite(raw_w) || raw_w <= 0.0f) &&
-        (!std::isfinite(raw_h) || raw_h <= 0.0f)) {
+    const float box_width_pixel = std::abs(x2 - x1);
+    const float box_height_pixel = std::abs(y2 - y1);
+    if ((!std::isfinite(box_width_pixel) || box_width_pixel <= 0.0f) &&
+        (!std::isfinite(box_height_pixel) || box_height_pixel <= 0.0f)) {
       return {};
     }
 
-    return CalculateDistanceByPixelSize(raw_w, raw_h);
+    return CalculateDistanceByPixelSize(box_width_pixel, box_height_pixel);
   }
 
   static const char *DistanceSourceName(DistanceSource source) {
     switch (source) {
+    case DistanceSource::Fused:
+      return "FUSED";
     case DistanceSource::Width:
       return "WIDTH";
     case DistanceSource::Height:
@@ -226,188 +210,278 @@ public:
   }
 
 private:
-  struct StageTunableParams {
+  static constexpr float kDistanceFusionMaxRelativeGap = 0.16f;
+  static constexpr float kDistanceFusionMaxHeightWeight = 0.25f;
+
+  struct DistanceCalibrationParams {
     float near_calibration_target_height;
-    float near_pixel;
+    float near_height_pixel;
     float far_calibration_target_height;
-    float far_pixel;
+    float far_height_pixel;
     float near_calibration_target_width;
     float near_width_pixel;
     float far_calibration_target_width;
     float far_width_pixel;
-    float tilt_reference_target_width_m;
-    float tilt_reference_target_length_m;
+  };
+
+  struct LaserPitchCompensationParams {
     float laser_z_offset_m;
     float laser_converge_x_m;
     float laser_comp_min_distance_m;
     float laser_comp_max_distance_m;
     bool enable_laser_pitch_compensation;
     float laser_target_vertical_trim_m;
-    bool enable_tilt_pitch_correction;
-    float tilt_ratio_deadband_dh_over_dw;
-    float tilt_pitch_correction_gain_deg_per_ratio;
-    float tilt_pitch_correction_max_deg;
   };
 
   struct TunableParams {
-    StageTunableParams stage12;
-    StageTunableParams stage3;
-    float distance_filter_alpha;
-    float filter_reset_ratio;
+    struct {
+      DistanceCalibrationParams stage12;
+      DistanceCalibrationParams stage3;
+    } distance_calibration;
+    struct {
+      LaserPitchCompensationParams stage12;
+      LaserPitchCompensationParams stage3;
+    } laser_pitch_compensation;
+    struct {
+      float alpha;
+      float reset_ratio;
+    } distance_filter;
     CalibrationStage active_stage;
   };
 
   struct RuntimeSnapshot {
-    StageTunableParams stage;
+    DistanceCalibrationParams distance_calibration;
     float distance_filter_alpha;
-    float filter_reset_ratio;
+    float distance_filter_reset_ratio;
   };
 
-  float CalculateDistanceByPixelHeight(float pixel_h) {
-    if (!std::isfinite(pixel_h) || pixel_h <= 0.0f)
+  float CalculateDistanceByPixelHeight(float box_height_pixel) {
+    if (!std::isfinite(box_height_pixel) || box_height_pixel <= 0.0f)
       return 0.0f;
 
     const RuntimeSnapshot params = SnapshotCurrentRuntime_();
     const float raw_distance =
-        EstimateCalibratedDistanceByHeight(pixel_h, params.stage);
+        EstimateCalibratedDistanceByHeight(box_height_pixel,
+                                           params.distance_calibration);
     if (!std::isfinite(raw_distance) || raw_distance <= 0.0f)
       return 0.0f;
     return FilterDistance(raw_distance, params);
   }
 
-  DistanceDebugInfo CalculateDistanceByPixelSize(float pixel_w, float pixel_h) {
+  DistanceDebugInfo CalculateDistanceByPixelSize(float box_width_pixel,
+                                                 float box_height_pixel) {
     const RuntimeSnapshot params = SnapshotCurrentRuntime_();
     DistanceDebugInfo result{};
     result.width_distance =
-        EstimateCalibratedDistanceByWidth(pixel_w, params.stage);
+        EstimateCalibratedDistanceByWidth(box_width_pixel,
+                                          params.distance_calibration);
     result.height_distance =
-        EstimateCalibratedDistanceByHeight(pixel_h, params.stage);
-    result.tilt_ratio_dh_over_dw = CalculateTiltRatioDhOverDw(result);
-    const auto tilt_debug = CalculateTiltAngleByWidthScale_(
-        pixel_w, pixel_h, params.stage);
-    result.tilt_angle_deg = tilt_debug.angle_deg;
-    result.expected_height_pixel_from_width =
-        tilt_debug.expected_height_pixel;
+        EstimateCalibratedDistanceByHeight(box_height_pixel,
+                                           params.distance_calibration);
 
-    if (IsValidDistance(result.width_distance)) {
-      result.used_distance = FilterDistance(result.width_distance, params);
-      result.source = DistanceSource::Width;
+    const float selected_distance =
+        SelectDistanceEstimate(result, &result.source);
+    if (IsValidDistance(selected_distance)) {
+      result.used_distance = FilterDistance(selected_distance, params);
       return result;
     }
 
-    if (IsValidDistance(result.height_distance)) {
-      result.used_distance = FilterDistance(result.height_distance, params);
-      result.source = DistanceSource::Height;
-    }
     return result;
   }
 
   float
-  EstimateCalibratedDistanceByHeight(float pixel_h,
-                                     const StageTunableParams &params) const {
+  EstimateCalibratedDistanceByHeight(
+      float box_height_pixel, const DistanceCalibrationParams &params) const {
     const float near_height = params.near_calibration_target_height;
     const float far_height = params.far_calibration_target_height;
-    const float near_pixel = params.near_pixel;
-    const float far_pixel = params.far_pixel;
+    const float near_height_pixel = params.near_height_pixel;
+    const float far_height_pixel = params.far_height_pixel;
 
-    if (near_pixel <= 0.0f || far_pixel <= 0.0f || near_height <= 0.0f ||
-        far_height <= 0.0f ||
-        std::abs(far_pixel - near_pixel) <= kLinearInterpEpsilon) {
-      return EstimateDistanceByHeight(far_height, pixel_h);
+    if (!IsValidPixel(near_height_pixel) || !IsValidPixel(far_height_pixel) ||
+        near_height <= 0.0f || far_height <= 0.0f ||
+        std::abs(far_height_pixel - near_height_pixel) <=
+            kLinearInterpEpsilon) {
+      return EstimateDistanceByHeight(far_height, box_height_pixel);
     }
 
     const float t = std::clamp(
-        (pixel_h - near_pixel) / (far_pixel - near_pixel), 0.0f, 1.0f);
+        (box_height_pixel - near_height_pixel) /
+            (far_height_pixel - near_height_pixel),
+        0.0f, 1.0f);
     const float target_height = near_height + t * (far_height - near_height);
-    return EstimateDistanceByHeight(target_height, pixel_h);
+    return EstimateDistanceByHeight(target_height, box_height_pixel);
   }
 
   float
-  EstimateCalibratedDistanceByWidth(float pixel_w,
-                                    const StageTunableParams &params) const {
+  EstimateCalibratedDistanceByWidth(
+      float box_width_pixel, const DistanceCalibrationParams &params) const {
     const float target_width =
-        EstimateCalibratedTargetWidthByPixelWidth(pixel_w, params);
-    return EstimateDistanceByWidth(target_width, pixel_w);
+        EstimateCalibratedTargetWidthByPixelWidth(box_width_pixel, params);
+    return EstimateDistanceByWidth(target_width, box_width_pixel);
   }
 
   float EstimateCalibratedTargetWidthByPixelWidth(
-      float pixel_w, const StageTunableParams &params) const {
+      float box_width_pixel, const DistanceCalibrationParams &params) const {
     const float near_width = params.near_calibration_target_width;
     const float far_width = params.far_calibration_target_width;
-    const float near_pixel = params.near_width_pixel;
-    const float far_pixel = params.far_width_pixel;
+    const float near_width_pixel = params.near_width_pixel;
+    const float far_width_pixel = params.far_width_pixel;
 
-    if (!IsValidPixel(pixel_w)) {
+    if (!IsValidPixel(box_width_pixel)) {
       return 0.0f;
     }
-    if (!IsValidPixel(near_pixel) || !IsValidPixel(far_pixel) ||
+    if (!IsValidPixel(near_width_pixel) || !IsValidPixel(far_width_pixel) ||
         near_width <= 0.0f || far_width <= 0.0f ||
-        std::abs(far_pixel - near_pixel) <= kLinearInterpEpsilon) {
+        std::abs(far_width_pixel - near_width_pixel) <= kLinearInterpEpsilon) {
       return far_width;
     }
 
     const float t = std::clamp(
-        (pixel_w - near_pixel) / (far_pixel - near_pixel), 0.0f, 1.0f);
+        (box_width_pixel - near_width_pixel) /
+            (far_width_pixel - near_width_pixel),
+        0.0f, 1.0f);
     return near_width + t * (far_width - near_width);
   }
 
-  float EstimateDistanceByHeight(float target_height, float pixel_h) const {
+  float EstimateDistanceByHeight(float target_height,
+                                 float box_height_pixel) const {
     if (!std::isfinite(target_height) || target_height <= 0.0f ||
-        !std::isfinite(pixel_h) || pixel_h <= 0.0f ||
+        !std::isfinite(box_height_pixel) || box_height_pixel <= 0.0f ||
         !std::isfinite(focal_y_px_) || focal_y_px_ <= 0.0f) {
       return 0.0f;
     }
-    return (target_height * focal_y_px_) / pixel_h;
+    return (target_height * focal_y_px_) / box_height_pixel;
   }
 
-  float EstimateDistanceByWidth(float target_width, float pixel_w) const {
+  float EstimateDistanceByWidth(float target_width,
+                                float box_width_pixel) const {
     if (!std::isfinite(target_width) || target_width <= 0.0f ||
-        !IsValidPixel(pixel_w) || !std::isfinite(focal_x_px_) ||
+        !IsValidPixel(box_width_pixel) || !std::isfinite(focal_x_px_) ||
         focal_x_px_ <= 0.0f) {
       return 0.0f;
     }
-    return (target_width * focal_x_px_) / pixel_w;
+    return (target_width * focal_x_px_) / box_width_pixel;
+  }
+
+  float SelectDistanceEstimate(const DistanceDebugInfo &distance_debug,
+                               DistanceSource *source) const {
+    const bool has_width_distance = IsValidDistance(distance_debug.width_distance);
+    const bool has_height_distance =
+        IsValidDistance(distance_debug.height_distance);
+
+    if (has_width_distance && has_height_distance) {
+      const float larger_distance =
+          std::max(distance_debug.width_distance, distance_debug.height_distance);
+      const float smaller_distance =
+          std::min(distance_debug.width_distance, distance_debug.height_distance);
+      const float relative_gap =
+          larger_distance > 0.0f
+              ? (larger_distance - smaller_distance) / larger_distance
+              : 1.0f;
+      if (relative_gap <= kDistanceFusionMaxRelativeGap) {
+        if (source != nullptr) {
+          *source = DistanceSource::Fused;
+        }
+        const float height_weight =
+            std::clamp(1.0f - relative_gap / kDistanceFusionMaxRelativeGap,
+                       0.0f, 1.0f) *
+            kDistanceFusionMaxHeightWeight;
+        const float width_weight = 1.0f - height_weight;
+        return width_weight * distance_debug.width_distance +
+               height_weight * distance_debug.height_distance;
+      }
+    }
+
+    if (has_width_distance) {
+      if (source != nullptr) {
+        *source = DistanceSource::Width;
+      }
+      return distance_debug.width_distance;
+    }
+
+    if (has_height_distance) {
+      if (source != nullptr) {
+        *source = DistanceSource::Height;
+      }
+      return distance_debug.height_distance;
+    }
+
+    if (source != nullptr) {
+      *source = DistanceSource::None;
+    }
+    return 0.0f;
   }
 
   float FilterDistance(float raw_distance, const RuntimeSnapshot &params) {
-    if (!has_filtered_distance_ || filtered_distance_ <= 0.0f) {
+    if (!IsValidDistance(raw_distance)) {
+      return 0.0f;
+    }
+
+    if (!has_filtered_distance_ || filtered_distance_ <= 0.0f ||
+        filtered_inverse_distance_ <= 0.0f) {
+      filtered_inverse_distance_ = 1.0f / raw_distance;
       filtered_distance_ = raw_distance;
       has_filtered_distance_ = true;
       return raw_distance;
     }
 
     const float reset_threshold =
-        filtered_distance_ * params.filter_reset_ratio;
+        filtered_distance_ * params.distance_filter_reset_ratio;
     if (std::abs(raw_distance - filtered_distance_) > reset_threshold) {
+      filtered_inverse_distance_ = 1.0f / raw_distance;
       filtered_distance_ = raw_distance;
       return raw_distance;
     }
 
-    filtered_distance_ +=
-        params.distance_filter_alpha * (raw_distance - filtered_distance_);
+    const float raw_inverse_distance = 1.0f / raw_distance;
+    filtered_inverse_distance_ +=
+        params.distance_filter_alpha *
+        (raw_inverse_distance - filtered_inverse_distance_);
+    filtered_distance_ = 1.0f / filtered_inverse_distance_;
     return filtered_distance_;
   }
 
   static RuntimeSnapshot SnapshotCurrentRuntime_() {
     std::lock_guard<std::mutex> lk(ParamsMutex());
     const auto &params = MutableParams();
-    return {StageParams(params, params.active_stage),
-            params.distance_filter_alpha, params.filter_reset_ratio};
+    return {StageDistanceCalibrationParams(params, params.active_stage),
+            params.distance_filter.alpha, params.distance_filter.reset_ratio};
   }
 
-  static StageTunableParams ParamsForStage(CalibrationStage stage) {
+  static DistanceCalibrationParams
+  DistanceCalibrationParamsForStage(CalibrationStage stage) {
     std::lock_guard<std::mutex> lk(ParamsMutex());
-    return StageParams(MutableParams(), stage);
+    return StageDistanceCalibrationParams(MutableParams(), stage);
   }
 
-  static StageTunableParams &StageParams(TunableParams &params,
-                                         CalibrationStage stage) {
-    return stage == CalibrationStage::Stage3 ? params.stage3 : params.stage12;
+  static LaserPitchCompensationParams
+  LaserCompensationParamsForStage(CalibrationStage stage) {
+    std::lock_guard<std::mutex> lk(ParamsMutex());
+    return StageLaserCompensationParams(MutableParams(), stage);
   }
 
-  static const StageTunableParams &StageParams(const TunableParams &params,
-                                               CalibrationStage stage) {
-    return stage == CalibrationStage::Stage3 ? params.stage3 : params.stage12;
+  static DistanceCalibrationParams &
+  StageDistanceCalibrationParams(TunableParams &params,
+                                 CalibrationStage stage) {
+    return stage == CalibrationStage::Stage3
+               ? params.distance_calibration.stage3
+               : params.distance_calibration.stage12;
+  }
+
+  static const DistanceCalibrationParams &
+  StageDistanceCalibrationParams(const TunableParams &params,
+                                 CalibrationStage stage) {
+    return stage == CalibrationStage::Stage3
+               ? params.distance_calibration.stage3
+               : params.distance_calibration.stage12;
+  }
+
+  static const LaserPitchCompensationParams &
+  StageLaserCompensationParams(const TunableParams &params,
+                               CalibrationStage stage) {
+    return stage == CalibrationStage::Stage3
+               ? params.laser_pitch_compensation.stage3
+               : params.laser_pitch_compensation.stage12;
   }
 
   static bool IsValidPixel(float pixel) {
@@ -418,72 +492,12 @@ private:
     return std::isfinite(distance_m) && distance_m > 0.0f;
   }
 
-  static float
-  SelectStage3LaserCompDistance_(const DistanceDebugInfo &distance_debug,
-                                 const StageTunableParams &params) {
-    if (IsValidDistance(distance_debug.width_distance)) {
-      return distance_debug.width_distance;
-    }
-
-    const float min_distance = params.laser_comp_min_distance_m;
-    const float max_distance = params.laser_comp_max_distance_m;
-    if (!IsValidDistance(min_distance) || !IsValidDistance(max_distance)) {
-      return 0.0f;
-    }
-
-    const float low = std::min(min_distance, max_distance);
-    const float high = std::max(min_distance, max_distance);
-    if (!IsValidDistance(distance_debug.used_distance)) {
-      return high;
-    }
-
-    const float mid = 0.5f * (low + high);
-    return distance_debug.used_distance <= mid ? low : high;
-  }
-
   static constexpr float
   CalibrationTargetMetersFromPixel(float horizontal_distance_m, float pixel,
                                    double focal_px) {
     return (horizontal_distance_m > 0.0f && pixel > 0.0f && focal_px > 0.0)
                ? static_cast<float>(horizontal_distance_m * pixel / focal_px)
                : 0.0f;
-  }
-
-  struct TiltAngleDebug {
-    float angle_deg = 0.0f;
-    float expected_height_pixel = 0.0f;
-  };
-
-  TiltAngleDebug
-  CalculateTiltAngleByWidthScale_(float pixel_w, float pixel_h,
-                                  const StageTunableParams &params) const {
-    TiltAngleDebug result{};
-    if (!IsValidPixel(pixel_w) || !IsValidPixel(pixel_h) ||
-        params.tilt_reference_target_length_m <= 0.0f) {
-      return result;
-    }
-
-    if (params.tilt_reference_target_width_m <= 0.0f) {
-      return result;
-    }
-
-    const float meters_per_pixel =
-        params.tilt_reference_target_width_m / pixel_w;
-    if (meters_per_pixel <= 0.0f || !std::isfinite(meters_per_pixel)) {
-      return result;
-    }
-
-    result.expected_height_pixel =
-        params.tilt_reference_target_length_m / meters_per_pixel;
-    if (!IsValidPixel(result.expected_height_pixel)) {
-      result.expected_height_pixel = 0.0f;
-      return result;
-    }
-
-    const float visible_ratio =
-        std::clamp(pixel_h / result.expected_height_pixel, 0.0f, 1.0f);
-    result.angle_deg = std::acos(visible_ratio) * kRadiansToDegrees;
-    return result;
   }
 
   static TunableParams &MutableParams() {
@@ -497,98 +511,82 @@ private:
   }
 
   static const TunableParams &DefaultParams() {
-    // ===== 调参集中区（统一放在文件末尾）=====
+    // ===== 调参集中区：先按功能分组，再在功能内区分 stage =====
     static const TunableParams p{
-        {CalibrationTargetMetersFromPixel(kNearCalibrationHorizontalDistanceM,
-                                          111.982f, CameraData::kFocalY),
-         // stage12 near_calibration_target_height（米，按 near/far pixel 与
-         // 水平距离自动反推）
-         111.982f, // stage12 near_pixel（px）
-         CalibrationTargetMetersFromPixel(kFarCalibrationHorizontalDistanceM,
-                                          47.952f, CameraData::kFocalY),
-         47.952f, // stage12 far_pixel（px）
-         CalibrationTargetMetersFromPixel(kNearCalibrationHorizontalDistanceM,
-                                          105.029f, CameraData::kFocalX),
-         105.029f, // stage12 near_width_pixel（px，未标定时置 0）
-         CalibrationTargetMetersFromPixel(kFarCalibrationHorizontalDistanceM,
-                                          43.274f, CameraData::kFocalX),
-         43.274f, // stage12 far_width_pixel（px，未标定时置 0）
-         0.05f,   // stage12 tilt_reference_target_width_m: 目标理论宽度
-                  // （米），用于由当前 Wpx 反推单像素长度
-         0.05f,   // stage12 tilt_reference_target_length_m: 目标理论长度
-                  // （米），用于由宽度尺度反推倾斜角
-         0.090f,  // stage12 laser_z_offset_m: 激光在相机上方 0.09m
-         14.313f, // stage12 laser_converge_x_m: 光轴交汇前向距离
-         10.0f,   // stage12 laser_comp_min_distance_m
-         24.0f,   // stage12 laser_comp_max_distance_m
-         true,    // stage12 enable_laser_pitch_compensation
-         0.004f, // stage12 laser_target_vertical_trim_m: 目标面整体下移 4mm
-         true,   // stage12 enable_tilt_pitch_correction
-         1.20f,  // stage12 tilt_ratio_deadband_dh_over_dw
-         1.8f,   // stage12 tilt_pitch_correction_gain_deg_per_ratio
-         0.22f}, // stage12 tilt_pitch_correction_max_deg
-
-        {CalibrationTargetMetersFromPixel(kNearCalibrationHorizontalDistanceM,
-                                          102.006f, CameraData::kFocalY),
-         // stage3 near_calibration_target_height（米，按 near/far pixel 与
-         // 水平距离自动反推）
-         102.006f, // stage3 near_pixel（px）
-         CalibrationTargetMetersFromPixel(kFarCalibrationHorizontalDistanceM,
-                                          56.941f, CameraData::kFocalY),
-         56.941f, // stage3 far_pixel（px）
-         CalibrationTargetMetersFromPixel(kNearCalibrationHorizontalDistanceM,
-                                          85.880f, CameraData::kFocalX),
-         85.880f, // stage3 near_width_pixel（px，未标定时置 0）
-         CalibrationTargetMetersFromPixel(kFarCalibrationHorizontalDistanceM,
-                                          49.605f, CameraData::kFocalX),
-         49.605f, // stage3 far_width_pixel（px，未标定时置 0）
-         0.05f,   // stage3 tilt_reference_target_width_m: stage3 独立目标理论宽度
-                  // （米）
-         0.05f,   // stage3 tilt_reference_target_length_m: stage3 独立目标理论长度
-                  // （米）
-         0.090f,  // stage3 laser_z_offset_m: 激光在相机上方 0.09m
-         14.313f, // stage3 laser_converge_x_m: 光轴交汇前向距离
-         10.0f,   // stage3 laser_comp_min_distance_m
-         24.0f,   // stage3 laser_comp_max_distance_m
-         true,    // stage3 enable_laser_pitch_compensation
-         0.004f, // stage3 laser_target_vertical_trim_m: 复用 stage1/2 基础
-                 // 激光偏移角，但不启用高度相关倾斜修正
-         false,  // stage3 enable_tilt_pitch_correction
-         1.03f,   // stage3 tilt_ratio_deadband_dh_over_dw
-         0.0f,    // stage3 tilt_pitch_correction_gain_deg_per_ratio
-         0.0f},   // stage3 tilt_pitch_correction_max_deg
-        0.25f, // distance_filter_alpha: 一阶滤波系数，越大响应越快
-        0.5f,  // filter_reset_ratio: 距离突变超过该比例时重置滤波
+        {
+            {
+                CalibrationTargetMetersFromPixel(
+                    kNearCalibrationHorizontalDistanceM, 111.982f,
+                    CameraData::kFocalY),
+                // stage12 near_calibration_target_height（米，按 height pixel
+                // 与水平距离自动反推）
+                111.982f, // stage12 near_height_pixel（px）
+                CalibrationTargetMetersFromPixel(
+                    kFarCalibrationHorizontalDistanceM, 47.952f,
+                    CameraData::kFocalY),
+                47.952f, // stage12 far_height_pixel（px）
+                CalibrationTargetMetersFromPixel(
+                    kNearCalibrationHorizontalDistanceM, 105.029f,
+                    CameraData::kFocalX),
+                105.029f, // stage12 near_width_pixel（px，未标定时置 0）
+                CalibrationTargetMetersFromPixel(
+                    kFarCalibrationHorizontalDistanceM, 43.274f,
+                    CameraData::kFocalX),
+                43.274f, // stage12 far_width_pixel（px，未标定时置 0）
+            },
+            {
+                CalibrationTargetMetersFromPixel(
+                    kNearCalibrationHorizontalDistanceM, 102.006f,
+                    CameraData::kFocalY),
+                // stage3 near_calibration_target_height（米，按 height pixel
+                // 与水平距离自动反推）
+                102.006f, // stage3 near_height_pixel（px）
+                CalibrationTargetMetersFromPixel(
+                    kFarCalibrationHorizontalDistanceM, 56.941f,
+                    CameraData::kFocalY),
+                56.941f, // stage3 far_height_pixel（px）
+                CalibrationTargetMetersFromPixel(
+                    kNearCalibrationHorizontalDistanceM, 85.880f,
+                    CameraData::kFocalX),
+                85.880f, // stage3 near_width_pixel（px，未标定时置 0）
+                CalibrationTargetMetersFromPixel(
+                    kFarCalibrationHorizontalDistanceM, 49.605f,
+                    CameraData::kFocalX),
+                49.605f, // stage3 far_width_pixel（px，未标定时置 0）
+            },
+        },
+        {
+            {
+                0.090f,  // stage12 laser_z_offset_m: 激光在相机上方 0.09m
+                14.313f, // stage12 laser_converge_x_m: 光轴交汇前向距离
+                10.0f,   // stage12 laser_comp_min_distance_m
+                24.0f,   // stage12 laser_comp_max_distance_m
+                true,    // stage12 enable_laser_pitch_compensation
+                0.004f,  // stage12 laser_target_vertical_trim_m: 目标面下移 4mm
+            },
+            {
+                0.090f,  // stage3 laser_z_offset_m: 激光在相机上方 0.09m
+                14.313f, // stage3 laser_converge_x_m: 光轴交汇前向距离
+                10.0f,   // stage3 laser_comp_min_distance_m
+                24.0f,   // stage3 laser_comp_max_distance_m
+                true,    // stage3 enable_laser_pitch_compensation
+                0.004f,  // stage3 laser_target_vertical_trim_m
+            },
+        },
+        {
+            0.25f, // distance_filter.alpha: 一阶滤波系数，越大响应越快
+            0.5f,  // distance_filter.reset_ratio: 距离突变超过该比例时重置
+        },
         CalibrationStage::Stage12 // active_stage: 当前使用的标定阶段
     };
     return p;
   }
 
-  static float
-  CalculateTiltPitchCorrectionDeg(const DistanceDebugInfo &distance_debug,
-                                  const StageTunableParams &params) {
-    if (!params.enable_tilt_pitch_correction) {
-      return 0.0f;
-    }
-
-    const float tilt_ratio = CalculateTiltRatioDhOverDw(distance_debug);
-    if (!std::isfinite(tilt_ratio) ||
-        tilt_ratio <= params.tilt_ratio_deadband_dh_over_dw) {
-      return 0.0f;
-    }
-
-    const float raw_correction_deg =
-        (tilt_ratio - params.tilt_ratio_deadband_dh_over_dw) *
-        params.tilt_pitch_correction_gain_deg_per_ratio;
-    return std::clamp(raw_correction_deg, 0.0f,
-                      params.tilt_pitch_correction_max_deg);
-  }
-
   bool has_filtered_distance_ = false;
   float filtered_distance_ = 0.0f;
-  CameraData camera_data_;
-  float focal_x_px_ = camera_data_.cameraMatrix.at<double>(0, 0);
-  float focal_y_px_ = camera_data_.cameraMatrix.at<double>(1, 1);
+  float filtered_inverse_distance_ = 0.0f;
+  float focal_x_px_ = static_cast<float>(CameraData::kFocalX);
+  float focal_y_px_ = static_cast<float>(CameraData::kFocalY);
 };
 
 } // namespace Tools

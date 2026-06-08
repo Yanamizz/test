@@ -33,7 +33,6 @@
 #include "Tools/CpuAffinity.hpp"
 #include "Tools/FpsCounter.hpp"
 #include "Tools/LaserAngleCalculate.hpp"
-#include "Tools/LostTargetRecoveryController.hpp"
 #include "Tools/RuntimeParamProfiles.hpp"
 #include "Tools/RuntimeParams.hpp"
 #include "Tools/RuntimeStats.hpp"
@@ -55,12 +54,6 @@ using Tools::PrintPixelSizeStats;
 using Tools::PrintSerialLatencyStats;
 
 using Tools::AimbotSendCommand;
-
-struct TrackedTargetAbsoluteAngles {
-  bool valid = false;
-  float yaw = 0.0f;
-  float pitch = 0.0f;
-};
 
 static float ApplyErrorVelocityFeedforward(float measured_velocity_deg_per_sec,
                                            float angle_error_deg,
@@ -292,17 +285,6 @@ static void PrintPredictSettings(
   print_scan_profile(stage12_profile);
   const auto stage3_profile = StageProfile(Tools::RuntimeStage::Stage3);
   print_scan_profile(stage3_profile);
-  std::cout << "[扫描模式] " << stage3_profile.DisplayName()
-            << " 丢失续行: " << stage3_profile.lost_target_coast.duration_ms
-            << " ms，yaw_speed="
-            << stage3_profile.lost_target_coast.yaw_speed_deg_per_sec
-            << " deg/s，pitch_speed="
-            << stage3_profile.lost_target_coast.pitch_speed_deg_per_sec
-            << " deg/s，reacquire_delay="
-            << stage3_profile.lost_target_coast.reacquire_confirm_ms
-            << " ms，reacquire_gate="
-            << stage3_profile.lost_target_coast.reacquire_gate_deg << " deg"
-            << std::endl;
   std::cout << "[异常图片保存] 启用: "
             << (enable_save_no_target_images ? "true" : "false") << std::endl;
   std::cout << "[目标视频保存] 启用: "
@@ -372,7 +354,7 @@ static void AddSendLatencySample(
 static int
 ResolveLaserJudgeClassId(const ImageRecognize::PredictResult &result) {
   for (const auto &box : result.boxes) {
-    const int class_id = static_cast<int>(box[5]);
+    const int class_id = ImageRecognize::BoxClassId(box);
     if (ImageRecognize::AerialRobotLaserLockJudge::IsPurpleClassId(class_id)) {
       return class_id;
     }
@@ -381,13 +363,13 @@ ResolveLaserJudgeClassId(const ImageRecognize::PredictResult &result) {
   if (result.boxes.empty()) {
     return -1;
   }
-  return static_cast<int>(result.boxes.front()[5]);
+  return ImageRecognize::BoxClassId(result.boxes.front());
 }
 
 static void
 NormalizeStage3PredictResult(ImageRecognize::PredictResult *result) {
   for (auto &box : result->boxes) {
-    box[5] = 3.0f;
+    ImageRecognize::SetBoxClassId(&box, 3);
   }
 }
 
@@ -809,8 +791,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   static Tools::AngleCalculator
       angle_calculator; // 持久化 AngleCalculator，避免每次调用时重置 lastTime
   static Tools::DistanceCalculator distance_calculator;
-  static Tools::Stage12LaserPitchCompStabilizer
-      stage12_laser_pitch_comp_stabilizer;
+  static Tools::LaserPitchCompStabilizer laser_pitch_comp_stabilizer;
   static ImageRecognize::TargetTrackPipeline target_track_pipeline;
   static ImageRecognize::AerialRobotLaserLockJudge aerial_robot_stage_judge;
   static ImageRecognize::Stage3FallbackController stage3_fallback_controller;
@@ -864,7 +845,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
   std::uint64_t ui_frame_counter = 0;
   const auto scan_trigger_delay = std::chrono::milliseconds(
       std::max(0, Tools::Params().scan_trigger_delay_ms));
-  const auto stage3_profile = StageProfile(Tools::RuntimeStage::Stage3);
   const auto stage3_fallback_config =
       Tools::MakeStage3FallbackControllerConfig();
   stage3_fallback_controller.SetConfig(stage3_fallback_config);
@@ -924,14 +904,12 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           : std::chrono::steady_clock::duration::zero();
   std::chrono::steady_clock::time_point next_infer_submit_time =
       std::chrono::steady_clock::now();
-  Tools::LostTargetRecoveryController lost_target_recovery_controller;
 
   const auto reset_tracking_state = [&]() {
     target_track_pipeline.Reset();
     distance_calculator.ResetFilter();
-    stage12_laser_pitch_comp_stabilizer.Reset();
+    laser_pitch_comp_stabilizer.Reset();
     stage3_fallback_controller.Reset();
-    lost_target_recovery_controller.Reset();
     stage3_probe_no_target_since_initialized = false;
     stage_judge_tick_initialized = false;
     stage_tick_has_purple_observation = false;
@@ -1027,6 +1005,8 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
     const auto frame_ts = inflight_frame_ts;
     ImageRecognize::OverlayData overlay_data{};
+    overlay_data.show_scan_state_debug = true;
+    overlay_data.scan_active = g_aimbot_command_arbiter.ScanMode();
 
     ImageRecognize::PredictResult result;
     SerialTask::EulerAngles matched_imu{};
@@ -1136,7 +1116,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       }
     }
 
-    std::array<float, 6> tracked_box{};
+    ImageRecognize::DetectionBox tracked_box{};
     bool has_tracked_box = false;
     const auto t_select_start = ProfileNow(enable_latency_profile);
     target_camp_mode = target_camp_mode_controller.Get();
@@ -1144,7 +1124,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         stage_predictor_controller.UsingStage3Predictor();
     if (target_camp_mode != last_target_camp_mode) {
       target_track_pipeline.Reset();
-      stage12_laser_pitch_comp_stabilizer.Reset();
+      laser_pitch_comp_stabilizer.Reset();
       last_target_camp_mode = target_camp_mode;
       std::cout << "[跟踪阵营] 切换为 "
                 << ImageRecognize::ToString(target_camp_mode) << std::endl;
@@ -1181,7 +1161,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
           g_aimbot_laser_state_controller.SetCurrentStage(
               ImageRecognize::AerialRobotLaserLockJudge::kInitialStage + 1);
           stage3_fallback_controller.Reset();
-          lost_target_recovery_controller.Reset();
           ClearPendingSend();
           stage3_probe_no_target_since_initialized = false;
 
@@ -1198,27 +1177,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       stage3_probe_no_target_since_initialized = false;
     }
 
-    TrackedTargetAbsoluteAngles tracked_target_absolute_angles{};
-    if (track_pipeline_result.has_tracked_box && has_matched_imu) {
-      const cv::Point2f tracked_center =
-          ImageRecognize::BoxCenter(track_pipeline_result.tracked_box);
-      const auto [tracked_absolute_yaw, tracked_absolute_pitch] =
-          angle_calculator.CalculateAbsoluteAnglesWithoutFilter(
-              tracked_center.x, tracked_center.y, matched_imu.yaw,
-              matched_imu.pitch);
-      tracked_target_absolute_angles.valid = true;
-      tracked_target_absolute_angles.yaw = tracked_absolute_yaw;
-      tracked_target_absolute_angles.pitch = tracked_absolute_pitch;
-    }
-    const bool accept_tracked_target =
-        lost_target_recovery_controller.ShouldAcceptTrackedTarget(
-            Tools::LostTargetRecoveryController::ReacquireCheckInput{
-                using_stage3_predictor, track_pipeline_result.has_tracked_box,
-                tracked_target_absolute_angles.valid,
-                tracked_target_absolute_angles.pitch,
-                tracked_target_absolute_angles.yaw, now,
-                stage3_profile.lost_target_coast});
-
     if (!track_alive &&
         stage_predictor_controller.ShouldSwitchToStage3AfterLostTarget(
             target_lost_since_initialized, now, target_lost_since)) {
@@ -1230,7 +1188,7 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       continue;
     }
 
-    if (track_pipeline_result.has_tracked_box && accept_tracked_target) {
+    if (track_pipeline_result.has_tracked_box) {
       tracked_box = track_pipeline_result.tracked_box;
       has_tracked_box = true;
     }
@@ -1260,11 +1218,15 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
     if (has_tracked_box) {
       if (track_result.has_box) {
         overlay_data.show_detection_center = true;
-        overlay_data.detection_center =
+        const auto detection_center =
             ImageRecognize::BoxCenter(track_result.box);
+        overlay_data.detection_center =
+            cv::Point2f{detection_center.x, detection_center.y};
       }
 
-      const cv::Point2f tracked_center = ImageRecognize::BoxCenter(tracked_box);
+      const auto tracked_box_center = ImageRecognize::BoxCenter(tracked_box);
+      const cv::Point2f tracked_center{tracked_box_center.x,
+                                       tracked_box_center.y};
       overlay_data.show_tracked_center = true;
       overlay_data.tracked_center = tracked_center;
 
@@ -1281,7 +1243,10 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
       overlay_data.box_width_px = width;
       overlay_data.box_height_px = height;
       const auto distance_debug = distance_calculator.CalculateDistanceWithDebug(
-          distance_box[0], distance_box[1], distance_box[2], distance_box[3]);
+          ImageRecognize::BoxX1(distance_box),
+          ImageRecognize::BoxY1(distance_box),
+          ImageRecognize::BoxX2(distance_box),
+          ImageRecognize::BoxY2(distance_box));
       const float distance = distance_debug.used_distance;
       g_aimbot_laser_state_controller.UpdateDistanceFlags(
           distance, &aerial_robot_stage_judge);
@@ -1291,16 +1256,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
         overlay_data.show_distance_debug = true;
         overlay_data.width_distance = distance_debug.width_distance;
         overlay_data.height_distance = distance_debug.height_distance;
-        overlay_data.tilt_ratio_dh_over_dw =
-            distance_debug.tilt_ratio_dh_over_dw;
-        overlay_data.tilt_angle_deg = distance_debug.tilt_angle_deg;
-        overlay_data.expected_height_pixel_from_width =
-            distance_debug.expected_height_pixel_from_width;
-        overlay_data.tilt_ratio_deadband_dh_over_dw =
-            Tools::DistanceCalculator::CurrentTiltRatioDeadbandDhOverDw();
-        overlay_data.tilt_pitch_correction_deg =
-            Tools::DistanceCalculator::CalculateTiltPitchCorrectionDeg(
-                distance_debug);
         overlay_data.distance_source =
             Tools::DistanceCalculator::DistanceSourceName(
                 distance_debug.source);
@@ -1338,12 +1293,11 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
             Tools::DistanceCalculator::CalculateLaserPitchCompensationDeg(
                 distance_debug, offset_pitch_angle);
         const float laser_pitch_comp_deg =
-            using_stage3_predictor
-                ? (stage12_laser_pitch_comp_stabilizer.Reset(),
-                   laser_pitch_comp_deg_raw)
-                : stage12_laser_pitch_comp_stabilizer.Filter(
-                      laser_pitch_comp_deg_raw,
-                      has_realtime_frame_dt ? frame_dt : 0.0);
+            laser_pitch_comp_stabilizer.Filter(
+                laser_pitch_comp_deg_raw,
+                has_realtime_frame_dt ? frame_dt : 0.0);
+        overlay_data.show_laser_pitch_comp_debug = true;
+        overlay_data.laser_pitch_comp_deg = laser_pitch_comp_deg;
         const float delta_yaw_raw =
             Tools::NormalizeDeltaDeg(static_cast<float>(offset_yaw_angle));
         float delta_pitch_raw = Tools::NormalizeDeltaDeg(
@@ -1368,6 +1322,9 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
 
           const float send_abs_yaw = matched_imu.yaw + cmd_delta_yaw;
           const float send_abs_pitch = matched_imu.pitch + cmd_delta_pitch;
+          overlay_data.show_absolute_angle_debug = true;
+          overlay_data.absolute_yaw_deg = send_abs_yaw;
+          overlay_data.absolute_pitch_deg = send_abs_pitch;
           const float cmd_yaw_velocity = ApplyErrorVelocityFeedforward(
               yaw_velocity, cmd_delta_yaw,
               yaw_velocity_feedforward_error_threshold_deg,
@@ -1389,11 +1346,6 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
             g_stage3_auto_scan_bounds_controller.UpdateFromStage12Target(
                 filtered_yaw, filtered_pitch);
           }
-          if (using_stage3_predictor) {
-            lost_target_recovery_controller.PrepareStage3Coast(
-                true, send_abs_pitch, send_abs_yaw, cmd_pitch_velocity,
-                cmd_yaw_velocity, stage3_profile.lost_target_coast);
-          }
           AddLatencySample(enable_latency_profile, latency_total,
                            latency_window, &LatencyStats::result_to_control_ns,
                            infer_end_time, command_enqueue_time);
@@ -1406,38 +1358,19 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor,
                          &LatencyStats::control_calc_ns, t_control_start,
                          t_control_end);
       } else {
-        stage12_laser_pitch_comp_stabilizer.Reset();
+        laser_pitch_comp_stabilizer.Reset();
         if (!fallback_motor_probe_active) {
           ClearPendingSend();
         }
       }
     } else {
-      stage12_laser_pitch_comp_stabilizer.Reset();
+      laser_pitch_comp_stabilizer.Reset();
       if (!fallback_motor_probe_active) {
-        const auto recovery_result = lost_target_recovery_controller.Update(
-            Tools::LostTargetRecoveryController::UpdateInput{
-                using_stage3_predictor, has_matched_imu, matched_imu,
-                track_alive, track_result.has_box, enable_scan_mode,
-                target_lost_since_initialized, now, target_lost_since,
-                scan_trigger_delay, stage3_profile.lost_target_coast,
-                max_send_delta_deg, pitch_abs_limit});
-        if (recovery_result.has_command) {
-          const auto command_enqueue_time = std::chrono::steady_clock::now();
-          StorePendingSend(
-              AimbotSendCommand{recovery_result.command.absolute_pitch,
-                                recovery_result.command.absolute_yaw,
-                                recovery_result.command.offset_pitch,
-                                recovery_result.command.offset_yaw,
-                                recovery_result.command.pitch_velocity,
-                                recovery_result.command.yaw_velocity, 0x01,
-                                frame_ts, command_enqueue_time});
-        } else if (recovery_result.pending_action ==
-                   Tools::LostTargetRecoveryController::PendingAction::
-                       StartScanMode) {
+        if (enable_scan_mode && has_matched_imu && !track_alive &&
+            target_lost_since_initialized &&
+            (now - target_lost_since) >= scan_trigger_delay) {
           StartScanMode();
-        } else if (recovery_result.pending_action ==
-                   Tools::LostTargetRecoveryController::PendingAction::
-                       ClearPendingSend) {
+        } else {
           ClearPendingSend();
         }
       }

@@ -1,6 +1,10 @@
 /**
  * @file    include/Tools/RuntimeParamProfiles.hpp
  * @brief   将 RuntimeParams 中常一起使用的参数组装成小配置快照。
+ *
+ * 该文件把默认参数中属于同一功能面的字段整理成更小的只读 profile，例如
+ * 阶段切换、扫描、时序容差或保存策略。这样调用侧可以依赖语义明确的配置块，
+ * 减少到处直接访问 RuntimeParams 大结构带来的耦合。
  */
 
 #pragma once

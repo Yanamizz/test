@@ -1,9 +1,15 @@
 /**
  * @file    include/Tools/AngleCalculate.hpp
  * @brief   根据图像目标位置计算云台绝对角度，并集成多种角度滤波策略。
+ *
+ * AngleCalculator 将目标像素坐标、相机内参、ROI 主点补偿和匹配 IMU 姿态转换
+ * 为云台绝对 yaw/pitch，并可选择 One Euro、KF、EKF、UKF、CKF 等滤波器输出
+ * 角度与角速度。激光 pitch 补偿不在这里计算，而是在距离链路之后叠加。
  */
 
 #pragma once
+#include <opencv2/core.hpp>
+
 #include <chrono>
 #include <cmath>
 #include <string>
@@ -91,7 +97,6 @@ public:
     return Params().default_filter_type;
   }
 
-  CameraData cameraData;
   AngleCommand CalculateAbsoluteAnglesWithVelocity(float targetX, float targetY,
                                                    float currentYaw,
                                                    float currentPitch,
@@ -187,10 +192,10 @@ public:
   cv::Point2f AbsoluteAnglesToPixel(float absoluteYaw, float absolutePitch,
                                     float currentYaw,
                                     float currentPitch) const {
-    const double fx = cameraData.cameraMatrix.at<double>(0, 0);
-    const double fy = cameraData.cameraMatrix.at<double>(1, 1);
-    const double cx = cameraData.cameraMatrix.at<double>(0, 2);
-    const double cy = cameraData.cameraMatrix.at<double>(1, 2);
+    const double fx = CameraData::kFocalX;
+    const double fy = CameraData::kFocalY;
+    const double cx = CameraData::kPrincipalX;
+    const double cy = CameraData::kPrincipalY;
     const double roi_adjusted_cx =
         Tools::CameraRoiRuntimeEnabled()
             ? (cx - static_cast<double>(Tools::CameraRoiRuntimeOffsetX()))
@@ -216,10 +221,10 @@ private:
   std::pair<double, double>
   ComputeRawAbsoluteAngles_(float targetX, float targetY, float currentYaw,
                             float currentPitch) const {
-    const double fx = cameraData.cameraMatrix.at<double>(0, 0);
-    const double fy = cameraData.cameraMatrix.at<double>(1, 1);
-    double cx = cameraData.cameraMatrix.at<double>(0, 2);
-    double cy = cameraData.cameraMatrix.at<double>(1, 2);
+    const double fx = CameraData::kFocalX;
+    const double fy = CameraData::kFocalY;
+    double cx = CameraData::kPrincipalX;
+    double cy = CameraData::kPrincipalY;
     if (Tools::CameraRoiRuntimeEnabled()) {
       cx -= static_cast<double>(Tools::CameraRoiRuntimeOffsetX());
       cy -= static_cast<double>(Tools::CameraRoiRuntimeOffsetY());

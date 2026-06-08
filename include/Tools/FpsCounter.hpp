@@ -1,6 +1,9 @@
 /**
  * @file    include/Tools/FpsCounter.hpp
  * @brief   提供固定时间窗口下的实时帧率统计能力。
+ *
+ * FpsCounter 通过帧计数和时间窗口估算当前处理 FPS，供显示叠加和运行日志使用。
+ * 它不参与推理节流，推理提交频率限制由主流程的运行参数和调度逻辑处理。
  */
 
 #pragma once

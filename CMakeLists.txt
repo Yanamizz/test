@@ -79,7 +79,7 @@ foreach(src ${SRCS})
         )
     endif()
 
-    if(name_we STREQUAL "ImagePredict" OR name_we STREQUAL "OpenvinoTest")
+    if(name_we STREQUAL "ImagePredict")
         if(OpenVINO_FOUND)
             target_link_libraries(${name_we}
                 openvino::runtime

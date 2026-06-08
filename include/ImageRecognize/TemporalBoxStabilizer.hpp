@@ -1,14 +1,17 @@
 /**
  * @file    include/ImageRecognize/TemporalBoxStabilizer.hpp
  * @brief   提供跨帧检测框稳定能力，用于抑制高频框抖动。
+ *
+ * TemporalBoxStabilizer 通过门控和 One Euro Filter 平滑检测框中心与尺寸，
+ * 仅在确认仍是同一目标时更新滤波状态。当前主要用于 stage3 小画幅场景，
+ * 目标是在不明显增加跟随滞后的前提下降低框抖动导致的角度和距离波动。
  */
 
 #pragma once
 
 #include <algorithm>
-#include <array>
-#include <cmath>
 
+#include "ImageRecognize/OutputDataProcess.hpp"
 #include "KalmanFilter/OneEuroFilter.hpp"
 
 namespace ImageRecognize {
@@ -95,20 +98,20 @@ class TemporalBoxStabilizer {
     ResetFilters_();
   }
 
-  std::array<float, 6> Update(const std::array<float, 6> &raw_box,
-                              bool matched_history, double dt = -1.0) {
+  DetectionBox Update(const DetectionBox &raw_box, bool matched_history,
+                      double dt = -1.0) {
     if (!initialized_ || !matched_history ||
-        static_cast<int>(stable_box_[5]) != static_cast<int>(raw_box[5])) {
+        BoxClassId(stable_box_) != BoxClassId(raw_box)) {
       stable_box_ = raw_box;
       initialized_ = true;
       SeedFiltersFromBox_(raw_box, dt);
       return stable_box_;
     }
 
-    const float iou = BoxIou_(stable_box_, raw_box);
+    const float iou = BoxIoU(stable_box_, raw_box);
     const float center_distance_ratio =
-        CenterDistanceRatio_(stable_box_, raw_box);
-    const float area_ratio = AreaRatio_(stable_box_, raw_box);
+        BoxCenterDistanceRatio(stable_box_, raw_box);
+    const float area_ratio = BoxAreaRatio(stable_box_, raw_box);
     const bool area_ratio_ok =
         area_ratio >= (1.0f / std::max(params_.max_area_ratio, 1.01f)) &&
         area_ratio <= std::max(params_.max_area_ratio, 1.01f);
@@ -138,7 +141,8 @@ class TemporalBoxStabilizer {
         1.0f,
         static_cast<float>(height_filter_.filter(clamped_height_measurement, dt)));
 
-    stable_box_ = FromBoxState_(filtered_state, raw_box[4], raw_box[5]);
+    stable_box_ =
+        FromBoxState_(filtered_state, BoxScore(raw_box), BoxClassId(raw_box));
     initialized_ = true;
     return stable_box_;
   }
@@ -151,70 +155,18 @@ class TemporalBoxStabilizer {
     float height = 0.0f;
   };
 
-  static float Saturate_(float value) {
-    return std::clamp(value, 0.0f, 1.0f);
+  static BoxState ToBoxState_(const DetectionBox &box) {
+    const BoxCenterPoint center = BoxCenter(box);
+    return {center.x, center.y, BoxWidth(box), BoxHeight(box)};
   }
 
-  static float BoxWidth_(const std::array<float, 6> &box) {
-    return std::max(0.0f, box[2] - box[0]);
-  }
-
-  static float BoxHeight_(const std::array<float, 6> &box) {
-    return std::max(0.0f, box[3] - box[1]);
-  }
-
-  static float BoxArea_(const std::array<float, 6> &box) {
-    return BoxWidth_(box) * BoxHeight_(box);
-  }
-
-  static float BoxIou_(const std::array<float, 6> &a,
-                       const std::array<float, 6> &b) {
-    const float xx1 = std::max(a[0], b[0]);
-    const float yy1 = std::max(a[1], b[1]);
-    const float xx2 = std::min(a[2], b[2]);
-    const float yy2 = std::min(a[3], b[3]);
-    const float inter_w = std::max(0.0f, xx2 - xx1);
-    const float inter_h = std::max(0.0f, yy2 - yy1);
-    const float inter = inter_w * inter_h;
-    const float uni = BoxArea_(a) + BoxArea_(b) - inter;
-    return uni > 0.0f ? (inter / uni) : 0.0f;
-  }
-
-  static float CenterDistanceRatio_(const std::array<float, 6> &reference,
-                                    const std::array<float, 6> &candidate) {
-    const float ref_cx = 0.5f * (reference[0] + reference[2]);
-    const float ref_cy = 0.5f * (reference[1] + reference[3]);
-    const float cand_cx = 0.5f * (candidate[0] + candidate[2]);
-    const float cand_cy = 0.5f * (candidate[1] + candidate[3]);
-    const float dx = cand_cx - ref_cx;
-    const float dy = cand_cy - ref_cy;
-    const float center_distance = std::sqrt(dx * dx + dy * dy);
-
-    const float ref_w = std::max(1.0f, BoxWidth_(reference));
-    const float ref_h = std::max(1.0f, BoxHeight_(reference));
-    const float ref_diag = std::sqrt(ref_w * ref_w + ref_h * ref_h);
-    return center_distance / std::max(1.0f, 0.5f * ref_diag);
-  }
-
-  static float AreaRatio_(const std::array<float, 6> &reference,
-                          const std::array<float, 6> &candidate) {
-    const float ref_area = std::max(1.0f, BoxArea_(reference));
-    const float cand_area = std::max(1.0f, BoxArea_(candidate));
-    return cand_area / ref_area;
-  }
-
-  static BoxState ToBoxState_(const std::array<float, 6> &box) {
-    const float width = BoxWidth_(box);
-    const float height = BoxHeight_(box);
-    return {0.5f * (box[0] + box[2]), 0.5f * (box[1] + box[3]), width, height};
-  }
-
-  static std::array<float, 6> FromBoxState_(const BoxState &state, float score,
-                                            float class_id) {
+  static DetectionBox FromBoxState_(const BoxState &state, float score,
+                                    int class_id) {
     const float half_width = 0.5f * state.width;
     const float half_height = 0.5f * state.height;
-    return {state.cx - half_width, state.cy - half_height,
-            state.cx + half_width, state.cy + half_height, score, class_id};
+    return MakeDetectionBox(state.cx - half_width, state.cy - half_height,
+                            state.cx + half_width, state.cy + half_height,
+                            score, class_id);
   }
 
   float ClampHeightMeasurement_(float stable_height, float raw_height) const {
@@ -235,7 +187,7 @@ class TemporalBoxStabilizer {
     height_filter_.reset();
   }
 
-  void SeedFiltersFromBox_(const std::array<float, 6> &box, double dt) {
+  void SeedFiltersFromBox_(const DetectionBox &box, double dt) {
     ResetFilters_();
     const BoxState state = ToBoxState_(box);
     center_x_filter_.filter(state.cx, dt);
@@ -250,7 +202,7 @@ class TemporalBoxStabilizer {
   Tools::OneEuroFilter width_filter_;
   Tools::OneEuroFilter height_filter_;
   bool initialized_ = false;
-  std::array<float, 6> stable_box_{};
+  DetectionBox stable_box_{};
 };
 
 inline TemporalBoxStabilizerParams::TemporalBoxStabilizerParams()

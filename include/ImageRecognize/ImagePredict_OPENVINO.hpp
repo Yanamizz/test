@@ -1,6 +1,10 @@
 /**
  * @file    include/ImageRecognize/ImagePredict_OPENVINO.hpp
  * @brief   提供基于 OpenVINO 的目标检测推理、异步推理与结果后处理能力。
+ *
+ * ImagePredict 封装模型加载、OpenVINO 编译配置、输入预处理、异步推理提交、
+ * NMS/框过滤和结果解码。该模块是 stage1/2 与 stage3 模型共用的推理入口，
+ * 可按配置启用 stage3 轻量光照预处理，并尽量把线程数策略保持在低延迟取向。
  */
 
 #pragma once
@@ -11,7 +15,6 @@
 #include <opencv2/opencv.hpp>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -405,8 +408,9 @@ private:
             result.boxes.begin(),
             result.boxes.begin() + static_cast<std::ptrdiff_t>(top_k),
             result.boxes.end(),
-            [](const std::array<float, 6> &lhs,
-               const std::array<float, 6> &rhs) { return lhs[4] > rhs[4]; });
+            [](const DetectionBox &lhs, const DetectionBox &rhs) {
+              return BoxScore(lhs) > BoxScore(rhs);
+            });
         result.boxes.resize(top_k);
       }
     }
@@ -415,25 +419,8 @@ private:
     return result;
   }
 
-  static float boxIou_(const std::array<float, 6> &a,
-                       const std::array<float, 6> &b) {
-    const float xx1 = std::max(a[0], b[0]);
-    const float yy1 = std::max(a[1], b[1]);
-    const float xx2 = std::min(a[2], b[2]);
-    const float yy2 = std::min(a[3], b[3]);
-    const float inter_w = std::max(0.0f, xx2 - xx1);
-    const float inter_h = std::max(0.0f, yy2 - yy1);
-    const float inter = inter_w * inter_h;
-    const float area_a =
-        std::max(0.0f, a[2] - a[0]) * std::max(0.0f, a[3] - a[1]);
-    const float area_b =
-        std::max(0.0f, b[2] - b[0]) * std::max(0.0f, b[3] - b[1]);
-    const float uni = area_a + area_b - inter;
-    return uni > 0.0f ? (inter / uni) : 0.0f;
-  }
-
-  std::vector<std::array<float, 6>>
-  mergeAndFilterBoxes_(const std::vector<std::array<float, 6>> &boxes) const {
+  std::vector<DetectionBox>
+  mergeAndFilterBoxes_(const std::vector<DetectionBox> &boxes) const {
     if (boxes.size() <= 1) {
       return boxes;
     }
@@ -441,12 +428,12 @@ private:
     std::vector<int> order(boxes.size());
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&](int lhs, int rhs) {
-      return boxes[static_cast<std::size_t>(lhs)][4] >
-             boxes[static_cast<std::size_t>(rhs)][4];
+      return BoxScore(boxes[static_cast<std::size_t>(lhs)]) >
+             BoxScore(boxes[static_cast<std::size_t>(rhs)]);
     });
 
     std::vector<char> consumed(boxes.size(), 0);
-    std::vector<std::array<float, 6>> merged;
+    std::vector<DetectionBox> merged;
     merged.reserve(boxes.size());
 
     for (std::size_t order_idx = 0; order_idx < order.size(); ++order_idx) {
@@ -456,13 +443,13 @@ private:
       }
 
       const auto &seed_box = boxes[seed_pos];
-      const int seed_class = static_cast<int>(seed_box[5]);
+      const int seed_class = BoxClassId(seed_box);
       float weight_sum = 0.0f;
       float x1_sum = 0.0f;
       float y1_sum = 0.0f;
       float x2_sum = 0.0f;
       float y2_sum = 0.0f;
-      float best_score = seed_box[4];
+      float best_score = BoxScore(seed_box);
 
       for (std::size_t candidate_order_idx = order_idx;
            candidate_order_idx < order.size(); ++candidate_order_idx) {
@@ -473,20 +460,20 @@ private:
         }
 
         const auto &candidate_box = boxes[candidate_pos];
-        if (static_cast<int>(candidate_box[5]) != seed_class) {
+        if (BoxClassId(candidate_box) != seed_class) {
           continue;
         }
-        if (boxIou_(seed_box, candidate_box) < Params().merge_iou_thresh) {
+        if (BoxIoU(seed_box, candidate_box) < Params().merge_iou_thresh) {
           continue;
         }
 
-        const float weight = std::max(candidate_box[4], 1e-6f);
+        const float weight = std::max(BoxScore(candidate_box), 1e-6f);
         weight_sum += weight;
-        x1_sum += candidate_box[0] * weight;
-        y1_sum += candidate_box[1] * weight;
-        x2_sum += candidate_box[2] * weight;
-        y2_sum += candidate_box[3] * weight;
-        best_score = std::max(best_score, candidate_box[4]);
+        x1_sum += BoxX1(candidate_box) * weight;
+        y1_sum += BoxY1(candidate_box) * weight;
+        x2_sum += BoxX2(candidate_box) * weight;
+        y2_sum += BoxY2(candidate_box) * weight;
+        best_score = std::max(best_score, BoxScore(candidate_box));
         consumed[candidate_pos] = 1;
       }
 
@@ -494,23 +481,23 @@ private:
         continue;
       }
 
-      merged.push_back({x1_sum / weight_sum, y1_sum / weight_sum,
-                        x2_sum / weight_sum, y2_sum / weight_sum, best_score,
-                        static_cast<float>(seed_class)});
+      merged.push_back(MakeDetectionBox(
+          x1_sum / weight_sum, y1_sum / weight_sum, x2_sum / weight_sum,
+          y2_sum / weight_sum, best_score, seed_class));
     }
 
     std::sort(merged.begin(), merged.end(),
-              [](const std::array<float, 6> &lhs,
-                 const std::array<float, 6> &rhs) { return lhs[4] > rhs[4]; });
+              [](const DetectionBox &lhs, const DetectionBox &rhs) {
+                return BoxScore(lhs) > BoxScore(rhs);
+              });
 
-    std::vector<std::array<float, 6>> filtered;
+    std::vector<DetectionBox> filtered;
     filtered.reserve(std::min(merged.size(), Params().max_output_boxes));
     for (const auto &candidate_box : merged) {
       bool overlaps_kept = false;
       for (const auto &kept_box : filtered) {
-        if (static_cast<int>(candidate_box[5]) ==
-                static_cast<int>(kept_box[5]) &&
-            boxIou_(candidate_box, kept_box) >= Params().suppress_iou_thresh) {
+        if (BoxClassId(candidate_box) == BoxClassId(kept_box) &&
+            BoxIoU(candidate_box, kept_box) >= Params().suppress_iou_thresh) {
           overlaps_kept = true;
           break;
         }
@@ -559,8 +546,8 @@ private:
       return;
     }
 
-    result.boxes.push_back({scaled_x1, scaled_y1, scaled_x2, scaled_y2, score,
-                            static_cast<float>(class_id)});
+    result.boxes.push_back(MakeDetectionBox(scaled_x1, scaled_y1, scaled_x2,
+                                            scaled_y2, score, class_id));
   }
 
   OutputSpec inferOutputSpecFromShape_(const ov::Shape &shape) const {

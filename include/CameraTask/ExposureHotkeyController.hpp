@@ -1,6 +1,11 @@
 /**
  * @file    include/CameraTask/ExposureHotkeyController.hpp
  * @brief   管理多阶段曝光参数、热键切换状态以及运行时曝光配置读写。
+ *
+ * ExposureHotkeyController 保存 stage1/2 与 stage3 的曝光时间，负责处理
+ * GUI/键盘触发的编辑阶段切换、曝光增减请求和 camera_runtime_params.ini
+ * 持久化。调用侧通过它读取当前激活曝光或编辑曝光，实际相机参数写入仍
+ * 由采集线程在安全时机执行。
  */
 
 #pragma once

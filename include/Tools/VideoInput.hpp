@@ -1,6 +1,10 @@
 /**
  * @file    include/Tools/VideoInput.hpp
  * @brief   命令行视频输入的路径解析、格式判断与打开工具。
+ *
+ * VideoInput 支持把 ImagePredict 从实机相机切换到本地视频文件，用于离线复现、
+ * 回放调参和算法验证。该模块负责路径存在性、扩展名判断和 OpenCV VideoCapture
+ * 打开，不改变后续推理、跟踪和控制链路。
  */
 
 #pragma once

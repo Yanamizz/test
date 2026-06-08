@@ -1,10 +1,66 @@
 # Latest Handoff
 
 用途：记录最近一次交接结论与后续建议。  
-更新时间：2026-06-02
+更新时间：2026-06-08
 适用场景：新 Agent 快速接续、避免重复排查。
 
 ## 本轮完成事项（延迟优先）
+
+32. 全项目低风险死代码与复杂化残留清理
+- 文件：`CMakeLists.txt`
+- 文件：`README.md`
+- 文件：`AGENT.md`
+- 文件：`include/CameraTask/GetImage.hpp`
+- 文件：`include/Tools/CameraData.hpp`
+- 文件：`include/Tools/AngleCalculate.hpp`
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/ImageRecognize/ImageShow.hpp`
+- 文件：`include/ImageRecognize/TemporalBoxStabilizer.hpp`
+- 变更：删除已不存在的 `OpenvinoTest` 构建/文档残留；主程序仍是唯一需要 OpenVINO runtime 链接的目标，`ReadTest`/`SendTest`/`test` 串口调试目标保留。
+- 变更：同步 `AGENT.md` 当前 seam 摘要，移除已删除的 `LostTargetRecoveryController` 当前入口描述，改为 `Stage3FallbackController`、`AimbotCommandArbiter`、`OverlayFrameRenderer` 等现有入口。
+- 变更：删除 `GalaxyCamera` 中无人调用且项目约定不使用的去畸变死开关、畸变矩阵成员与 `cv::undistort` 分支；保留图像翻转、曝光、ROI、payload buffer 刷新和全画幅恢复链路。
+- 变更：`CameraData` 从持有 `cv::Mat` 与畸变参数的数据对象收敛为只含 `fx/fy/cx/cy` 的内参常量；`AngleCalculator` 和 `DistanceCalculator` 直接读取常量，减少运行时矩阵访问与无效畸变语义。
+- 变更：删除 `ImageShow` 中无人调用的旧兼容展示包装 `DrawNow/ShowNow/WaitForExit`；删除 `TemporalBoxStabilizer` 未使用私有 `Saturate_` helper。当前显示链路仍通过 `OverlayFrameRenderer -> DrawFullOverlay/DrawStatusText/ShowFrame/PollKey` 工作。
+- 风险判断：低风险清理。该轮不改变识别、跟踪、距离估计、激光 pitch 补偿、阶段切换、扫描发送、串口线协议或激光开启语义；主要删除未被调用的死链路、过时文档入口和重复/无效数据承载。
+- 当前状态：已于 2026-06-08 本地执行 `cmake --build build -j --target ImagePredict` 编译通过；`git diff --check` 通过；`rg "DrawNow\\(|ShowNow\\(|WaitForExit\\(|setUndistort|OpenvinoTest|Saturate_|cameraMatrix|distCoeffs|kDistCoeff|cv::undistort" include src README.md AGENT.md CMakeLists.txt --glob '!third_lib/**' --glob '!src/model/**'` 无残留。
+- 已知 warning：仍有 Galaxy SDK typedef、Eigen/UKF uninitialized、OpenVINO/STL vector array-bounds 相关既有 warning，未在本轮处理。
+
+31. 全项目 clean architecture/clean code 巡检收口
+- 文件：`include/ImageRecognize/OutputDataProcess.hpp`
+- 文件：`include/ImageRecognize/ImagePredict_OPENVINO.hpp`
+- 文件：`include/ImageRecognize/TargetAssociation.hpp`
+- 文件：`include/ImageRecognize/TemporalBoxStabilizer.hpp`
+- 文件：`include/ImageRecognize/TargetTrackPipeline.hpp`
+- 文件：`include/ImageRecognize/ImageShow.hpp`
+- 文件：`include/ImageRecognize/OverlayFrameRenderer.hpp`
+- 文件：`include/ImageRecognize/TargetClassFilter.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：把检测框公共契约收口为 `DetectionBox`，并在 `OutputDataProcess.hpp` 统一提供 `BoxX1/BoxY1/BoxX2/BoxY2/BoxScore/BoxClassId/BoxCenter/BoxArea/BoxIoU/BoxCenterDistanceRatio/BoxCenterSimilarity/BoxAreaRatio` 等 helper。
+- 变更：推理后处理、目标类别过滤、跨帧关联、框稳定、目标跟踪 pipeline、显示/录像叠加和主流程均改为消费 `DetectionBox` 与 helper，删除项目自有识别链路中散落的 `box[0..5]` 魔法下标。
+- 变更：`TargetAssociation` 与 `TemporalBoxStabilizer` 不再各自维护重复的框 IoU、面积、中心距离公式，框几何语义集中到一个公共 Module，降低后续改检测框结构或解释方式时的修改面。
+- 变更：继续保持 `DetectionBox` 底层为 `std::array<float, 6>`，避免扩大 ABI/性能风险；本轮意图为行为保持型架构清理，不改识别、跟踪、距离估计、阶段切换、扫描发送、串口线协议或激光开启语义。
+- 当前状态：已于 2026-06-08 本地执行 `cmake --build build -j --target ImagePredict` 编译通过；`git diff --check` 通过；`rg "std::array<float, 6>|box\\[[0-5]\\]|candidate_box\\[[0-5]\\]|seed_box\\[[0-5]\\]|kept_box\\[[0-5]\\]|raw_box\\[[0-5]\\]|stable_box_\\[[0-5]\\]" include src --glob '!third_lib/**'` 仅剩 `OutputDataProcess.hpp` 中 `DetectionBox` 别名。
+- 已知 warning：仍有 Galaxy SDK typedef、Eigen/UKF uninitialized、OpenVINO/STL vector array-bounds 相关既有 warning，未在本轮处理。
+
+30. 删除宽高比倾斜修正激光 pitch 链路
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/ImageRecognize/ImageShow.hpp`
+- 文件：`include/Tools/CalibrationSliderPanel.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：删除通过宽度/高度距离比与宽度尺度估算倾斜角，再按阈值额外扣减激光 pitch 补偿的链路；`CalculateLaserPitchCompensationDeg(distance_debug, visual_pitch)` 现在只返回基础几何激光 pitch 补偿。
+- 变更：保留宽度优先、宽度无效回退高度的距离估计与 `Dw/Dh/Src` 调试显示，移除 `TiltAng/Eh/R/Tc` 调试显示和标定面板 `tilt-aware` 文案。
+- 风险判断：低风险行为收敛。该改动减少 pitch 补偿随框高/框宽比例跳变引入的额外扰动，但若实机确实依赖目标倾斜修正，需要后续用更稳定的标定模型重加。
+- 当前状态：已于 2026-06-08 本地执行 `cmake --build build -j --target ImagePredict` 编译通过；`rg "tilt|Tilt|dh_over_dw|expected_height|CalculateTilt|tilt_pitch|tilt_ratio|tilt-aware" include src` 无残留。
+
+29. 删除 stage3 丢目标续行模块
+- 文件：`include/Tools/LostTargetRecoveryController.hpp`
+- 文件：`include/Tools/StageRuntimeProfile.hpp`
+- 文件：`include/Tools/RuntimeParams.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：删除 `LostTargetRecoveryController`，移除 stage3 丢目标后按上一帧速度方向续行、续行期间回检确认门控和相关运行参数。
+- 变更：无目标分支恢复为直接按 `enable_scan_mode + scan_trigger_delay + track_alive` 判断进入扫描，否则清空 pending send；保留 stage3 目标丢失后切模型、stage3 probe 回退、异常兜底电机探测等其他路径。
+- 风险判断：中低风险行为删除。该改动会让 stage3 短时漏检不再继续输出预测控制角，可降低 pitch 方向因续行预测和重新识别抢控制造成的大幅震荡，但可能降低快速目标短时丢框时的保持能力。
+- 当前状态：已于 2026-06-08 本地执行 `cmake --build build -j --target ImagePredict` 编译通过，仅剩 Galaxy SDK/Eigen/OpenVINO 相关既有 warning。
 
 28. 四个架构候选全部完成
 - 文件：`include/ImageRecognize/Stage3FallbackController.hpp`
@@ -391,6 +447,39 @@
 - 变更：`CaptureThread` 中 `apply_stage3_roi_mode()` 新增分段耗时日志，拆出 `config_ms / stop_ms / start_ms / total_ms`，用于确认 ROI 切换延迟是否主要来自 `camera->stop()` / `camera->start()`。
 - 变更：把 `RuntimeStats` 里原本只打印未采样的 `submit_stage3_preprocess_ns` 接上真实统计，当前记为 `stage3` 路径 `startAsync()` 时间，避免延迟日志出现误导性的长期 `0ms`。
 - 风险判断：低风险。以上改动均不改变主流程行为，只补诊断信息并减少热路径的轻微读配置开销。
+
+12. 距离估计优化、stage3 激光补偿链路与 stage1/2 对齐
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/Tools/Stage12PitchPostprocess.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：`near_pixel / far_pixel` 已重命名为 `near_height_pixel / far_height_pixel`，避免与宽度像素标定点混淆；局部 `pixel_w/pixel_h/raw_w/raw_h` 也改为语义明确的 `box_width_pixel / box_height_pixel`。
+- 变更：距离估计从“宽度硬优先”改为“宽高一致时加权融合，差异过大时仍宽度优先，宽度无效才回退高度”；`DistanceSource` 新增 `FUSED`，ImageShow 的 `Src` 会显示融合来源。
+- 变更：距离滤波改为对反距离 `1/D` 做一阶滤波，并保留突变重置阈值，目标是降低远距离小像素抖动被放大成距离/激光 pitch 大跳。
+- 变更：删除 stage3 专用 `SelectStage3LaserCompDistance_` 二值/未滤波宽度补偿路径；stage3 与 stage1/2 现在共用同一条 `used_distance -> 距离范围夹紧 -> 几何 LaserPc -> LaserPitchCompStabilizer` 链路，仅参数按 stage 区分。
+- 变更：`Stage12LaserPitchCompStabilizer` 改为通用 `LaserPitchCompStabilizer`，stage3 不再绕过 LaserPc 平滑器。
+- 变更：`LaserAngleCalculate.hpp` 调参区改为先按功能分类，再按 stage 分类：`distance_calibration.stage12/stage3`、`laser_pitch_compensation.stage12/stage3`、`distance_filter`。
+- 当前状态：已于 2026-06-08 本地 `cmake --build build -j --target ImagePredict` 编译通过。
+
+13. 头文件开头说明扩充
+- 文件：`include/**/*.hpp`
+- 变更：扩充各头文件开头注释，从单句 brief 扩展为“模块职责、输入输出/边界、与主流程关系”的说明，便于后续 agent 和人工维护快速定位功能。
+- 约束：该项除少量同步文案（如标定面板从 `Dw-main` 改为 `Dw/Dh fused`）外，不改变业务代码。
+
+14. 新增距离标定完整流程 README
+- 文件：`src/DISTANCE_CALIBRATION_README.md`
+- 变更：新增实机距离标定流程文档，覆盖当前两点标定如何采集/记录/修改 `near_height_pixel/far_height_pixel/near_width_pixel/far_width_pixel`，如何验证 `Wpx/Hpx/Dw/Dh/Src/Distance/LaserPc`，以及如果要增加更多标定距离点，建议用多点样本表、反像素域插值或 `D=a/(pixel+b)+c` 拟合。
+- 约束：该项只新增文档，不改变业务代码。
+
+15. Clean code / clean architecture 小步清理
+- 文件：`include/ImageRecognize/OutputDataProcess.hpp`
+- 文件：`include/ImageRecognize/ImageShow.hpp`
+- 文件：`include/ImageRecognize/OverlayFrameRenderer.hpp`
+- 文件：`include/ImageRecognize/TargetAssociation.hpp`
+- 文件：`src/ImagePredict.cc`
+- 变更：新增 `DetectionBox` 类型别名、检测框字段索引常量和 `BoxX1/BoxY1/BoxX2/BoxY2/BoxScore/BoxClassId/BoxWidth/BoxHeight/BoxCenter/SetBoxClassId` helper，把 `{x1,y1,x2,y2,score,class_id}` 的数组下标知识集中到 `OutputDataProcess.hpp`。
+- 变更：显示、目标关联和主流程中部分直接 `box[0..5]` 访问改为语义化 helper；`OutputDataProcess.hpp` 保持纯数据层，不依赖 OpenCV。
+- 变更：`ImageShow::DrawFullOverlay()` 复用 `DrawStatusText()` 绘制状态文字，避免显示/录像 overlay 的状态行绘制逻辑重复；`OverlayFrameRenderer` 新增 `HasSourceFrame/CanRenderFullOverlay/CloneSourceFrame` helper，使判空和克隆语义更集中。
+- 当前状态：已于 2026-06-08 本地 `cmake --build build -j --target ImagePredict` 和 `git diff --check` 通过。
 
 ## 当前风险与注意事项
 

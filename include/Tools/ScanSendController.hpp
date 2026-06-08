@@ -1,6 +1,10 @@
 /**
  * @file    include/Tools/ScanSendController.hpp
  * @brief   收口 IMU 发送线程中的扫描发送状态机。
+ *
+ * ScanSendController 管理进入扫描、原点保持、下一次扫描发送时间、扫描命令构造
+ * 和退出扫描时的状态清理。它把发送线程中的扫描时序从主循环剥离出来，但不负责
+ * 生成具体 yaw/pitch 轨迹，轨迹由 ScanController 提供。
  */
 
 #pragma once

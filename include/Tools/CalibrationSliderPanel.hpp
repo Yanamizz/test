@@ -1,6 +1,12 @@
 /**
  * @file    include/Tools/CalibrationSliderPanel.hpp
- * @brief   提供用于目标高度、曝光和阵营调参的可视化滑块面板。
+ * @brief   OpenCV 可视化调参面板，用于曝光、目标尺寸和阵营筛选。
+ *
+ * 该面板在调试显示开启时提供独立窗口，允许现场切换 stage1/2 与 stage3
+ * 的编辑对象，并通过滑块调整当前 stage 的等效目标高度/宽度、曝光时间
+ * 和目标阵营模式。目标尺寸滑块会写入 DistanceCalculator 的运行时标定
+ * 参数，用于实机距离估计；近/远处的检测框像素观测值仍集中保存在
+ * LaserAngleCalculate.hpp 的调参区，避免滑块误改基准采样数据。
  */
 
 #pragma once
@@ -321,7 +327,7 @@ private:
                 {12, 346}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
     cv::putText(panel,
-                "laser pitch comp: Dw-main + tilt-aware, 10-24m",
+                "laser pitch comp: Dw/Dh fused, 10-24m",
                 {12, 378}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
                 cv::Scalar(170, 190, 200), 1, cv::LINE_AA);
     cv::imshow(kWindowName, panel);

@@ -2,6 +2,13 @@
  * @file    include/Tools/RuntimeParams.hpp
  * @brief   定义图像识别主流程使用的默认运行参数集合。
  *
+ * RuntimeParams 是 ImagePredict 主程序的集中默认配置源，覆盖模型路径、
+ * 相机采集/ROI、阶段切换、IMU 时序容差、角度控制、速度前馈、扫描、
+ * 显示和录像等运行参数。该文件只提供编译期默认值；少量运行时可调项
+ * 如曝光会通过专门的控制器/ini 文件维护，距离与激光几何标定则集中在
+ * LaserAngleCalculate.hpp。新增默认参数时需同步更新 RuntimeParams 字段
+ * 声明、Params() 聚合初始化顺序和相关 profile/helper。
+ *
  * 主程序命令行（`build/bin/ImagePredict`）支持以下开关：
  * - 显示窗口：
  *   `--enable-display=<bool>`
@@ -54,25 +61,9 @@ struct RuntimeParams {
   double stage12_exposure_time_us; // stage1/2 默认曝光时间（微秒）
   double stage3_exposure_time_us;  // stage3 默认曝光时间（微秒）
 
-  // ===== 阶段切换与 stage3 丢失恢复 =====
+  // ===== 阶段切换与 stage3 兜底恢复 =====
   int stage3_switch_target_lost_delay_ms; // 满足 stage3
                                           // 后，丢目标持续多久再切模型（毫秒）
-  int stage3_lost_target_coast_ms; // stage3 丢失目标后按丢失前速度方向续行时长
-                                   // （毫秒）
-  int stage3_lost_target_coast_trigger_delay_ms; // stage3
-                                                 // 连续丢失多久后才进入续行
-                                                 // （毫秒）
-  int stage3_lost_target_reacquire_confirm_ms; // stage3
-                                               // 重新识别后需持续多久才退出
-                                               // 续行（毫秒）
-  double stage3_lost_target_reacquire_gate_deg; // stage3
-                                                // 回检框与续行预测位置允许的
-                                                // 最大角差（度）
-  double stage3_lost_target_coast_yaw_speed_deg_per_sec; // stage3 丢目标后
-                                                         // 续行固定 yaw 速度
-  double
-      stage3_lost_target_coast_pitch_speed_deg_per_sec; // stage3 丢目标后
-                                                        // 续行固定 pitch 速度
   double stage3_fallback_min_stage2_progress; // stage2 进度达到该值后，允许
                                               // 丢目标兜底进入 stage3 候选
   int stage3_fallback_no_target_ms; // 高进度后连续空框多久触发 stage3 兜底
@@ -194,16 +185,8 @@ inline const RuntimeParams &Params() {
       1000.0, // stage12_exposure_time_us: stage1/2 默认曝光 1000us
       4000.0, // stage3_exposure_time_us: stage3 默认曝光 4000us
 
-      // ===== 阶段切换与 stage3 丢失恢复 =====
+      // ===== 阶段切换与 stage3 兜底恢复 =====
       200, // stage3_switch_target_lost_delay_ms: stage3 后丢目标 200ms 再切模型
-      2000, // stage3_lost_target_coast_ms: stage3 丢目标后续行 2000ms
-      40, // stage3_lost_target_coast_trigger_delay_ms: 丢失 40ms 后才续行
-      60, // stage3_lost_target_reacquire_confirm_ms: 重识别稳定 60ms 才退出续行
-      1.2, // stage3_lost_target_reacquire_gate_deg: 回检接管最大允许角差 1.2 度
-      3.0, // stage3_lost_target_coast_yaw_speed_deg_per_sec: stage3 丢目标后
-           // 续行固定 yaw 速度
-      2.0, // stage3_lost_target_coast_pitch_speed_deg_per_sec: stage3 丢目标后
-           // 续行固定 pitch 速度
       60.0, // stage3_fallback_min_stage2_progress: stage2 P>=60 后才允许兜底
       300, // stage3_fallback_no_target_ms: 连续空框 400ms 后触发兜底
       500, // stage3_fallback_recent_purple_ms: 最近 500ms 内必须见过紫色

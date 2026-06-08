@@ -1,6 +1,10 @@
 /**
  * @file    include/KalmanFilter/OneEuroFilter.hpp
  * @brief   实现适合实时角度平滑的 One Euro Filter。
+ *
+ * One Euro Filter 根据输入变化速度自适应调整截止频率，低速时抑制抖动，高速时降低
+ * 滞后。项目中它用于角度、检测框和激光补偿等热路径平滑，是低延迟控制链路的常用
+ * 轻量滤波器。
  */
 
 #pragma once
