@@ -1,0 +1,147 @@
+/**
+ * @file  src/main.cc
+ * @brief 雷达主程序入口
+ */
+
+#include <atomic>
+#include <csignal>
+#include <exception>
+#include <iostream>
+#include <optional>
+#include <sstream>
+#include <string>
+
+#include "include/config/config.hpp"
+#include "include/log/referee_main_log.hpp"
+#include "include/referee/map_robot_relay.hpp"
+#include "include/referee/replay_input_source.hpp"
+#include "include/referee/radar_decision_tree.hpp"
+#include "include/referee/referee_input_loop.hpp"
+#include "include/referee/referee_tx_scheduler.hpp"
+#include "include/referee/serial_connection_log.hpp"
+#include "include/referee/serial_port.hpp"
+#include "include/referee/tcp_client.hpp"
+#include "include/referee/tcp_connection_log.hpp"
+#include "librm/device/referee/referee.hpp"
+
+namespace {
+
+/// 主程序统一使用配置中的裁判系统协议版本。
+constexpr auto kRevision = radar::config::kRefereeRevision;
+
+using Referee = rm::device::Referee<kRevision>;
+
+/// 全局运行标志，由信号处理函数控制退出。
+std::atomic<bool> g_running{true};
+
+/**
+ * @brief 信号处理函数
+ * @param 当前收到的信号值，逻辑中不需要区分
+ */
+void OnSignal(int) { g_running.store(false); }
+
+}  // namespace
+
+int main() {
+  try {
+    // 注册退出信号，保证主循环可以平滑结束。
+    std::signal(SIGINT, OnSignal);
+    std::signal(SIGTERM, OnSignal);
+
+    // 初始化本轮日志目录，并尽量在启动阶段完成基础资源创建。
+    const auto run_log_root = radar::log::CreateRunLogRoot();
+    radar::referee::TcpConnectionLog tcp_log(run_log_root);
+
+    radar::referee::SerialPort serial;
+    std::string serial_open_error;
+    if (!serial.TryOpenDefault(radar::config::kDefaultRefereeBaud, &serial_open_error)) {
+      radar::referee::SerialConnectionLog(run_log_root).LogState(
+          "open_failed", radar::referee::SelectRefereeDevice(), radar::config::kDefaultRefereeBaud,
+          serial_open_error, false);
+      radar::log::GetRuntimeMetrics(run_log_root).RecordSerialOpenFailure();
+    }
+    radar::referee::TcpClient info_wave_tcp;
+    if (radar::config::kInfoWaveInputMode == radar::config::RefereeInputSourceMode::kReal) {
+      radar::referee::TryOpenConfiguredTcpClient(&info_wave_tcp, "info_wave_tcp",
+                                                 radar::config::kInfoWaveTcpListenPort, true, tcp_log, &std::cerr);
+    }
+    radar::referee::TcpClient enemy_level1_key_tcp;
+    radar::referee::TryOpenConfiguredTcpClient(&enemy_level1_key_tcp, "enemy_level1_key_tcp",
+                                               radar::config::kEnemyLevel1KeyTcpListenPort, true, tcp_log,
+                                               &std::cerr);
+    radar::referee::TcpClient enemy_level2_key_tcp;
+    radar::referee::TryOpenConfiguredTcpClient(&enemy_level2_key_tcp, "enemy_level2_key_tcp",
+                                               radar::config::kEnemyLevel2KeyTcpListenPort, true, tcp_log,
+                                               &std::cerr);
+
+    // 创建常规链路、信息波链路与发送链路各自的状态维护对象。
+    Referee serial_referee;
+    Referee info_wave_referee;
+    radar::log::BinaryLogStore raw_log_store(run_log_root);
+    radar::referee::RefereeTxScheduler tx_scheduler(serial, run_log_root);
+    radar::referee::RadarCommandSender radar_command_sender(tx_scheduler, run_log_root);
+    radar::referee::RadarDecisionTree<kRevision> radar_decision_tree(radar_command_sender);
+    radar::referee::MapRobotRelay<kRevision> relay(tx_scheduler, run_log_root);
+    radar::referee::EnemyKeyReceiver<kRevision> enemy_level1_key_receiver(
+        "enemy_level1_key", radar::config::kEnemyLevel1KeyTcpListenPort, radar_command_sender, run_log_root);
+    radar::referee::EnemyKeyReceiver<kRevision> enemy_level2_key_receiver(
+        "enemy_level2_key", radar::config::kEnemyLevel2KeyTcpListenPort, radar_command_sender, run_log_root);
+
+    std::optional<radar::referee::ReplayInputSource> serial_replay_source;
+    std::optional<radar::referee::ReplayInputSource> info_wave_replay_source;
+    if (radar::config::kSerialRefereeInputMode == radar::config::RefereeInputSourceMode::kFile) {
+      serial_replay_source.emplace(radar::config::kSerialRefereeReplayFile, radar::config::kSerialRefereeReplayRateHz,
+                                   "serial_referee_replay");
+    }
+    if (radar::config::kInfoWaveInputMode == radar::config::RefereeInputSourceMode::kFile) {
+      info_wave_replay_source.emplace(radar::config::kInfoWaveReplayFile, radar::config::kInfoWaveReplayRateHz,
+                                      "info_wave_replay");
+    }
+
+    radar::log::FileLogStore input_mode_log(run_log_root);
+    {
+      std::ostringstream oss;
+      oss << "{"
+          << "\"timestamp\":\"" << radar::log::TimestampNow() << "\","
+          << "\"serial_input_mode\":\""
+          << (radar::config::kSerialRefereeInputMode == radar::config::RefereeInputSourceMode::kReal ? "real"
+                                                                                                    : "file")
+          << "\","
+          << "\"serial_replay_file\":\"" << radar::config::kSerialRefereeReplayFile << "\","
+          << "\"serial_replay_rate_hz\":" << radar::config::kSerialRefereeReplayRateHz << ','
+          << "\"info_wave_input_mode\":\""
+          << (radar::config::kInfoWaveInputMode == radar::config::RefereeInputSourceMode::kReal ? "real" : "file")
+          << "\","
+          << "\"tcp_role\":\"client\","
+          << "\"tcp_server_address\":\"" << radar::config::kTcpServerAddress << "\","
+          << "\"tcp_local_bind_address\":\"" << radar::config::kTcpLocalBindAddress << "\","
+          << "\"info_wave_replay_file\":\"" << radar::config::kInfoWaveReplayFile << "\","
+          << "\"info_wave_replay_rate_hz\":" << radar::config::kInfoWaveReplayRateHz << "}";
+      input_mode_log.Append("main/input_mode.log", oss.str(), radar::log::LogPriority::kCriticalDecision);
+    }
+
+    // 串口主协议回调：维护常规链路结构体，并驱动自主决策树。
+    serial_referee.AttachCallback([&](rm::u16 cmd_id, rm::u8 seq) {
+      relay.ProcessSerial(cmd_id, seq, serial_referee);
+      radar_decision_tree.ProcessSerial(cmd_id, seq, serial_referee);
+    });
+    // 信息波回调：维护 `0x0A01~0x0A06` 状态，并驱动 `0x0305` 组包链路。
+    info_wave_referee.AttachCallback([&](rm::u16 cmd_id, rm::u8 seq) {
+      relay.ProcessInfoWaveTcp(cmd_id, seq, info_wave_referee, serial_referee.data());
+    });
+
+    // 主循环统一负责接收、处理、发送与自动重连。
+    radar::referee::RunSerialInfoWaveAndKeyTcpLoop(serial, info_wave_tcp, enemy_level1_key_tcp,
+                                                   enemy_level2_key_tcp, serial_referee, info_wave_referee,
+                                                   serial_replay_source ? &*serial_replay_source : nullptr,
+                                                   info_wave_replay_source ? &*info_wave_replay_source : nullptr,
+                                                   enemy_level1_key_receiver, enemy_level2_key_receiver,
+                                                   radar_command_sender, relay, tx_scheduler,
+                                                   raw_log_store, g_running);
+
+    return 0;
+  } catch (const std::exception &error) {
+    std::cerr << error.what() << '\n';
+    return 1;
+  }
+}
