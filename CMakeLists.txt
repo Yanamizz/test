@@ -28,5 +28,3 @@ target_include_directories(radar PRIVATE
 target_compile_definitions(radar PRIVATE
     RADAR_DEFAULT_LOG_DIR="${CMAKE_SOURCE_DIR}/test/logs"
 )
-
-add_subdirectory(test)

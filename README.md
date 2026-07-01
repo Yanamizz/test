@@ -1,95 +1,186 @@
 # Radar
 
-基于 `rules/` 中以下 3 份 2026 赛季规则文件，对本项目的雷达站职责做了第一轮范围收敛。
+本项目当前是一条面向 RoboMaster 雷达站的“接收 -> 处理 -> 发送”通信主链路，而不是视觉识别项目。
 
-- `RoboMaster 2026 机甲大师超级对抗赛比赛规则手册V1.5.0（20260519）.pdf`
-- `RoboMaster 2026 机甲大师高校系列赛通信协议 V1.3.1（20260519）.pdf`
-- `RoboMaster 2026 机甲大师高校系列赛机器人制作规范手册V1.4.1（20260421）.pdf`
+它的当前职责是：
 
-## 规则理解
+- 接收裁判系统常规链路主协议
+- 接收信息波链路与敌方密钥链路数据
+- 维护协议结构体状态
+- 生成并发送 `0x0305` 小地图位置数据
+- 生成并发送 `0x0301(0x0121 RadarCMD)` 自主决策指令
+- 记录结构体日志、原始二进制日志与运行时指标
 
-从规则角度，2026 赛季雷达的核心职责不是只有“识别对方机器人位置”。
-本项目当前进一步聚焦为一条更明确的通信主线：
-
-- 接收信息波处理端发送来的数据
-- 接收裁判系统/服务器端发送来的数据
-- 对两侧数据进行解析、整理、决策与重组
-- 将处理结果发送至裁判系统/服务器端
-
-比赛规则手册中的关键条款：
-
-- `3.7 雷达`：雷达可自主获取战场信息，并通过多机通信向己方机器人或选手端发送信息。
-- `4.2.5 雷达基座`：雷达基座用于放置雷达传感器和激光发射装置，运算端可接官方显示器和市电。
-- `5.6.6 雷达特殊机制`：雷达功能包括：
-  - 雷达识别
-  - 雷达反制
-  - 雷达解析信息波
-- `附录 1 雷达信息波特性`：给出了信息波/干扰波的频谱与帧结构。
-
-通信协议中的关键条款：
-
-- `1.6 雷达无线链路数据说明`：官方发射源会向雷达发送对方机器人坐标、密钥等无线链路数据。
-- `0x020C`：服务器会向雷达下发雷达标记进度数据。
-- `0x020E`：服务器会向雷达下发自主决策同步信息。
-- `0x0121`：雷达可请求触发双倍易伤、上报破解密钥。
-- `0x0305` / `RadarInfoToClient`：雷达可向己方选手端/客户端发送机器人位置信息。
-- `protocol_new_v120.hpp`：当前 `librm` 相比之前已经新增信息波相关命令号 `0x0A01~0x0A06`，但对应结构体字段与内存映射仍需后续补齐。
-
-制作规范中的关键条款：
-
-- `2.4.7 雷达`：雷达由运算平台端与传感器端构成，两者需通过电缆连接。
-- `S129`：雷达运算平台端不得安装或使用无线设备。
-- `S131-S134`：传感器端、激光发射装置、无线接收装置、支架和基座安装均有明确限制。
-- `S25/S27/S29`：激光发射装置只能安装在雷达传感器端，且功率、波段受限。
-
-## 当前项目范围
-
-本项目当前阶段暂时抛弃以下功能：
+当前不把系统重心放在：
 
 - 视觉识别
-- 利用相机、视觉标签、图传画面识别对方机器人位置
-- 雷达识别对方机器人位置
-- 依赖视觉链路生成敌方机器人识别结果
-- 以“视觉识别目标”为主线组织系统架构
-- 反无人机 / 空中机器人反制功能
+- 相机目标检测
+- 反无人机功能
 
-本项目当前阶段保留以下雷达站职责：
+## 当前主链路
 
-- 接收信息波处理端解出的 Payload 或整合数据
-- 接收裁判系统/服务器端与雷达有关的状态量和协议数据
-- 统一处理信息波侧与裁判系统侧的数据
-- 按协议要求向裁判系统/服务器端发送结果
-- 复用现有裁判系统串口协议、CRC 校验和用户子协议打包能力
-- 预留双倍易伤触发能力
-- 预留破解密钥上报能力
-- 约束实现满足雷达运算端/传感器端的制作规范边界
+主入口在 [src/main.cc](/home/hanni/Radar/src/main.cc:45)。
 
-## 设计原则
+当前运行链路如下：
 
-为了避免后续实现偏离通信主线，本项目约定：
+1. 串口常规链路通过 `SerialPort` 接收真实裁判系统字节流，或通过 `ReplayInputSource` 从文件回放。
+2. 信息波链路通过 `TcpClient` 主动连接 `8001`，接收真实 TCP 字节流，或通过 `ReplayInputSource` 从文件回放。
+3. 敌方一级/二级密钥链路通过 `TcpClient` 主动连接 `8002/8003`，接收完整 `0x0A06` 协议帧。
+4. 所有输入字节流逐字节喂给各自的 `rm::device::Referee<revision>` 实例维护状态。
+5. `MapRobotRelay` 根据 `0x0A01 + 0x020B` 维护 `0x0305` 状态，并按 5Hz 发送最新地图数据。
+6. `RadarDecisionTree` 根据 `0x020E` 生成自主决策，由 `RadarCommandSender` 组包为 `0x0301(0x0121)`。
+7. `RefereeTxScheduler` 统一调度 `0x0301` 与 `0x0305` 的串口发送节奏。
+8. [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58) 统一负责真实输入、文件回放、串口重连、TCP 重连、周期任务和日志指标刷新。
 
-- 不引入相机识别链路作为当前版本必需能力。
-- 不把“敌方机器人坐标估计”作为当前系统的唯一核心数据源。
-- 所有模块默认围绕“信息接收 + 协议解析 + 状态处理 + 协议发送”构建。
-- 不在本项目内实现反无人机功能，该能力属于独立项目。
-- 若未来重新启用敌方定位识别，应作为独立能力开关接入，而不是写死在主流程中。
+## 关键模块
 
-## 当前代码骨架
+- [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:32)
+  - 唯一手动配置入口
+- [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)
+  - 主循环、poll、自动重连、周期任务
+- [include/referee/serial_port.hpp](/home/hanni/Radar/include/referee/serial_port.hpp:75)
+  - 裁判系统串口读写
+- [include/referee/tcp_client.hpp](/home/hanni/Radar/include/referee/tcp_client.hpp:46)
+  - `8001/8002/8003` 非阻塞 TCP 客户端
+- [include/referee/map_robot_relay.hpp](/home/hanni/Radar/include/referee/map_robot_relay.hpp:254)
+  - `0x0A01 -> 0x0305` 状态维护、过期处理、发送日志
+- [include/referee/radar_decision_tree.hpp](/home/hanni/Radar/include/referee/radar_decision_tree.hpp:45)
+  - 基于 `0x020E` 的自主决策
+- [include/referee/radar_command_sender.hpp](/home/hanni/Radar/include/referee/radar_command_sender.hpp:85)
+  - `0x0121` 组包、队列、10 秒冷却、日志
+- [include/referee/enemy_key_receiver.hpp](/home/hanni/Radar/include/referee/enemy_key_receiver.hpp:72)
+  - `8002/8003` 上的 `0x0A06` 解包与校验
+- [include/referee/referee_tx_scheduler.hpp](/home/hanni/Radar/include/referee/referee_tx_scheduler.hpp:33)
+  - `0x0301` FIFO 与 `0x0305` latest-only 发送调度
+- [include/log/log_backend.hpp](/home/hanni/Radar/include/log/log_backend.hpp:129)
+  - 异步日志后端与 `runtime_metrics.log`
+- [include/log/referee_main_log.hpp](/home/hanni/Radar/include/log/referee_main_log.hpp:739)
+  - 主协议结构体日志格式化
 
-当前代码仅初始化一个最小雷达站能力模型，用于明确通信主线下哪些能力开启、哪些能力关闭：
+## 配置入口
 
-- `info_wave_parsing`: 开启
-- `double_debuff_control`: 开启
-- `visual_recognition`: 关闭
-- `enemy_position_recognition`: 关闭
-- `enemy_position_reporting`: 关闭
-- `anti_drone_project`: 独立项目，不在本仓库实现
+所有手动配置统一放在 [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:32)。
 
-## 后续建议
+常用配置项：
 
-下一步更适合优先实现这几个方向：
+- `kRefereeRevision`
+  - 当前裁判系统协议版本
+- `kRadarLogMode`
+  - `kDebug` / `kMatch`
+- `kDebugAllowMissingInterfaces`
+  - 调试模式下允许接口缺失，缺失链路对应状态按 0 值处理
+- `kSerialRefereeInputMode`
+  - 串口主协议使用真实输入或文件回放
+- `kInfoWaveInputMode`
+  - 信息波 `8001` 使用真实输入或文件回放
+- `kSerialRefereeReplayFile` / `kInfoWaveReplayFile`
+  - 回放文件路径
+- `kSerialRefereeReplayRateHz` / `kInfoWaveReplayRateHz`
+  - 回放频率
+- `kTcpServerAddress`
+  - `8001/8002/8003` 的对端服务端地址
+- `kTcpLocalBindAddress`
+  - 本机绑定地址，留空表示让系统自动选路由出口
+- `kInfoWaveTcpServerPort` / `kEnemyLevel1KeyTcpServerPort` / `kEnemyLevel2KeyTcpServerPort`
+  - 三条 TCP 客户端链路端口
+- `kSerialReconnectIntervalMs` / `kTcpReconnectIntervalMs`
+  - 自动重连周期
+- `kInfoWaveTcpIdleTimeoutMs` / `kEnemyKeyTcpIdleTimeoutMs`
+  - TCP 空闲断开策略
 
-1. 信息波处理端到雷达程序的接收接口
-2. 裁判系统/服务器端相关数据结构与解包入口
-3. 信息整合与重组后的发送链路
-4. 双倍易伤/密钥上报等决策接口
+当前代码语义上是 TCP client-only，本机不再监听 `8001/8002/8003`。
+
+## 输入模式
+
+当前支持两类输入源：
+
+- `kReal`
+  - 串口来自真实裁判系统
+  - 信息波来自真实 TCP `8001`
+  - 敌方密钥来自真实 TCP `8002/8003`
+- `kFile`
+  - 串口与信息波 `8001` 可分别从预制 `.bin` 文件回放完整协议帧
+
+当前约束：
+
+- 串口主协议与信息波 `8001` 可以独立切换 `kReal/kFile`
+- `8002/8003` 目前只走真实 TCP，不走文件回放
+- 即使串口输入改成文件回放，发送仍尝试走真实串口
+
+样例文件位于：
+
+- [test/info/outputInfo.bin](/home/hanni/Radar/test/info/outputInfo.bin)
+- [test/info/outputInfo2.bin](/home/hanni/Radar/test/info/outputInfo2.bin)
+- [test/info/map_robot_sender_sample.bin](/home/hanni/Radar/test/info/map_robot_sender_sample.bin)
+
+## 构建与运行
+
+首次配置：
+
+```bash
+cmake -S . -B build
+```
+
+构建主程序：
+
+```bash
+cmake --build build --target radar -j2
+```
+
+运行：
+
+```bash
+./build/bin/radar
+```
+
+辅助脚本：
+
+```bash
+python3 test/serialtest.py
+```
+
+辅助脚本文件：
+
+- [test/serialtest.py](/home/hanni/Radar/test/serialtest.py:1)
+
+当前仓库不再维护独立的 C++ 测试可执行程序；测试能力已经回收到主程序、回放链路和日志链路中。
+
+## 日志与可观测性
+
+默认构建下，每次运行都会在 `test/logs/` 下创建新的时间戳目录。
+
+目录结构大致如下：
+
+- `test/logs/<timestamp>/main/*.log`
+  - 结构体日志、发送日志、连接状态日志、运行指标
+- `test/logs/<timestamp>/raw/*.bin`
+  - 原始串口/TCP 输入字节流
+
+常见日志文件包括：
+
+- `main/serial_state.log`
+- `main/tcp_startup.log`
+- `main/tcp_channel_state.log`
+- `main/tcp_client_state.log`
+- `main/runtime_metrics.log`
+- `main/0x0305_map_robot_data.log`
+- `main/0x0305_map_robot_data_skipped.log`
+
+当前代码不再创建 `latest/` 快照目录，所有证据链都保留在当次运行目录中。
+
+## 调试注意事项
+
+- `kDebug` 模式下允许串口或 TCP 接口缺失，相关状态会按 0 值处理，便于单链路调试。
+- 常规链路与信息波链路分别使用独立 `Referee` 实例，因此各自维护独立的 `seq` 与 `loss_rate`。
+- `loss_rate()` 来自 `librm` 的通用实现，假设发送端 `seq` 按 256 周期滚动；对信息波 TCP 流来说，它不一定等价于真实网络丢包率。
+
+## 相关文档
+
+- [AGENTS.md](/home/hanni/Radar/AGENTS.md:1)
+  - 仓库协作约束与修改边界
+- [.agent/handoff.md](/home/hanni/Radar/.agent/handoff.md:1)
+  - 当前代码状态的接手说明
+- [.agent/full_pipeline.md](/home/hanni/Radar/.agent/full_pipeline.md:1)
+  - 从接收到发送的完整链路说明
+- [.agent/radar_stability_review.md](/home/hanni/Radar/.agent/radar_stability_review.md:1)
+  - 稳定性现状、已完成保护与剩余风险

@@ -1,395 +1,287 @@
 # Handoff
 
-本文件记录当前仓库中与雷达通信最相关的 API 地图，供后续 Agent 和开发者快速接手。
+本文档用于帮助后续 Agent 或开发者快速接手当前仓库，重点只覆盖现在真实存在的 Linux 主程序链路。
 
-## 当前项目主线
+## 1. 当前项目快照
 
-本项目当前核心方向是：
+当前项目不是旧的 STM32 `main.cc` 方案，也不是视觉识别工程，而是一条项目侧通信主链路：
 
-- 接收信息波处理端发送来的数据
-- 接收裁判系统/服务器端发送来的数据
-- 对两侧数据进行解析、整理、决策与重组
-- 将处理结果发送至裁判系统/服务器端
+- 接收裁判系统串口主协议
+- 接收信息波 TCP `8001`
+- 接收敌方密钥 TCP `8002/8003`
+- 维护协议结构体状态
+- 发送 `0x0305` 与 `0x0301(0x0121)`
+- 记录结构体日志、原始字节流和运行指标
 
-后续阅读和开发都应围绕这条主线理解这些 API，而不是把项目理解成纯视觉识别或纯雷达识别工程。
-反无人机 / 空中机器人反制功能不在本项目实现，属于独立项目边界。
+当前主入口：
 
-## 当前结论
+- [src/main.cc](/home/hanni/Radar/src/main.cc:45)
 
-`librm` 已更新。
+当前唯一手动配置入口：
 
-当前雷达通信应优先复用：
+- [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:32)
 
-- `include/radar/libs/librm/src/librm/device/referee`
-- `include/radar/app/subReferee`
-- `include/radar/libs/librm/src/librm/modules/crc.hpp`
+## 2. 主程序对象关系
 
-后续不要重新发明串口解包、CRC 校验和裁判系统帧结构，默认先从这套 API 开始接。
-默认处理流向是：
+[src/main.cc](/home/hanni/Radar/src/main.cc:45) 启动时做的事情可以概括为：
 
-1. 从信息波处理端或裁判系统侧接收数据
-2. 用现有协议和 CRC API 完成解包与校验
-3. 将结果落到现有主协议结构或用户子协议结构
-4. 按裁判系统/服务器端要求重新打包并发送
+1. 创建本轮运行日志目录。
+2. 尝试打开裁判系统串口。
+3. 按配置主动连接 TCP `8001/8002/8003`。
+4. 创建两个主协议解包器：
+   - `serial_referee`
+   - `info_wave_referee`
+5. 创建发送与业务模块：
+   - `RefereeTxScheduler`
+   - `RadarCommandSender`
+   - `RadarDecisionTree`
+   - `MapRobotRelay`
+   - 两个 `EnemyKeyReceiver`
+6. 给串口链路与信息波链路挂回调。
+7. 进入 [`RunSerialInfoWaveAndKeyTcpLoop(...)`](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)。
 
-## 总体分层地图
+这意味着当前项目的真实主链并不在 [src/main.cc](/home/hanni/Radar/src/main.cc:45) 里展开，而是分散在 `include/referee/*.hpp` 的项目侧封装中。
 
-从下到上可以这样理解：
+## 3. 当前输入职责
 
-1. `rm::modules::Crc8/Crc16`
-2. `rm::device::Referee<revision>`
-3. `rm::device::RefereeProtocol<revision>`
-4. `rm::device::RefereeUser<revision>`
-5. `rm::device::RefereeSubProtocol`
-
-职责边界如下：
-
-- `crc.hpp`：统一提供 CRC8 / CRC16 / CRC32 / CCITT 的计算函数。
-- `Referee<revision>`：按字节接收裁判系统串口流，完成 SOF、长度、seq、CRC8、CRC16 校验和整包反序列化。
-- `RefereeProtocol<revision>`：描述主协议结构体。
-- `RefereeUser<revision>`：从主协议 `0x301` 中继续拆出用户子协议。
-- `RefereeSubProtocol`：描述本项目自己定义的信息整合结果、雷达数据和 UI 子协议结构。
-
-## CRC API
+### 3.1 串口常规链路
 
 文件：
 
-- `include/radar/libs/librm/src/librm/modules/crc.hpp`
-
-关键常量：
-
-- `rm::modules::CRC8_INIT = 0xff`
-- `rm::modules::CRC16_INIT = 0xffff`
-
-关键函数：
-
-- `rm::modules::Crc8(const u8* input, usize len, u8 init)`
-- `rm::modules::Crc16(const u8* input, usize len, u16 init)`
-
-当前仓库里：
-
-- 主裁判系统解包使用 `Crc8` 校验帧头。
-- 主裁判系统解包使用 `Crc16` 校验整帧。
-- `Referee0x301Prepare()` 与 `RefereePrepare()` 也使用这两套 CRC。
-
-## 主协议入口
-
-文件：
-
-- `include/radar/libs/librm/src/librm/device/referee/referee.hpp`
-- `include/radar/libs/librm/src/librm/device/referee/protocol.hpp`
-
-### `Referee<revision>`
-
-这是主串口裁判系统解包入口，也是当前项目接收裁判系统/服务器端相关数据的基础入口。
-
-关键用法：
-
-- 每收到一个字节，就调用一次 `referee << byte`。
-- 收到完整且 CRC 正确的一帧后，会自动把 Payload 拷贝到 `RefereeProtocol<revision>` 对应字段。
-- 通过 `AttachCallback()` 挂回调，在每次成功收包后拿到 `cmd_id` 和 `seq`。
-- 通过 `data()` 获取当前已解出的主协议结构体。
-
-关键协议常量：
-
-- `kRefProtocolHeaderSof = 0xA5`
-- `kRefProtocolHeaderLen = 5`
-- `kRefProtocolCmdIdLen = 2`
-- `kRefProtocolCrc16Len = 2`
-- `kRefProtocolAllMetadataLen = 9`
-- `kRefProtocolFrameMaxLen = 128`
-
-## 主协议版本结论
-
-文件：
-
-- `include/radar/libs/librm/src/librm/device/referee/protocol.hpp`
-
-当前版本枚举：
-
-- `kV164`
-- `kV170`
-- `kNewV110`
-- `kNewV120`
-
-当前项目里，后续优先关注 `kNewV120`。
-
-原因：
-
-- 工程代码已实际使用 `kNewV120`
-- `kNewV120` 已补齐 `0x301`
-- `kNewV120` 相比之前已经新增信息波相关命令号 `0x0A01~0x0A06`
-
-## `kNewV120` 主协议地图
-
-文件：
-
-- `include/radar/libs/librm/src/librm/device/referee/protocol_new_v120.hpp`
-
-### 与雷达最相关的主命令
-
-- `0x20b kGroundRobotPosition`
-- `0x20c kRadarMarkData`
-- `0x20d kSentryInfo`
-- `0x20e kRadarInfo`
-- `0x301 kRobotInteractionData`
-- `0x302 kCustomRobotData`
-- `0x303 kMapCommand`
-- `0x305 kMapRobotData`
-- `0x306 kCustomClientData`
-- `0x307 kMapData`
-- `0x308 kCustomInfo`
-- `0x309 kRobotCustomData`
-- `0x310 kRobotCustomData2`
-- `0x311 kRobotCustomData3`
-
-### 相比之前新增的信息波命令号
-
-这些命令头已经进入 `RefereeCmdId<RefereeRevision::kNewV120>`：
-
-- `0x0A01 kRadar0`：雷达标记对方位置
-- `0x0A02 kRadar1`：雷达标记对方血量
-- `0x0A03 kRadar2`：雷达标记对方发弹
-- `0x0A04 kRadar3`：雷达标记对方宏观状态
-- `0x0A05 kRadar4`：雷达标记对方增益
-- `0x0A06 kRadar5`：雷达标记对方干扰波密钥
-
-注意：
-
-- 当前 `protocol_new_v120.hpp` 中已经加入这些命令号常量。
-- 但当前 `RefereeProtocol<kNewV120>` 结构体本体还没有看到对应 `0x0A01~0x0A06` 的具体结构字段。
-- `RefereeProtocolMemoryMap<kNewV120>` 当前也没有把 `0x0A01~0x0A06` 映射进去。
-
-这意味着：
-
-- 协议命令号层面已经更新到能表达这些信息波帧编号。
-- 真正要通过 `Referee<kNewV120>` 自动落到结构体字段，还需要补这些字段和内存映射。
-- 在此之前，更适合把信息波处理端的结果先落到现有 `subReferee` 自定义结构体中，再按需要转发到裁判系统/服务器端。
-
-## `kNewV120` 已有主结构体
-
-当前已经能直接通过 `referee.data()` 访问的关键字段：
-
-- `ground_robot_position`
-- `radar_mark_data`
-- `sentry_info`
-- `radar_info`
-- `robot_interaction_data`
-- `map_command`
-- `map_robot_data`
-- `map_data`
-- `custom_info`
-- `custom_robot_data`
-- `robot_custom_data`
-- `robot_custom_data_2`
-- `robot_custom_data_3`
-- `custom_client_data`
-
-其中最关键的是：
-
-- `robot_interaction_data`
-  - `data_cmd_id`
-  - `sender_id`
-  - `receiver_id`
-  - `user_data[112]`
-
-这就是 `0x301` 用户子协议的主入口。
-
-## 用户子协议入口
-
-文件：
-
-- `include/radar/app/subReferee/referee_user.hpp`
-- `include/radar/app/subReferee/protocol_user.hpp`
-
-### `RefereeUser<revision>`
+- [include/referee/serial_port.hpp](/home/hanni/Radar/include/referee/serial_port.hpp:75)
+- [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)
 
 职责：
 
-- 从主协议 `0x301` 中提取 `data_cmd_id`
-- 按 `RefereeSubProtocolMemoryMap` 将 `user_data` 拷贝到子协议结构体
+- 读取真实裁判系统字节流
+- 逐字节喂给 `serial_referee`
+- 维护 `0x020B`、`0x020E`、`0x0201` 等常规链路状态
+- 作为所有发包的真实输出口
 
-关键逻辑：
+串口掉线后不会直接退出进程，而是进入后台重连。
 
-- 只有 `cmd_id == 0x301` 才继续解析
-- 从 `referee_.data().robot_interaction_data.data_cmd_id` 取子命令号
-- 从 `referee_.data().robot_interaction_data.user_data` 取实际子协议内容
-
-### 当前子命令地图
+### 3.2 信息波链路 `8001`
 
 文件：
 
-- `include/radar/app/subReferee/protocol_user.hpp`
+- [include/referee/tcp_client.hpp](/home/hanni/Radar/include/referee/tcp_client.hpp:46)
+- [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)
 
-当前子命令：
+职责：
 
-- `0x0200 AllyRobotPosition`
-- `0x0201 EnemyRobotPosition`
-- `0x0202 EnemyRobotHP`
-- `0x0203 EnemyRobotProjectileAllowance`
-- `0x0204 EnemyGoldCoinRFID`
-- `0x0205 EnemyRobotBuff`
-- `0x0206 AllRadarInfo`
-- `0x0207 Hero2Drone`
-- `0x0208 Drone2Hero`
-- `0x0100 UILayer`
-- `0x0101 UIFigure1`
-- `0x0102 UIFigure2`
-- `0x0103 UIFigure5`
-- `0x0104 UIFigure7`
-- `0x0110 UICharacter`
-- `0x0305 MapRobotPosition`
+- 本端只作为 TCP 客户端
+- 主动连接配置中的 `kTcpServerAddress:8001`
+- 逐字节喂给独立的 `info_wave_referee`
+- 维护 `0x0A01~0x0A06` 相关结构体状态
 
-注意：
+当前 `8001` 的 idle timeout 可在 [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:76) 中单独配置；当前代码支持设为 `<=0` 从而保持连接。
 
-- `0x0201~0x0205` 这组就是当前把信息波处理端结果落地到项目内部结构中的核心结构。
-- 注释里已经把它们和雷达 `0x0A01~0x0A05` 对应起来了。
-
-## 子协议打包 API
+### 3.3 敌方密钥链路 `8002/8003`
 
 文件：
 
-- `include/radar/app/subReferee/referee_user.hpp`
+- [include/referee/enemy_key_receiver.hpp](/home/hanni/Radar/include/referee/enemy_key_receiver.hpp:72)
+- [include/referee/tcp_client.hpp](/home/hanni/Radar/include/referee/tcp_client.hpp:46)
 
-### `Referee0x301Prepare()`
+职责：
 
-用途：
+- 本端只作为 TCP 客户端
+- 主动连接 `8002/8003`
+- 每个端口内部维护一个独立的 `Referee` 解包器
+- 只接受完整 `0x0A06` 帧，而不是裸 6 字节
+- 成功拿到一次合法密钥后，将其送入 `RadarCommandSender` 的待发队列
 
-- 把任意一个子协议结构体打成主协议 `0x301` 帧，供发送到裁判系统/服务器端
+说明：
 
-自动完成：
+- 两个端口当前语义是“一级密钥 / 二级密钥”两个独立来源。
+- 当前实现完成一次合法接收后会关闭该端口连接，不再持续保持。
 
-- 帧头 `0xA5`
-- `data_len`
+### 3.4 文件回放
+
+文件：
+
+- [include/referee/replay_input_source.hpp](/home/hanni/Radar/include/referee/replay_input_source.hpp:43)
+
+当前支持：
+
+- 串口主协议回放
+- 信息波 `8001` 回放
+
+当前不支持：
+
+- `8002/8003` 文件回放
+
+## 4. 当前发送职责
+
+### 4.1 `0x0305` 小地图位置
+
+文件：
+
+- [include/referee/map_robot_relay.hpp](/home/hanni/Radar/include/referee/map_robot_relay.hpp:254)
+
+职责：
+
+- 从信息波 `0x0A01` 维护敌方位置
+- 从串口 `0x020B` 维护己方地面机器人位置
+- 按 5Hz latest-only 节奏发送 `0x0305`
+- 状态过期后自动置 0
+- 记录成功发送和跳过发送原因
+
+调试模式下若允许缺失接口，则即便 `0x0A01` 或 `0x020B` 缺失，也会按 0 值继续跑主链路。
+
+### 4.2 `0x0301(0x0121 RadarCMD)`
+
+文件：
+
+- [include/referee/radar_decision_tree.hpp](/home/hanni/Radar/include/referee/radar_decision_tree.hpp:45)
+- [include/referee/radar_command_sender.hpp](/home/hanni/Radar/include/referee/radar_command_sender.hpp:85)
+
+职责：
+
+- `RadarDecisionTree` 读取串口 `0x020E`
+- 自动决定是否申请双倍易伤
+- 自动决定是否切换到下一组预置己方密钥
+- `RadarCommandSender` 负责组包、日志、排队和冷却
+
+敌方密钥提交 `password_cmd=2` 的特点：
+
+- 走 FIFO 队列
+- 有 10 秒冷却
+- 真正发送后才推进下一条
+
+## 5. 统一发送调度
+
+文件：
+
+- [include/referee/referee_tx_scheduler.hpp](/home/hanni/Radar/include/referee/referee_tx_scheduler.hpp:33)
+
+当前语义：
+
+- `0x0301`：FIFO，高优先级，统一限频
+- `0x0305`：latest-only，只保留最新一帧
+- 真正写串口失败时，会把串口打回断开状态，由主循环自动重连
+
+因此当前项目里不应再让各业务模块直接写串口，而应走调度器。
+
+## 6. 主循环真实职责
+
+文件：
+
+- [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)
+
+当前主循环负责：
+
+- 串口自动重连
+- TCP 自动重连
+- TCP 连接超时与 idle timeout
+- 真实输入读取
+- 文件回放推进
+- 周期任务推进：
+  - `MapRobotRelay::ProcessPeriodic()`
+  - `RadarCommandSender::ProcessPending(...)`
+  - `RefereeTxScheduler::Process()`
+  - `RuntimeMetrics::MaybeFlush()`
+
+当前主程序的“运行感受”主要由这个文件决定。
+
+## 7. 日志与观测点
+
+默认构建下，每次运行会在 `test/logs/<timestamp>/` 下创建新目录。
+
+当前常见日志：
+
+- `main/serial_state.log`
+  - 串口打开失败、掉线、重连
+- `main/tcp_startup.log`
+  - 启动阶段各 TCP 客户端是否拉起
+- `main/tcp_channel_state.log`
+  - 连接通道的状态变化
+- `main/tcp_client_state.log`
+  - TCP 客户端连接完成、断开、超时
+- `main/runtime_metrics.log`
+  - 主循环耗时、日志队列压力、loss_rate 快照
+- `main/0x0305_map_robot_data.log`
+  - 成功发出的 `0x0305`
+- `main/0x0305_map_robot_data_skipped.log`
+  - 因 stale、rate limit 等原因未发送
+- `main/0x0121_*.log`
+  - 自主决策、敌方密钥提交、拒绝原因
+- `raw/*.bin`
+  - 原始串口/TCP 输入字节流
+
+当前代码已经不再创建 `latest/` 快照目录。
+
+## 8. `seq` 与 `loss_rate` 的现实含义
+
+当前至少有四类 `Referee` 解包器实例：
+
+- `serial_referee`
+- `info_wave_referee`
+- `enemy_level1_key_receiver` 内部的 `referee_`
+- `enemy_level2_key_receiver` 内部的 `referee_`
+
+它们彼此独立维护：
+
 - `seq`
-- 头部 CRC8
-- 主命令 `0x301`
-- 子命令 `getCmd(info)`
-- `sender`
-- `receiver`
-- 整帧 CRC16
+- `received_packets`
+- `loss_rate()`
 
-适合发送：
+这意味着：
 
-- `EnemyRobotPosition`
-- `EnemyRobotHP`
-- `EnemyRobotProjectileAllowance`
-- `EnemyGoldCoinRFID`
-- `EnemyRobotBuff`
-- `AllRadarInfo`
-- UI 相关结构
+- 串口和信息波不是共用一组 `seq`
+- `8002/8003` 也不是和主信息波共用同一组 `seq`
 
-### `RefereePrepare()`
+需要特别注意的是：
 
-用途：
+- `loss_rate()` 来自 [include/radar/libs/librm/src/librm/device/referee/referee.hpp](/home/hanni/Radar/include/radar/libs/librm/src/librm/device/referee/referee.hpp:1)
+- 它默认假设发送端 `seq` 按 256 周期滚动
+- 对信息波 TCP 流来说，这个值不一定等于真实网络丢包率
+- 如果发送端 `seq` 语义不符合这个假设，`loss_rate` 甚至可能出现负值或明显失真
 
-- 打包 `MapRobotPosition`，供发送到裁判系统/服务器端
+因此排查 TCP 丢包时，应优先结合：
 
-特点：
+- 原始 `raw/*.bin`
+- `seq` 序列是否跳变
+- `0x0A01` 实际到达间隔
+- `runtime_metrics.log`
 
-- 直接使用 `getCmd(structInfo)`，当前就是 `0x0305`
-- 不走 `0x301` 子协议头
+不要只盯 `loss_rate()` 一个指标。
 
-## 内存映射记忆点
+## 9. 当前修改边界
 
-主协议的自动落地依赖：
+优先改：
 
-- `RefereeProtocolMemoryMap<revision>::map`
+- `src/`
+- `include/config/`
+- `include/referee/`
+- `include/log/`
+- `.agent/`
 
-子协议的自动落地依赖：
+尽量不要广泛改动：
 
-- `RefereeSubProtocolMemoryMap::map`
-- `RefereeSubProtocolMemoryMap::mapSize`
+- `include/radar/`
 
-特别注意：
+原因：
 
-- `AllRadarInfo` 当前在 `RefereeSubProtocolMemoryMap::map` 中映射到 `enemy_robot_HP` 的起始偏移。
-- 它的 `mapSize` 也是按“从 HP 开始到末尾的一整段”计算。
-- 这不是普通单结构直接拷贝，而是依赖当前 `RefereeSubProtocol` 的布局。
+- `include/radar/` 是协议层和第三方 `librm` 子树
+- 当前仓库对 `include/radar` 的改动应该尽量少且明确
 
-后续如果改 `RefereeSubProtocol` 字段顺序，必须同步检查 `AllRadarInfo` 的语义是否仍然成立。
+## 10. 接手时最先读什么
 
-## 现有工程接线方式
+如果你是第一次接手当前仓库，建议阅读顺序：
 
-文件：
+1. [README.md](/home/hanni/Radar/README.md:1)
+2. [src/main.cc](/home/hanni/Radar/src/main.cc:45)
+3. [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:32)
+4. [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)
+5. [include/referee/map_robot_relay.hpp](/home/hanni/Radar/include/referee/map_robot_relay.hpp:254)
+6. [include/referee/radar_command_sender.hpp](/home/hanni/Radar/include/referee/radar_command_sender.hpp:85)
+7. [include/referee/referee_tx_scheduler.hpp](/home/hanni/Radar/include/referee/referee_tx_scheduler.hpp:33)
+8. [.agent/radar_stability_review.md](/home/hanni/Radar/.agent/radar_stability_review.md:1)
 
-- `include/radar/app/main.cc`
+如果问题是：
 
-现有接法是：
-
-1. 创建 `Referee<RefereeRevision::kNewV120>`
-2. 创建 `RefereeUser<RefereeRevision::kNewV120>`
-3. 用 `referee->AttachCallback(...)` 把 `RefereeUser::AttachCallback` 挂进去
-4. 串口驱动把字节流送给 `Referee`
-
-后续若雷达程序需要接入串口裁判系统，优先继续沿用这套接线方式。
-若信息波处理端通过 TCP 或其他链路把处理结果送到雷达程序，也应尽量把结果转换到这些现有结构体后再进入发送链路。
-
-## 对后续雷达通信的默认策略
-
-### 项目主流程
-
-默认按以下主流程理解系统：
-
-1. 接收信息波处理端数据
-2. 接收裁判系统/服务器端数据
-3. 统一落到现有协议结构体
-4. 进行状态处理、信息整合和决策
-5. 打包后发送至裁判系统/服务器端
-
-### 串口裁判系统
-
-默认使用：
-
-- `Referee<rm::device::RefereeRevision::kNewV120>`
-
-### 0x301 用户子协议
-
-默认使用：
-
-- `RefereeUser<rm::device::RefereeRevision::kNewV120>`
-- `Referee0x301Prepare()`
-
-### 小地图位置数据
-
-默认使用：
-
-- `MapRobotPosition`
-- `RefereePrepare()`
-
-### CRC
-
-默认使用：
-
-- `rm::modules::Crc8(...)`
-- `rm::modules::Crc16(...)`
-
-### 信息波
-
-当前理解分两层：
-
-1. 官方主协议层
-   - `kNewV120` 已引入 `0x0A01~0x0A06` 命令头常量
-2. 项目落地层
-   - 目前主要通过 `subReferee/protocol_user.hpp` 中的
-     `EnemyRobotPosition / HP / ProjectileAllowance / GoldCoinRFID / Buff / AllRadarInfo`
-     来承载信息波结果
-
-因此，后续如无新的要求，默认优先复用现有 `subReferee` 结构体作为信息波处理端结果进入雷达程序后的对内数据结构，再通过现有打包 API 发往裁判系统/服务器端。
-
-## 当前未完成点
-
-- `referee.hpp` 现在已经显式包含 `protocol_new_v120.hpp`，因此 `Referee<kNewV120>` 的模板入口已经具备。
-- `protocol_new_v120.hpp` 虽然加入了 `0x0A01~0x0A06` 命令头，但主结构体与内存映射还没补这些命令的数据落点。
-- 如果后续需要让 `Referee<kNewV120>` 直接自动接住信息波帧，就要继续补主协议结构体字段与 `MemoryMap`。
-
-## 一句话记忆
-
-后续雷达通信默认策略：
-
-- 串口主帧交给 `Referee<kNewV120>`
-- `0x301` 子协议交给 `RefereeUser`
-- 打包走 `Referee0x301Prepare` / `RefereePrepare`
-- CRC 一律走 `rm::modules::Crc8/Crc16`
-- 信息波处理端结果优先落到 `protocol_user.hpp` 已有结构体
-- 最终结果按协议要求发送至裁判系统/服务器端
+- TCP 连不上：优先看 [include/referee/tcp_client.hpp](/home/hanni/Radar/include/referee/tcp_client.hpp:46)、[include/referee/tcp_connection_log.hpp](/home/hanni/Radar/include/referee/tcp_connection_log.hpp:23) 和 `main/tcp_*.log`
+- `0x0305` 发送异常：优先看 [include/referee/map_robot_relay.hpp](/home/hanni/Radar/include/referee/map_robot_relay.hpp:254)、[include/referee/referee_tx_scheduler.hpp](/home/hanni/Radar/include/referee/referee_tx_scheduler.hpp:33)
+- `0x0121` 发送异常：优先看 [include/referee/radar_decision_tree.hpp](/home/hanni/Radar/include/referee/radar_decision_tree.hpp:45)、[include/referee/radar_command_sender.hpp](/home/hanni/Radar/include/referee/radar_command_sender.hpp:85)
+- 运行卡顿或日志过多：优先看 [include/log/log_backend.hpp](/home/hanni/Radar/include/log/log_backend.hpp:129) 与 `runtime_metrics.log`

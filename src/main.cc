@@ -63,15 +63,15 @@ int main() {
     radar::referee::TcpClient info_wave_tcp;
     if (radar::config::kInfoWaveInputMode == radar::config::RefereeInputSourceMode::kReal) {
       radar::referee::TryOpenConfiguredTcpClient(&info_wave_tcp, "info_wave_tcp",
-                                                 radar::config::kInfoWaveTcpListenPort, true, tcp_log, &std::cerr);
+                                                 radar::config::kInfoWaveTcpServerPort, true, tcp_log, &std::cerr);
     }
     radar::referee::TcpClient enemy_level1_key_tcp;
     radar::referee::TryOpenConfiguredTcpClient(&enemy_level1_key_tcp, "enemy_level1_key_tcp",
-                                               radar::config::kEnemyLevel1KeyTcpListenPort, true, tcp_log,
+                                               radar::config::kEnemyLevel1KeyTcpServerPort, true, tcp_log,
                                                &std::cerr);
     radar::referee::TcpClient enemy_level2_key_tcp;
     radar::referee::TryOpenConfiguredTcpClient(&enemy_level2_key_tcp, "enemy_level2_key_tcp",
-                                               radar::config::kEnemyLevel2KeyTcpListenPort, true, tcp_log,
+                                               radar::config::kEnemyLevel2KeyTcpServerPort, true, tcp_log,
                                                &std::cerr);
 
     // 创建常规链路、信息波链路与发送链路各自的状态维护对象。
@@ -83,9 +83,9 @@ int main() {
     radar::referee::RadarDecisionTree<kRevision> radar_decision_tree(radar_command_sender);
     radar::referee::MapRobotRelay<kRevision> relay(tx_scheduler, run_log_root);
     radar::referee::EnemyKeyReceiver<kRevision> enemy_level1_key_receiver(
-        "enemy_level1_key", radar::config::kEnemyLevel1KeyTcpListenPort, radar_command_sender, run_log_root);
+        "enemy_level1_key", radar::config::kEnemyLevel1KeyTcpServerPort, radar_command_sender, run_log_root);
     radar::referee::EnemyKeyReceiver<kRevision> enemy_level2_key_receiver(
-        "enemy_level2_key", radar::config::kEnemyLevel2KeyTcpListenPort, radar_command_sender, run_log_root);
+        "enemy_level2_key", radar::config::kEnemyLevel2KeyTcpServerPort, radar_command_sender, run_log_root);
 
     std::optional<radar::referee::ReplayInputSource> serial_replay_source;
     std::optional<radar::referee::ReplayInputSource> info_wave_replay_source;

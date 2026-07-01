@@ -183,8 +183,8 @@ void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp
 
     const auto now = LoopClock::now();
     if (!*retry_state_logged) {
-      tcp_log.LogListenerState(name, radar::config::kTcpLocalBindAddress, port, "reconnecting",
-                               std::string("remote=") + radar::config::kTcpServerAddress);
+      tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "reconnecting",
+                              std::string("remote=") + radar::config::kTcpServerAddress);
       *retry_state_logged = true;
     }
     if (last_attempt_time->has_value() &&
@@ -196,8 +196,8 @@ void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp
     std::string error;
     if (client.TryOpen(radar::config::kTcpServerAddress, port, radar::config::kTcpLocalBindAddress, &error)) {
       const std::string detail = std::string("remote=") + radar::config::kTcpServerAddress;
-      tcp_log.LogListenerState(name, radar::config::kTcpLocalBindAddress, port,
-                               client.is_connected() ? "connected" : "connecting", detail);
+      tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port,
+                              client.is_connected() ? "connected" : "connecting", detail);
       tcp_log.LogClientState(name, radar::config::kTcpLocalBindAddress, port,
                              client.is_connected() ? client.peer_ip() : radar::config::kTcpServerAddress,
                              client.is_connected() ? "connected" : "connecting", detail);
@@ -205,11 +205,11 @@ void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp
       return;
     }
 
-    tcp_log.LogListenerState(name, radar::config::kTcpLocalBindAddress, port, "connect_failed", error);
+    tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "connect_failed", error);
     if (!allow_debug_disable || !radar::config::kDebugAllowMissingInterfaces) {
       return;
     }
-    tcp_log.LogListenerState(name, radar::config::kTcpLocalBindAddress, port, "disabled", "debug_allow_missing");
+    tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "disabled", "debug_allow_missing");
   };
 
   /**
@@ -292,14 +292,14 @@ void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp
   while (running.load()) {
     const auto loop_start = std::chrono::steady_clock::now();
     try_reconnect_serial();
-    try_reconnect_tcp_client(info_wave_tcp, "info_wave_tcp", radar::config::kInfoWaveTcpListenPort,
+    try_reconnect_tcp_client(info_wave_tcp, "info_wave_tcp", radar::config::kInfoWaveTcpServerPort,
                              !info_wave_input_is_file, true, &last_info_wave_connect_attempt_time,
                              &info_wave_connect_retry_state_logged);
     try_reconnect_tcp_client(enemy_level1_key_tcp, "enemy_level1_key_tcp",
-                             radar::config::kEnemyLevel1KeyTcpListenPort, !enemy_level1_key_receiver.completed(), true,
+                             radar::config::kEnemyLevel1KeyTcpServerPort, !enemy_level1_key_receiver.completed(), true,
                              &last_level1_connect_attempt_time, &level1_connect_retry_state_logged);
     try_reconnect_tcp_client(enemy_level2_key_tcp, "enemy_level2_key_tcp",
-                             radar::config::kEnemyLevel2KeyTcpListenPort, !enemy_level2_key_receiver.completed(), true,
+                             radar::config::kEnemyLevel2KeyTcpServerPort, !enemy_level2_key_receiver.completed(), true,
                              &last_level2_connect_attempt_time, &level2_connect_retry_state_logged);
     const auto loop_now = LoopClock::now();
 
@@ -430,7 +430,7 @@ void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp
                                  info_wave_tcp.peer_ip(), "connected", "connect_completed");
         } else {
           tcp_log.LogClientState("info_wave_tcp", radar::config::kTcpLocalBindAddress,
-                                 radar::config::kInfoWaveTcpListenPort, radar::config::kTcpServerAddress,
+                                 radar::config::kInfoWaveTcpServerPort, radar::config::kTcpServerAddress,
                                  "disconnected", error);
         }
       }
@@ -461,7 +461,7 @@ void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp
                                  "connect_completed");
         } else {
           tcp_log.LogClientState("enemy_level1_key_tcp", radar::config::kTcpLocalBindAddress,
-                                 radar::config::kEnemyLevel1KeyTcpListenPort, radar::config::kTcpServerAddress,
+                                 radar::config::kEnemyLevel1KeyTcpServerPort, radar::config::kTcpServerAddress,
                                  "disconnected", error);
         }
       }
@@ -494,7 +494,7 @@ void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp
                                  "connect_completed");
         } else {
           tcp_log.LogClientState("enemy_level2_key_tcp", radar::config::kTcpLocalBindAddress,
-                                 radar::config::kEnemyLevel2KeyTcpListenPort, radar::config::kTcpServerAddress,
+                                 radar::config::kEnemyLevel2KeyTcpServerPort, radar::config::kTcpServerAddress,
                                  "disconnected", error);
         }
       }

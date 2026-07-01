@@ -51,20 +51,18 @@ constexpr int kSerialRefereeReplayRateHz = 100;
 constexpr const char *kTcpLocalBindAddress = "";
 /// TCP 对端服务端地址；`8001/8002/8003` 均主动连接到该地址。
 constexpr const char *kTcpServerAddress = "192.168.50.112";
-/// 允许接入的 TCP 对端 IP，客户端模式下通常与 `kTcpServerAddress` 保持一致。
-constexpr const char *kAllowedTcpPeerIp = "192.168.50.112";
 /// 信息波输入模式，仅覆盖 `8001`。
 constexpr auto kInfoWaveInputMode = RefereeInputSourceMode::kReal;
 /// 信息波 `8001` 回放文件路径，模式为 `kFile` 时必须非空。
 constexpr const char *kInfoWaveReplayFile = "";
 /// 信息波 `8001` 回放频率，单位 Hz；文件回放按完整协议帧节拍推进。
 constexpr int kInfoWaveReplayRateHz = 100;
-/// 信息波位置数据对端端口。
-constexpr int kInfoWaveTcpListenPort = 8001;
-/// 敌方一级密钥对端端口。
-constexpr int kEnemyLevel1KeyTcpListenPort = 8002;
-/// 敌方二级密钥对端端口。
-constexpr int kEnemyLevel2KeyTcpListenPort = 8003;
+/// 信息波位置数据对端服务端端口。
+constexpr int kInfoWaveTcpServerPort = 8001;
+/// 敌方一级密钥对端服务端端口。
+constexpr int kEnemyLevel1KeyTcpServerPort = 8002;
+/// 敌方二级密钥对端服务端端口。
+constexpr int kEnemyLevel2KeyTcpServerPort = 8003;
 /// 串口掉线后的自动重连周期。
 constexpr int kSerialReconnectIntervalMs = 500;
 /// TCP 连接失败后的重试周期。
@@ -75,8 +73,8 @@ constexpr int kTcpConnectTimeoutMs = 3000;
 constexpr int kInfoWaveStateTimeoutMs = 500;
 /// 常规链路状态过期时间。
 constexpr int kRefereeStateTimeoutMs = 3000;
-/// 信息波 TCP 客户端空闲断开时间。
-constexpr int kInfoWaveTcpIdleTimeoutMs = 1000;
+/// 信息波 TCP 客户端空闲断开时间；`<=0` 表示保持连接，不因空闲主动断开。
+constexpr int kInfoWaveTcpIdleTimeoutMs = 0;
 /// 敌方密钥 TCP 客户端空闲断开时间。
 constexpr int kEnemyKeyTcpIdleTimeoutMs = 3000;
 /// `0x0305` 最小发送间隔。

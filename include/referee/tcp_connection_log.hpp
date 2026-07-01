@@ -18,7 +18,7 @@
 namespace radar::referee {
 
 /**
- * @brief 维护 TCP 启动、监听与客户端连接状态日志
+ * @brief 维护 TCP 启动、连接通道与客户端连接状态日志
  */
 class TcpConnectionLog {
  public:
@@ -41,10 +41,10 @@ class TcpConnectionLog {
   }
 
   /**
- * @brief 记录一次 TCP 连接槽位状态变化
+   * @brief 记录一次 TCP 连接通道状态变化
    */
-  void LogListenerState(const std::string &name, const std::string &bind_address, int port, const std::string &state,
-                        const std::string &detail) {
+  void LogChannelState(const std::string &name, const std::string &bind_address, int port, const std::string &state,
+                       const std::string &detail) {
     std::ostringstream oss;
     oss << "{"
         << "\"timestamp\":\"" << radar::log::TimestampNow() << "\","
@@ -53,7 +53,7 @@ class TcpConnectionLog {
         << "\"port\":" << port << ','
         << "\"state\":\"" << state << "\","
         << "\"detail\":\"" << detail << "\"}";
-    log_store_.Append("main/tcp_listener_state.log", oss.str(), radar::log::LogPriority::kCriticalDecision);
+    log_store_.Append("main/tcp_channel_state.log", oss.str(), radar::log::LogPriority::kCriticalDecision);
   }
 
   /**
@@ -87,8 +87,8 @@ inline void TryOpenConfiguredTcpClient(TcpClient *client, const std::string &nam
     const std::string detail = std::string("remote=") + radar::config::kTcpServerAddress;
     tcp_log.LogStartup(name, radar::config::kTcpLocalBindAddress, port,
                        client->is_connected() ? "connected" : "connecting", detail);
-    tcp_log.LogListenerState(name, radar::config::kTcpLocalBindAddress, port,
-                             client->is_connected() ? "connected" : "connecting", detail);
+    tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port,
+                            client->is_connected() ? "connected" : "connecting", detail);
     tcp_log.LogClientState(name, radar::config::kTcpLocalBindAddress, port,
                            client->is_connected() ? client->peer_ip() : radar::config::kTcpServerAddress,
                            client->is_connected() ? "connected" : "connecting", detail);
@@ -96,14 +96,14 @@ inline void TryOpenConfiguredTcpClient(TcpClient *client, const std::string &nam
   }
 
   tcp_log.LogStartup(name, radar::config::kTcpLocalBindAddress, port, "connect_failed", error);
-  tcp_log.LogListenerState(name, radar::config::kTcpLocalBindAddress, port, "connect_failed", error);
+  tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "connect_failed", error);
   if (error_stream != nullptr) {
     *error_stream << error << '\n';
   }
 
   if (optional_in_debug && radar::config::kDebugAllowMissingInterfaces) {
     tcp_log.LogStartup(name, radar::config::kTcpLocalBindAddress, port, "disabled", "debug_allow_missing");
-    tcp_log.LogListenerState(name, radar::config::kTcpLocalBindAddress, port, "disabled", "debug_allow_missing");
+    tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "disabled", "debug_allow_missing");
   }
 }
 
