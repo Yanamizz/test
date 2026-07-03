@@ -1,15 +1,19 @@
 /**
  * @file    include/Tools/TcpStageSignalReceiver.hpp
- * @brief   监听 TCP 阶段信号并按字节输出 0x00/0x01。
+ * @brief   监听 TCP 阶段控制命令并按协议帧输出。
  *
- * 该模块提供一个轻量监听器：主程序作为 TCP server 监听外部阶段脉冲输入，
- * 每次收到单字节 `0x00` 或 `0x01` 时交给上层做边沿判定。它只负责网络连接
- * 生命周期与字节接收，不直接修改阶段状态机。
+ * 当前协议约定：
+ * - `0x91 + 1Byte + 2Byte`：第 1 个 payload byte 的低 4 bit 为 `game_progress`，
+ *   后 2 个 byte 按网络序（大端）组成 `stage_remain_time`
+ * - `0x92 + 1Byte`：payload byte 的低 1 bit 为“敌方无人机是否被反制”状态
+ *
+ * 该模块只负责 TCP 连接生命周期、流式收包和协议帧切分，不直接修改阶段状态机。
  */
 
 #pragma once
 
 #include <arpa/inet.h>
+#include <array>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -18,6 +22,10 @@
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <utility>
+#include <vector>
+
+#include "Tools/TcpStageProtocol.hpp"
 
 namespace Tools {
 
@@ -39,8 +47,8 @@ public:
 
   ~TcpStageSignalReceiver() { Close(); }
 
-  bool PollNextByte(std::uint8_t *value) {
-    if (value == nullptr) {
+  bool PollNextCommand(TcpStageCommand *command) {
+    if (command == nullptr) {
       return false;
     }
 
@@ -52,16 +60,17 @@ public:
       return false;
     }
 
-    std::uint8_t byte = 0;
-    const ssize_t recv_count = ::recv(client_fd_, &byte, sizeof(byte), 0);
-    if (recv_count == 1) {
-      if (byte == 0x00 || byte == 0x01) {
-        *value = byte;
-        return true;
-      }
-      std::cout << "[TCP阶段] 忽略非法字节 0x" << std::hex
-                << static_cast<int>(byte) << std::dec << std::endl;
-      return false;
+    if (TryParseNextCommand_(command)) {
+      return true;
+    }
+
+    std::array<std::uint8_t, 64> recv_chunk{};
+    const ssize_t recv_count =
+        ::recv(client_fd_, recv_chunk.data(), recv_chunk.size(), 0);
+    if (recv_count > 0) {
+      recv_buffer_.insert(recv_buffer_.end(), recv_chunk.begin(),
+                          recv_chunk.begin() + recv_count);
+      return TryParseNextCommand_(command);
     }
 
     if (recv_count == 0) {
@@ -79,10 +88,33 @@ public:
     return false;
   }
 
-  static bool SendSingleByte(const std::string &host, std::uint16_t port,
-                             std::uint8_t value) {
-    if (value != 0x00 && value != 0x01) {
-      std::cerr << "[TCP阶段] 只允许发送 0x00 或 0x01" << std::endl;
+  static bool SendGameState(const std::string &host, std::uint16_t port,
+                            std::uint8_t game_progress,
+                            std::uint16_t stage_remain_time) {
+    const auto payload =
+        EncodeGameStateCommand(game_progress, stage_remain_time);
+    return SendSingleCommand_(host, port, payload.data(), payload.size());
+  }
+
+  static bool SendCounteredState(const std::string &host, std::uint16_t port,
+                                 bool countered) {
+    const auto payload = EncodeCounteredStateCommand(countered);
+    return SendSingleCommand_(host, port, payload.data(), payload.size());
+  }
+
+  void Close() {
+    CloseClient_();
+    if (listen_fd_ >= 0) {
+      ::close(listen_fd_);
+      listen_fd_ = -1;
+    }
+  }
+
+private:
+  static bool SendSingleCommand_(const std::string &host, std::uint16_t port,
+                                 const std::uint8_t *payload,
+                                 std::size_t payload_size) {
+    if (payload == nullptr || payload_size == 0) {
       return false;
     }
 
@@ -110,10 +142,7 @@ public:
       return false;
     }
 
-    const ssize_t sent = ::send(fd, &value, sizeof(value), 0);
-    if (sent != static_cast<ssize_t>(sizeof(value))) {
-      std::cerr << "[TCP阶段] send 失败: " << std::strerror(errno)
-                << std::endl;
+    if (!SendAll_(fd, payload, payload_size)) {
       ::close(fd);
       return false;
     }
@@ -122,15 +151,50 @@ public:
     return true;
   }
 
-  void Close() {
-    CloseClient_();
-    if (listen_fd_ >= 0) {
-      ::close(listen_fd_);
-      listen_fd_ = -1;
+  bool TryParseNextCommand_(TcpStageCommand *command) {
+    while (!recv_buffer_.empty()) {
+      std::size_t consumed_size = 0;
+      const auto decode_status = TryDecodeTcpStageCommand(
+          recv_buffer_.data(), recv_buffer_.size(), command, &consumed_size);
+      if (decode_status == TcpStageDecodeStatus::Decoded) {
+        recv_buffer_.erase(recv_buffer_.begin(),
+                           recv_buffer_.begin() + consumed_size);
+        return true;
+      }
+      if (decode_status == TcpStageDecodeStatus::NeedMoreData) {
+        return false;
+      }
+
+      std::cout << "[TCP阶段] 忽略未知命令码 0x" << std::hex
+                << static_cast<int>(recv_buffer_.front()) << std::dec
+                << std::endl;
+      recv_buffer_.erase(recv_buffer_.begin());
     }
+    return false;
   }
 
-private:
+  static bool SendAll_(int fd, const std::uint8_t *payload,
+                       std::size_t payload_size) {
+    std::size_t offset = 0;
+    while (offset < payload_size) {
+      const ssize_t sent =
+          ::send(fd, payload + offset, payload_size - offset, 0);
+      if (sent > 0) {
+        offset += static_cast<std::size_t>(sent);
+        continue;
+      }
+
+      if (sent < 0 && errno == EINTR) {
+        continue;
+      }
+
+      std::cerr << "[TCP阶段] send 失败: " << std::strerror(errno)
+                << std::endl;
+      return false;
+    }
+    return true;
+  }
+
   bool EnsureListening_() {
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) {
@@ -231,11 +295,13 @@ private:
       ::close(client_fd_);
       client_fd_ = -1;
     }
+    recv_buffer_.clear();
   }
 
   TcpStageSignalConfig config_{};
   int listen_fd_ = -1;
   int client_fd_ = -1;
+  std::vector<std::uint8_t> recv_buffer_;
 };
 
 class TcpStageSignalSender {
@@ -245,24 +311,23 @@ public:
 
   ~TcpStageSignalSender() { Close(); }
 
-  bool SendByte(std::uint8_t value) {
-    if (value != 0x00 && value != 0x01) {
-      std::cerr << "[TCP阶段] 只允许发送 0x00 或 0x01" << std::endl;
-      return false;
-    }
-
+  bool SendGameState(std::uint8_t game_progress,
+                     std::uint16_t stage_remain_time) {
     if (!EnsureConnected_()) {
       return false;
     }
 
-    const ssize_t sent = ::send(fd_, &value, sizeof(value), 0);
-    if (sent == static_cast<ssize_t>(sizeof(value))) {
-      return true;
+    const auto payload = EncodeGameStateCommand(game_progress, stage_remain_time);
+    return SendPayload_(payload.data(), payload.size());
+  }
+
+  bool SendCounteredState(bool countered) {
+    if (!EnsureConnected_()) {
+      return false;
     }
 
-    std::cerr << "[TCP阶段] send 失败: " << std::strerror(errno) << std::endl;
-    Close();
-    return false;
+    const auto payload = EncodeCounteredStateCommand(countered);
+    return SendPayload_(payload.data(), payload.size());
   }
 
   void Close() {
@@ -273,6 +338,32 @@ public:
   }
 
 private:
+  bool SendPayload_(const std::uint8_t *payload, std::size_t payload_size) {
+    if (payload == nullptr || payload_size == 0) {
+      return false;
+    }
+
+    std::size_t offset = 0;
+    while (offset < payload_size) {
+      const ssize_t sent =
+          ::send(fd_, payload + offset, payload_size - offset, 0);
+      if (sent > 0) {
+        offset += static_cast<std::size_t>(sent);
+        continue;
+      }
+
+      if (sent < 0 && errno == EINTR) {
+        continue;
+      }
+
+      std::cerr << "[TCP阶段] send 失败: " << std::strerror(errno)
+                << std::endl;
+      Close();
+      return false;
+    }
+    return true;
+  }
+
   bool EnsureConnected_() {
     if (fd_ >= 0) {
       return true;

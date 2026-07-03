@@ -1,7 +1,7 @@
 # Change Entrypoints
 
 用途：按任务类型快速定位改动入口。  
-更新时间：2026-06-02
+更新时间：2026-07-03
 适用场景：准备改代码、评估影响面、做交接定位。
 
 ## 任务到入口映射
@@ -25,6 +25,7 @@
 
 5. TCP 网络控制链路
 - `include/Tools/TcpStageSignalReceiver.hpp`
+- `include/Tools/AimbotLaserStateController.hpp`
 - `src/ImagePredict.cc` 中 `TCPStageThread`
 - `src/TcpStageRecvTest.cc`
 - `src/TcpStageSendTest.cc`

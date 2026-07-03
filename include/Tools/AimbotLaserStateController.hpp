@@ -1,10 +1,11 @@
 /**
  * @file    include/Tools/AimbotLaserStateController.hpp
- * @brief   收口激光开启阈值与阶段初始化逻辑。
+ * @brief   收口激光开启阈值、TCP 阶段状态与阶段初始化逻辑。
  *
  * AimbotLaserStateController 根据首次有效目标距离触发激光开启 flag，并维护
- * 阶段判断初始化状态与当前锁定阶段。当前业务约定是触发后 AimbotTarget 保持
- * 开启，距离不再直接关闭激光；该控制器只管理这些语义，不发送串口帧。
+ * 当前锁定阶段、`game_progress`、`stage_remain_time` 和 0x92 反制位的
+ * 上升沿推进。当前业务约定是触发后 AimbotTarget 保持开启，距离不再直接
+ * 关闭激光；该控制器只管理这些语义，不发送串口帧。
  */
 
 #pragma once
@@ -18,13 +19,41 @@
 #include "ImageRecognize/AerialRobotLaserLockJudge.hpp"
 #include "SerialTask/Common.hpp"
 #include "Tools/RuntimeParams.hpp"
+#include "Tools/TcpStageProtocol.hpp"
 
 namespace Tools {
 
 class AimbotLaserStateController {
 public:
+  struct TcpStageCommandApplyResult {
+    TcpStageCommand command{};
+    int previous_stage = ImageRecognize::AerialRobotLaserLockJudge::kInitialStage;
+    int current_stage = ImageRecognize::AerialRobotLaserLockJudge::kInitialStage;
+    bool stage_advanced = false;
+  };
+
   int CurrentStage() const {
     return current_stage_.load(std::memory_order_acquire);
+  }
+
+  std::uint8_t CurrentGameProgress() const {
+    return game_progress_.load(std::memory_order_acquire);
+  }
+
+  std::uint16_t CurrentStageRemainTime() const {
+    return stage_remain_time_.load(std::memory_order_acquire);
+  }
+
+  bool CurrentCounteredState() const {
+    return last_tcp_countered_high_.load(std::memory_order_acquire);
+  }
+
+  static bool UsesStage3ResourcesForStage(int stage) {
+    return stage >= ImageRecognize::AerialRobotLaserLockJudge::kStage3FirstStage;
+  }
+
+  static const char *ResourceGroupNameForStage(int stage) {
+    return UsesStage3ResourcesForStage(stage) ? "stage3" : "stage1/2";
   }
 
   void SetCurrentStage(int stage) {
@@ -38,11 +67,17 @@ public:
     }
   }
 
-  bool ProcessTcpSignalLevel(uint8_t signal_value) {
-    const bool signal_high = signal_value != 0x00;
-    const bool previous_signal_high =
-        last_tcp_signal_high_.exchange(signal_high, std::memory_order_acq_rel);
-    if (previous_signal_high || !signal_high) {
+  void UpdateGameState(std::uint8_t game_progress,
+                       std::uint16_t stage_remain_time) {
+    game_progress_.store(static_cast<std::uint8_t>(game_progress & 0x0F),
+                         std::memory_order_release);
+    stage_remain_time_.store(stage_remain_time, std::memory_order_release);
+  }
+
+  bool ProcessTcpCounteredState(bool countered) {
+    const bool previous_countered =
+        last_tcp_countered_high_.exchange(countered, std::memory_order_acq_rel);
+    if (previous_countered || !countered) {
       return false;
     }
 
@@ -51,6 +86,22 @@ public:
         previous_stage + 1, ImageRecognize::AerialRobotLaserLockJudge::kFinishedStage);
     SetCurrentStage(next_stage);
     return next_stage != previous_stage;
+  }
+
+  TcpStageCommandApplyResult ApplyTcpCommand(const TcpStageCommand &command) {
+    TcpStageCommandApplyResult result{};
+    result.command = command;
+    result.previous_stage = CurrentStage();
+
+    if (command.type == TcpStageCommandType::GameState91) {
+      UpdateGameState(command.game_progress, command.stage_remain_time);
+      result.current_stage = result.previous_stage;
+      return result;
+    }
+
+    result.stage_advanced = ProcessTcpCounteredState(command.countered);
+    result.current_stage = CurrentStage();
+    return result;
   }
 
   std::uint64_t StageVersion() const {
@@ -108,7 +159,9 @@ private:
   std::atomic<bool> distance_flag_triggered_{false};
   std::atomic<int> current_stage_{
       ImageRecognize::AerialRobotLaserLockJudge::kInitialStage};
-  std::atomic<bool> last_tcp_signal_high_{false};
+  std::atomic<std::uint8_t> game_progress_{0};
+  std::atomic<std::uint16_t> stage_remain_time_{0};
+  std::atomic<bool> last_tcp_countered_high_{false};
   std::atomic<std::uint64_t> stage_version_{0};
 };
 

@@ -20,6 +20,7 @@
 #include "ImageRecognize/ImageShow.hpp"
 #include "ImageRecognize/OverlayFrameRenderer.hpp"
 #include "ImageRecognize/StagePredictorController.hpp"
+#include "ImageRecognize/TcpStageRuntimeSynchronizer.hpp"
 #include "ImageRecognize/TargetTrackPipeline.hpp"
 #include "ImageRecognize/TargetTracking.hpp"
 #include "ImageRecognize/YoloLightPreprocess.hpp"
@@ -590,19 +591,33 @@ void TCPStageThread() {
   const auto idle_sleep = std::chrono::milliseconds(std::max(1, Tools::Params().tcp_stage_idle_sleep_ms));
 
   while (g_running) {
-    std::uint8_t signal_value = 0x00;
-    if (!receiver.PollNextByte(&signal_value)) {
+    Tools::TcpStageCommand command{};
+    if (!receiver.PollNextCommand(&command)) {
       std::this_thread::sleep_for(idle_sleep);
       continue;
     }
 
-    const int previous_stage = g_aimbot_laser_state_controller.CurrentStage();
-    const bool advanced = g_aimbot_laser_state_controller.ProcessTcpSignalLevel(signal_value);
-    const int current_stage = g_aimbot_laser_state_controller.CurrentStage();
-    std::cout << "[TCP阶段] 收到 0x" << std::hex << static_cast<int>(signal_value) << std::dec
-              << " current_stage=" << current_stage;
-    if (advanced) {
-      std::cout << " (advanced from " << previous_stage << ")";
+    const auto apply_result =
+        g_aimbot_laser_state_controller.ApplyTcpCommand(command);
+    if (apply_result.command.type == Tools::TcpStageCommandType::GameState91) {
+      std::cout << "[TCP阶段] 收到 0x91 game_progress="
+                << static_cast<int>(apply_result.command.game_progress)
+                << " stage_remain_time="
+                << apply_result.command.stage_remain_time
+                << std::endl;
+      continue;
+    }
+
+    std::cout << "[TCP阶段] 收到 0x92 countered="
+              << (apply_result.command.countered ? 1 : 0)
+              << " current_stage=" << apply_result.current_stage
+              << " game_progress="
+              << static_cast<int>(
+                     g_aimbot_laser_state_controller.CurrentGameProgress())
+              << " stage_remain_time="
+              << g_aimbot_laser_state_controller.CurrentStageRemainTime();
+    if (apply_result.stage_advanced) {
+      std::cout << " (advanced from " << apply_result.previous_stage << ")";
     }
     std::cout << std::endl;
   }
@@ -711,45 +726,16 @@ void ImagePredictThread(ImageRecognize::ImagePredict &predictor, Tools::ScanCont
       ImageRecognize::StagePredictorController::Hooks{&g_exposure_controller, &g_stage3_roi_mode, &g_scan_stage3_mode,
                                                       &scan_controller, &g_scan_controller_mutex, reset_tracking_state,
                                                       RequestStop});
-  std::uint64_t last_stage_version = g_aimbot_laser_state_controller.StageVersion();
-  int last_stage = g_aimbot_laser_state_controller.CurrentStage();
-  aerial_robot_stage_judge.SetStage(last_stage);
-  stage_predictor_controller.EnsureRuntimeStage(g_aimbot_laser_state_controller.UsesStage3Resources()
-                                                    ? Tools::RuntimeStage::Stage3
-                                                    : Tools::RuntimeStage::Stage12,
-                                                "startup_stage_sync");
-
-  const auto sync_tcp_stage = [&]() {
-    const std::uint64_t stage_version = g_aimbot_laser_state_controller.StageVersion();
-    if (stage_version == last_stage_version) {
-      return;
-    }
-
-    const int current_stage = g_aimbot_laser_state_controller.CurrentStage();
-    const bool resource_group_changed = (last_stage >= ImageRecognize::AerialRobotLaserLockJudge::kStage3FirstStage) !=
-                                        (current_stage >= ImageRecognize::AerialRobotLaserLockJudge::kStage3FirstStage);
-    aerial_robot_stage_judge.SetStage(current_stage);
-    stage_judge_tick_initialized = false;
-    stage_tick_has_purple_observation = false;
-    stage_tick_has_any_boxes = false;
-    stage_tick_interrupted = false;
-    stage_tick_laser_judge_class_id = -1;
-    if (resource_group_changed) {
-      stage_predictor_controller.EnsureRuntimeStage(
-          current_stage >= ImageRecognize::AerialRobotLaserLockJudge::kStage3FirstStage ? Tools::RuntimeStage::Stage3
-                                                                                        : Tools::RuntimeStage::Stage12,
-          "tcp_stage_edge");
-      target_lost_since_initialized = false;
-    }
-    std::cout << "[空中机器人阶段] TCP 推进到 stage" << current_stage << "，资源组="
-              << (current_stage >= ImageRecognize::AerialRobotLaserLockJudge::kStage3FirstStage ? "stage3" : "stage1/2")
-              << std::endl;
-    last_stage = current_stage;
-    last_stage_version = stage_version;
-  };
+  ImageRecognize::TcpStageRuntimeSynchronizer tcp_stage_runtime_synchronizer(
+      &g_aimbot_laser_state_controller, &aerial_robot_stage_judge,
+      &stage_predictor_controller,
+      ImageRecognize::TcpStageRuntimeSynchronizer::Hooks{
+          reset_tracking_state,
+          [&]() { target_lost_since_initialized = false; }});
+  tcp_stage_runtime_synchronizer.InitializeCurrentStage();
 
   while (g_running) {
-    sync_tcp_stage();
+    tcp_stage_runtime_synchronizer.SyncIfNeeded();
 
     if (!infer_inflight) {
       if (infer_submit_interval != std::chrono::steady_clock::duration::zero()) {

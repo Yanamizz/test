@@ -1,10 +1,29 @@
 # Latest Handoff
 
 用途：记录最近一次交接结论与后续建议。  
-更新时间：2026-06-27
+更新时间：2026-07-03
 适用场景：新 Agent 快速接续、避免重复排查。
 
 ## 本轮完成事项（延迟优先）
+
+35. TCP 阶段链路升级为 `0x91/0x92` 命令帧协议
+- 文件：`include/Tools/TcpStageSignalReceiver.hpp`
+- 文件：`include/Tools/AimbotLaserStateController.hpp`
+- 文件：`src/ImagePredict.cc`
+- 文件：`src/TcpStageRecvTest.cc`
+- 文件：`src/TcpStageSendTest.cc`
+- 文件：`README.md`
+- 文件：`agent-context/01-core-overview.md`
+- 文件：`agent-context/03-business-contracts.md`
+- 文件：`agent-context/04-integration-and-troubleshooting.md`
+- 文件：`agent-context/05-change-entrypoints.md`
+- 文件：`agent-context/06-latest-handoff.md`
+- 变更：`TcpStageSignalReceiver` 从“单字节 `0x00/0x01` 电平”升级为流式命令帧解析：`0x91 + 1Byte + 2Byte` 维护 `game_progress/stage_remain_time`，`0x92 + 1Byte` 维护敌方无人机是否被反制状态。
+- 变更：`AimbotLaserStateController` 新增 `game_progress`、`stage_remain_time` 与 `0x92` 反制位维护；仅在 `0x92` 的低 `1 bit` 出现 `0->1` 上升沿时推进业务阶段，阶段上限仍为 `stage5`。
+- 变更：`ImagePredict.cc` 中 `TCPStageThread`、主流程阶段同步日志与 TCP 联调测试程序同步改为新协议；模型切换仍沿现有 seam，以 `stage1/2 -> stage12`、`stage4/5 -> stage3` 两组资源完成。
+- 协议假设：当前实现将 `0x91` 的第 1 个 payload byte 低 `4 bit` 视为 `game_progress`，后 `2Byte` 按大端解析为 `stage_remain_time`；`0x92` 只消费 payload byte 低 `1 bit`，其余高位忽略。
+- 风险判断：中低风险协议改造。若上位机实际使用了不同 nibble 位置或小端字节序，需要按联调结果微调解析。
+- 当前状态：已于 2026-07-03 本地执行 `cmake --build build -j --target ImagePredict TcpStageRecvTest TcpStageSendTest` 编译通过，并使用 `TcpStageRecvTest/TcpStageSendTest` 完成一轮 `0x91`、`0x92` 本地烟测。
 
 34. 删除五阶段 TCP 主导后失效的 stage3 fallback/probe 残留
 - 文件：`include/ImageRecognize/AerialRobotLaserLockJudge.hpp`

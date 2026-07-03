@@ -19,9 +19,17 @@ int main(int argc, char **argv) {
   std::cout << "TCP 阶段接收测试启动，监听 " << bind_ip << ":" << port << std::endl;
 
   while (true) {
-    std::uint8_t value = 0x00;
-    if (receiver.PollNextByte(&value)) {
-      std::cout << "recv 0x" << std::hex << static_cast<int>(value) << std::dec << std::endl;
+    Tools::TcpStageCommand command{};
+    if (receiver.PollNextCommand(&command)) {
+      if (command.type == Tools::TcpStageCommandType::GameState91) {
+        std::cout << "recv 0x91 game_progress="
+                  << static_cast<int>(command.game_progress)
+                  << " stage_remain_time=" << command.stage_remain_time
+                  << std::endl;
+      } else {
+        std::cout << "recv 0x92 countered=" << (command.countered ? 1 : 0)
+                  << std::endl;
+      }
       continue;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));

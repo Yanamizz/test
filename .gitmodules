@@ -1,9 +1,9 @@
 [submodule "third_lib/kalman"]
-	path = include/kalman
+	path = third_lib/kalman
 	url = https://github.com/mherb/kalman.git
 [submodule "third_lib/OneEuroFilter"]
-	path = include/OneEuroFilter
+	path = third_lib/OneEuroFilter
 	url = https://github.com/casiez/OneEuroFilter.git
 [submodule "third_lib/serial"]
-	path = include/serial
+	path = third_lib/serial
 	url = https://github.com/wjwwood/serial.git  
