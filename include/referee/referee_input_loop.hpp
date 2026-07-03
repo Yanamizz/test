@@ -6,27 +6,27 @@
  * @brief 主程序收发事件循环
  */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
-#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <thread>
 
 #include <poll.h>
 
 #include "include/log/referee_main_log.hpp"
 #include "include/referee/enemy_key_receiver.hpp"
 #include "include/referee/replay_input_source.hpp"
-#include "include/referee/serial_connection_log.hpp"
 #include "include/referee/referee_tx_scheduler.hpp"
+#include "include/referee/serial_connection_log.hpp"
 #include "include/referee/serial_port.hpp"
 #include "include/referee/tcp_client.hpp"
 #include "include/referee/tcp_connection_log.hpp"
+#include "include/referee/tcp_server.hpp"
 #include "librm/core/typedefs.hpp"
 
 namespace radar::referee {
@@ -45,232 +45,659 @@ void FeedBytes(Referee &referee, const rm::u8 *data, std::size_t size) {
   }
 }
 
-/**
- * @brief 完整主循环：串口接收 + 信息波 TCP 客户端 + 敌方密钥 TCP 客户端 + 统一发送调度
- * @tparam SerialReferee 常规链路解包器类型
- * @tparam InfoWaveReferee 信息波解包器类型
- * @tparam EnemyKeyReceiverT 敌方密钥接收器类型
- * @tparam RadarCommandSenderT 雷达指令发送器类型
- * @tparam MapRobotRelayT `0x0305` relay 类型
- */
+namespace detail {
+
+inline constexpr int kSerialReconnectIntervalMs = 500;
+inline constexpr int kTcpReconnectIntervalMs = 1000;
+inline constexpr int kTcpConnectTimeoutMs = 3000;
+inline constexpr int kInfoWaveTcpIdleTimeoutMs = 0;
+inline constexpr int kEnemyKeyTcpIdleTimeoutMs = 0;
+inline constexpr int kExternalTcpServerIdleTimeoutMs = 0;
+
+struct RefereeInputLoopRuntime {
+  using Clock = std::chrono::steady_clock;
+  static constexpr std::size_t kReadBufferSize = 2048;
+  static constexpr std::size_t kMaxPollFds = 10;
+
+  RefereeInputLoopRuntime(radar::log::BinaryLogStore &raw_log_store, bool serial_input_is_file_value,
+                          bool info_wave_input_is_file_value, bool enemy_level1_input_is_file_value,
+                          bool enemy_level2_input_is_file_value)
+      : metrics(radar::log::GetRuntimeMetrics(raw_log_store.root())),
+        serial_log(raw_log_store.root()),
+        tcp_log(raw_log_store.root()),
+        serial_input_is_file(serial_input_is_file_value),
+        info_wave_input_is_file(info_wave_input_is_file_value),
+        enemy_level1_input_is_file(enemy_level1_input_is_file_value),
+        enemy_level2_input_is_file(enemy_level2_input_is_file_value),
+        drain_duration(std::chrono::milliseconds(
+            std::max(radar::referee::kRefereeStateTimeoutMs, radar::referee::kInfoWaveStateTimeoutMs) + 1000)) {}
+
+  std::array<rm::u8, kReadBufferSize> read_buffer{};
+  radar::log::RuntimeMetrics &metrics;
+  SerialConnectionLog serial_log;
+  TcpConnectionLog tcp_log;
+  bool serial_input_is_file = false;
+  bool info_wave_input_is_file = false;
+  bool enemy_level1_input_is_file = false;
+  bool enemy_level2_input_is_file = false;
+  Clock::duration drain_duration{};
+};
+
 template <typename SerialReferee, typename InfoWaveReferee, typename EnemyKeyReceiverT, typename RadarCommandSenderT,
-          typename MapRobotRelayT>
-void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp, TcpClient &enemy_level1_key_tcp,
-                                    TcpClient &enemy_level2_key_tcp, SerialReferee &serial_referee,
-                                    InfoWaveReferee &info_wave_referee,
-                                    ReplayInputSource *serial_replay,
-                                    ReplayInputSource *info_wave_replay,
-                                    EnemyKeyReceiverT &enemy_level1_key_receiver,
-                                    EnemyKeyReceiverT &enemy_level2_key_receiver,
-                                    RadarCommandSenderT &radar_command_sender,
-                                    MapRobotRelayT &map_robot_relay,
-                                    RefereeTxScheduler &tx_scheduler,
-                                    radar::log::BinaryLogStore &raw_log_store,
-                                    const std::atomic<bool> &running) {
-  if ((serial_replay == nullptr &&
-       radar::config::kSerialRefereeInputMode == radar::config::RefereeInputSourceMode::kFile) ||
-      (info_wave_replay == nullptr &&
-       radar::config::kInfoWaveInputMode == radar::config::RefereeInputSourceMode::kFile)) {
-    throw std::runtime_error("replay input source is required but missing");
-  }
+          typename MapRobotRelayT, typename ExternalServerSenderT>
+struct RefereeInputLoopServices {
+  SerialPort &serial;
+  TcpClient &info_wave_tcp;
+  TcpClient &enemy_level1_key_tcp;
+  TcpClient &enemy_level2_key_tcp;
+  SerialReferee &serial_referee;
+  InfoWaveReferee &info_wave_referee;
+  ReplayInputSource *serial_replay = nullptr;
+  ReplayInputSource *info_wave_replay = nullptr;
+  ReplayInputSource *enemy_level1_key_replay = nullptr;
+  ReplayInputSource *enemy_level2_key_replay = nullptr;
+  EnemyKeyReceiverT &enemy_level1_key_receiver;
+  EnemyKeyReceiverT &enemy_level2_key_receiver;
+  RadarCommandSenderT &radar_command_sender;
+  MapRobotRelayT &map_robot_relay;
+  ExternalServerSenderT &external_server_sender;
+  RefereeTxScheduler &tx_scheduler;
+  radar::log::BinaryLogStore &raw_log_store;
+  TcpServer *external_tcp_server = nullptr;
+  const std::atomic<bool> &running;
+};
 
-  const bool serial_input_is_file =
-      radar::config::kSerialRefereeInputMode == radar::config::RefereeInputSourceMode::kFile;
-  const bool info_wave_input_is_file =
-      radar::config::kInfoWaveInputMode == radar::config::RefereeInputSourceMode::kFile;
-  const auto drain_duration = std::chrono::milliseconds(
-      std::max(radar::config::kRefereeStateTimeoutMs, radar::config::kInfoWaveStateTimeoutMs) + 1000);
+struct RefereeInputLoopState {
+  using Clock = RefereeInputLoopRuntime::Clock;
 
-  std::array<rm::u8, 512> read_buffer{};
-  auto &metrics = radar::log::GetRuntimeMetrics(raw_log_store.root());
-  SerialConnectionLog serial_log(raw_log_store.root());
-  TcpConnectionLog tcp_log(raw_log_store.root());
-  using LoopClock = std::chrono::steady_clock;
-  std::optional<LoopClock::time_point> last_serial_open_attempt_time;
-  bool serial_has_connected_once = serial.is_open();
+  explicit RefereeInputLoopState(bool serial_connected) : serial_has_connected_once(serial_connected) {}
+
+  std::optional<Clock::time_point> last_serial_open_attempt_time;
+  bool serial_has_connected_once = false;
   bool serial_retry_state_logged = false;
-  std::optional<LoopClock::time_point> last_info_wave_connect_attempt_time;
-  std::optional<LoopClock::time_point> last_level1_connect_attempt_time;
-  std::optional<LoopClock::time_point> last_level2_connect_attempt_time;
+  std::optional<Clock::time_point> last_info_wave_connect_attempt_time;
+  std::optional<Clock::time_point> last_level1_connect_attempt_time;
+  std::optional<Clock::time_point> last_level2_connect_attempt_time;
+  std::optional<Clock::time_point> last_external_server_open_attempt_time;
   bool info_wave_connect_retry_state_logged = false;
   bool level1_connect_retry_state_logged = false;
   bool level2_connect_retry_state_logged = false;
+  bool external_server_retry_state_logged = false;
+  bool map_robot_early_send_attempted_this_loop = false;
+  std::optional<Clock::time_point> drain_deadline;
+};
 
-  if (serial.is_open()) {
-    serial_log.LogState("connected", serial.device(), serial.baud(), "serial port ready", true);
+struct RefereeInputPollPlan {
+  std::array<pollfd, RefereeInputLoopRuntime::kMaxPollFds> fds{};
+  nfds_t nfds = 0;
+  std::optional<nfds_t> serial_index;
+  std::optional<nfds_t> info_wave_index;
+  std::optional<nfds_t> level1_index;
+  std::optional<nfds_t> level2_index;
+  std::optional<nfds_t> external_listener_index;
+  std::optional<nfds_t> external_client_index;
+  int timeout_ms = 100;
+};
+
+template <typename SerialReferee, typename InfoWaveReferee, typename EnemyKeyReceiverT, typename RadarCommandSenderT,
+          typename MapRobotRelayT, typename ExternalServerSenderT>
+class RefereeInputLoopRunner {
+ public:
+  using Services =
+      RefereeInputLoopServices<SerialReferee, InfoWaveReferee, EnemyKeyReceiverT, RadarCommandSenderT, MapRobotRelayT,
+                               ExternalServerSenderT>;
+  using Clock = RefereeInputLoopRuntime::Clock;
+
+  RefereeInputLoopRunner(RefereeInputLoopRuntime &runtime, Services &services, RefereeInputLoopState &state)
+      : runtime_(runtime), services_(services), state_(state) {}
+
+  void Run() {
+    ValidateReplaySources();
+    if (services_.serial.is_open()) {
+      runtime_.serial_log.LogState("connected", services_.serial.device(), services_.serial.baud(), "serial port ready",
+                                   true);
+    }
+
+    while (services_.running.load()) {
+      const auto loop_start = Clock::now();
+      state_.map_robot_early_send_attempted_this_loop = false;
+
+      TryReconnectSerial();
+      TryReconnectTcpClient(services_.info_wave_tcp, "info_wave_tcp", radar::config::kInfoWaveTcpServerPort,
+                            !runtime_.info_wave_input_is_file, true, state_.last_info_wave_connect_attempt_time,
+                            state_.info_wave_connect_retry_state_logged);
+      TryReconnectTcpClient(services_.enemy_level1_key_tcp, "enemy_level1_key_tcp",
+                            radar::config::kEnemyLevel1KeyTcpServerPort,
+                            !runtime_.enemy_level1_input_is_file && !services_.enemy_level1_key_receiver.completed(),
+                            true,
+                            state_.last_level1_connect_attempt_time, state_.level1_connect_retry_state_logged);
+      TryReconnectTcpClient(services_.enemy_level2_key_tcp, "enemy_level2_key_tcp",
+                            radar::config::kEnemyLevel2KeyTcpServerPort,
+                            !runtime_.enemy_level2_input_is_file && !services_.enemy_level2_key_receiver.completed(),
+                            true,
+                            state_.last_level2_connect_attempt_time, state_.level2_connect_retry_state_logged);
+      TryReopenExternalServer();
+
+      const auto loop_now = Clock::now();
+      PumpReplaySources(loop_now);
+      if (AllConfiguredInputsAreFile() && AllFileInputsCompleted() &&
+          !state_.drain_deadline.has_value()) {
+        state_.drain_deadline = loop_now + runtime_.drain_duration;
+      }
+      if (state_.drain_deadline.has_value() && loop_now >= *state_.drain_deadline) {
+        ServicePeriodicTasks(loop_start);
+        break;
+      }
+
+      auto poll_plan = BuildPollPlan(loop_now);
+      const int result = ::poll(poll_plan.fds.data(), poll_plan.nfds, poll_plan.timeout_ms);
+      if (result < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        throw std::runtime_error("poll failed: " + std::string(std::strerror(errno)));
+      }
+      if (result == 0) {
+        runtime_.metrics.RecordPollTimeoutWakeup();
+        ServicePeriodicTasks(loop_start);
+        if (state_.drain_deadline.has_value() && loop_now >= *state_.drain_deadline && AllFileInputsCompleted()) {
+          break;
+        }
+        continue;
+      }
+
+      const auto after_poll_now = Clock::now();
+      HandleSerialEvents(poll_plan);
+      PumpReplaySources(after_poll_now);
+      HandleInfoWaveEvents(poll_plan);
+      TryFastPathMapRobotSend();
+      HandleEnemyKeyEvents(poll_plan, services_.enemy_level1_key_tcp, services_.enemy_level1_key_receiver,
+                           poll_plan.level1_index, radar::config::kEnemyLevel1KeyTcpServerPort,
+                           "enemy_level1_key_tcp", "raw/tcp_8002_enemy_level1_key_rx.bin");
+      HandleEnemyKeyEvents(poll_plan, services_.enemy_level2_key_tcp, services_.enemy_level2_key_receiver,
+                           poll_plan.level2_index, radar::config::kEnemyLevel2KeyTcpServerPort,
+                           "enemy_level2_key_tcp", "raw/tcp_8003_enemy_level2_key_rx.bin");
+      HandleExternalServerEvents(poll_plan);
+
+      ServicePeriodicTasks(loop_start);
+      if (state_.drain_deadline.has_value() && after_poll_now >= *state_.drain_deadline &&
+          AllFileInputsCompleted()) {
+        break;
+      }
+    }
   }
 
-  /**
-   * @brief 返回当前串口波特率
-   * @return 已打开串口时返回当前波特率，否则返回默认配置值
-   */
-  const auto serial_baud = [&]() -> int {
-    return serial.baud() != 0 ? serial.baud() : radar::config::kDefaultRefereeBaud;
-  };
-
-  /**
-   * @brief 返回当前串口设备名
-   * @return 已打开串口时返回当前设备名，否则返回默认选择结果
-   */
-  const auto serial_device = [&]() -> std::string {
-    if (!serial.device().empty()) {
-      return serial.device();
+ private:
+  void ValidateReplaySources() const {
+    if ((services_.serial_replay == nullptr && runtime_.serial_input_is_file) ||
+        (services_.info_wave_replay == nullptr && runtime_.info_wave_input_is_file) ||
+        (services_.enemy_level1_key_replay == nullptr && runtime_.enemy_level1_input_is_file) ||
+        (services_.enemy_level2_key_replay == nullptr && runtime_.enemy_level2_input_is_file)) {
+      throw std::runtime_error("replay input source is required but missing");
     }
-    return SelectRefereeDevice();
-  };
+  }
 
-  /**
-   * @brief 将串口标记为断开状态并写日志
-   * @param detail 断开原因
-   */
-  const auto mark_serial_disconnected = [&](const std::string &detail) {
-    const bool was_open = serial.is_open();
-    if (was_open) {
-      serial.Close();
-    }
-    metrics.RecordSerialDisconnect();
-    serial_log.LogState("disconnected", serial_device(), serial_baud(), detail, false);
-    serial_retry_state_logged = false;
-  };
-
-  /**
-   * @brief 在需要时尝试自动重连串口
-   */
-  const auto try_reconnect_serial = [&]() {
-    if (serial.is_open()) {
+  void TryReconnectSerial() {
+    if (services_.serial.is_open()) {
       return;
     }
 
-    const auto now = LoopClock::now();
-    if (serial_has_connected_once && !serial_retry_state_logged) {
-      serial_log.LogState("reconnecting", serial_device(), serial_baud(), "waiting for next retry", false);
-      serial_retry_state_logged = true;
+    const auto now = Clock::now();
+    if (state_.serial_has_connected_once && !state_.serial_retry_state_logged) {
+      runtime_.serial_log.LogState("reconnecting", SerialDevice(), SerialBaud(), "waiting for next retry", false);
+      state_.serial_retry_state_logged = true;
     }
-    if (last_serial_open_attempt_time.has_value() &&
-        now - *last_serial_open_attempt_time <
-            std::chrono::milliseconds(radar::config::kSerialReconnectIntervalMs)) {
+    if (state_.last_serial_open_attempt_time.has_value() &&
+        now - *state_.last_serial_open_attempt_time <
+            std::chrono::milliseconds(kSerialReconnectIntervalMs)) {
       return;
     }
 
-    last_serial_open_attempt_time = now;
+    state_.last_serial_open_attempt_time = now;
     std::string error;
-    if (serial.TryOpenDefault(serial_baud(), &error)) {
-      if (serial_has_connected_once) {
-        metrics.RecordSerialReconnect();
-        serial_log.LogState("reconnected", serial.device(), serial.baud(), "serial port reopened", true);
+    if (services_.serial.TryOpenDefault(SerialBaud(), &error)) {
+      if (state_.serial_has_connected_once) {
+        runtime_.metrics.RecordSerialReconnect();
+        runtime_.serial_log.LogState("reconnected", services_.serial.device(), services_.serial.baud(),
+                                     "serial port reopened", true);
       } else {
-        serial_log.LogState("connected", serial.device(), serial.baud(), "serial port opened", true);
+        runtime_.serial_log.LogState("connected", services_.serial.device(), services_.serial.baud(),
+                                     "serial port opened", true);
       }
-      serial_has_connected_once = true;
-      serial_retry_state_logged = false;
+      state_.serial_has_connected_once = true;
+      state_.serial_retry_state_logged = false;
       return;
     }
 
-    metrics.RecordSerialOpenFailure();
-    serial_log.LogState("open_failed", serial_device(), serial_baud(), error, false);
-  };
+    runtime_.metrics.RecordSerialOpenFailure();
+    runtime_.serial_log.LogState("open_failed", SerialDevice(), SerialBaud(), error, false);
+  }
 
-  /**
-   * @brief 在需要时尝试重新发起 TCP 客户端连接
-   */
-  const auto try_reconnect_tcp_client = [&](TcpClient &client, const std::string &name, int port,
-                                            bool enable, bool allow_debug_disable,
-                                            std::optional<LoopClock::time_point> *last_attempt_time,
-                                            bool *retry_state_logged) {
+  void TryReconnectTcpClient(TcpClient &client, const std::string &name, int port, bool enable,
+                             bool allow_debug_disable, std::optional<Clock::time_point> &last_attempt_time,
+                             bool &retry_state_logged) {
     if (!enable || client.is_open()) {
       return;
     }
 
-    const auto now = LoopClock::now();
-    if (!*retry_state_logged) {
-      tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "reconnecting",
-                              std::string("remote=") + radar::config::kTcpServerAddress);
-      *retry_state_logged = true;
+    const auto now = Clock::now();
+    if (!retry_state_logged) {
+      runtime_.tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "reconnecting",
+                                       std::string("remote=") + radar::config::kTcpServerAddress);
+      retry_state_logged = true;
     }
-    if (last_attempt_time->has_value() &&
-        now - **last_attempt_time < std::chrono::milliseconds(radar::config::kTcpReconnectIntervalMs)) {
+    if (last_attempt_time.has_value() &&
+        now - *last_attempt_time < std::chrono::milliseconds(kTcpReconnectIntervalMs)) {
       return;
     }
 
-    *last_attempt_time = now;
+    last_attempt_time = now;
     std::string error;
     if (client.TryOpen(radar::config::kTcpServerAddress, port, radar::config::kTcpLocalBindAddress, &error)) {
       const std::string detail = std::string("remote=") + radar::config::kTcpServerAddress;
-      tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port,
-                              client.is_connected() ? "connected" : "connecting", detail);
-      tcp_log.LogClientState(name, radar::config::kTcpLocalBindAddress, port,
-                             client.is_connected() ? client.peer_ip() : radar::config::kTcpServerAddress,
-                             client.is_connected() ? "connected" : "connecting", detail);
-      *retry_state_logged = false;
+      runtime_.tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port,
+                                       client.is_connected() ? "connected" : "connecting", detail);
+      runtime_.tcp_log.LogClientState(name, radar::config::kTcpLocalBindAddress, port,
+                                      client.is_connected() ? client.peer_ip() : radar::config::kTcpServerAddress,
+                                      client.is_connected() ? "connected" : "connecting", detail);
+      retry_state_logged = false;
       return;
     }
 
-    tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "connect_failed", error);
+    runtime_.tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "connect_failed", error);
     if (!allow_debug_disable || !radar::config::kDebugAllowMissingInterfaces) {
       return;
     }
-    tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "disabled", "debug_allow_missing");
-  };
+    runtime_.tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "disabled",
+                                     "debug_allow_missing");
+  }
 
-  /**
-   * @brief 推进周期性任务
-   * @param loop_start 本轮事件循环开始时间
-   * @note  负责 idle timeout、`0x0305` 周期处理、`0x0121` 待发队列与运行指标刷新。
-   */
-  const auto service_periodic_tasks = [&](const LoopClock::time_point &loop_start) {
+  void TryReopenExternalServer() {
+    TcpServer *server = services_.external_tcp_server;
+    if (!radar::config::kExternalTcpServerEnabled || server == nullptr || server->is_open()) {
+      return;
+    }
+
+    const auto now = Clock::now();
+    if (!state_.external_server_retry_state_logged) {
+      runtime_.tcp_log.LogChannelState("external_tcp_server", radar::config::kExternalTcpServerBindAddress,
+                                       radar::config::kExternalTcpServerPort, "reopening_listener",
+                                       "waiting_for_next_retry");
+      state_.external_server_retry_state_logged = true;
+    }
+    if (state_.last_external_server_open_attempt_time.has_value() &&
+        now - *state_.last_external_server_open_attempt_time <
+            std::chrono::milliseconds(kTcpReconnectIntervalMs)) {
+      return;
+    }
+
+    state_.last_external_server_open_attempt_time = now;
+    std::string error;
+    if (server->TryOpen(radar::config::kExternalTcpServerBindAddress, radar::config::kExternalTcpServerPort,
+                        &error)) {
+      runtime_.tcp_log.LogChannelState("external_tcp_server", radar::config::kExternalTcpServerBindAddress,
+                                       radar::config::kExternalTcpServerPort, "listening", "listener_reopened");
+      state_.external_server_retry_state_logged = false;
+      return;
+    }
+
+    runtime_.tcp_log.LogChannelState("external_tcp_server", radar::config::kExternalTcpServerBindAddress,
+                                     radar::config::kExternalTcpServerPort, "listen_failed", error);
+  }
+
+  void PumpReplaySources(const Clock::time_point &now) {
+    if (runtime_.serial_input_is_file && services_.serial_replay != nullptr) {
+      services_.serial_replay->Process(now, [&](const rm::u8 *bytes, std::size_t size) {
+        services_.raw_log_store.Append("raw/file_serial_referee_rx.bin", bytes, size);
+        FeedBytes(services_.serial_referee, bytes, size);
+      });
+    }
+    if (runtime_.info_wave_input_is_file && services_.info_wave_replay != nullptr) {
+      services_.info_wave_replay->Process(now, [&](const rm::u8 *bytes, std::size_t size) {
+        services_.raw_log_store.Append("raw/file_tcp_8001_info_wave_rx.bin", bytes, size);
+        FeedBytes(services_.info_wave_referee, bytes, size);
+      });
+    }
+    if (runtime_.enemy_level1_input_is_file && services_.enemy_level1_key_replay != nullptr) {
+      services_.enemy_level1_key_replay->Process(now, [&](const rm::u8 *bytes, std::size_t size) {
+        services_.raw_log_store.Append("raw/file_tcp_8002_enemy_level1_key_rx.bin", bytes, size);
+        services_.enemy_level1_key_receiver.ProcessBytes(bytes, size, services_.serial_referee.data());
+      });
+    }
+    if (runtime_.enemy_level2_input_is_file && services_.enemy_level2_key_replay != nullptr) {
+      services_.enemy_level2_key_replay->Process(now, [&](const rm::u8 *bytes, std::size_t size) {
+        services_.raw_log_store.Append("raw/file_tcp_8003_enemy_level2_key_rx.bin", bytes, size);
+        services_.enemy_level2_key_receiver.ProcessBytes(bytes, size, services_.serial_referee.data());
+      });
+    }
+  }
+
+  RefereeInputPollPlan BuildPollPlan(const Clock::time_point &now) const {
+    RefereeInputPollPlan plan;
+
+    if (!runtime_.serial_input_is_file && services_.serial.is_open()) {
+      plan.serial_index = plan.nfds;
+      plan.fds[plan.nfds++] = pollfd{services_.serial.fd(), static_cast<short>(POLLIN | POLLHUP | POLLERR), 0};
+    }
+
+    AddTcpClientPollFd(services_.info_wave_tcp, !runtime_.info_wave_input_is_file, plan.info_wave_index, plan);
+    AddTcpClientPollFd(services_.enemy_level1_key_tcp,
+                       !runtime_.enemy_level1_input_is_file && !services_.enemy_level1_key_receiver.completed(),
+                       plan.level1_index, plan);
+    AddTcpClientPollFd(services_.enemy_level2_key_tcp,
+                       !runtime_.enemy_level2_input_is_file && !services_.enemy_level2_key_receiver.completed(),
+                       plan.level2_index, plan);
+
+    if (services_.external_tcp_server != nullptr && services_.external_tcp_server->is_open()) {
+      plan.external_listener_index = plan.nfds;
+      short listener_events = static_cast<short>(POLLHUP | POLLERR);
+      if (!services_.external_tcp_server->has_client()) {
+        listener_events = static_cast<short>(listener_events | POLLIN);
+      }
+      plan.fds[plan.nfds++] = pollfd{services_.external_tcp_server->fd(), listener_events, 0};
+      if (services_.external_tcp_server->has_client()) {
+        plan.external_client_index = plan.nfds;
+        plan.fds[plan.nfds++] = pollfd{services_.external_tcp_server->client_fd(),
+                                       static_cast<short>(POLLIN | POLLHUP | POLLERR), 0};
+      }
+    }
+
+    plan.timeout_ms = ComputePollTimeoutMs(now);
+    return plan;
+  }
+
+  void HandleSerialEvents(const RefereeInputPollPlan &poll_plan) {
+    if (!poll_plan.serial_index.has_value()) {
+      return;
+    }
+
+    const auto revents = poll_plan.fds[*poll_plan.serial_index].revents;
+    if ((revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+      MarkSerialDisconnected("serial poll reported hangup or error");
+      return;
+    }
+    if ((revents & POLLIN) == 0) {
+      return;
+    }
+
+    std::size_t successful_reads = 0;
+    while (services_.serial.is_open()) {
+      std::size_t bytes_read = 0;
+      std::string error;
+      if (!services_.serial.TryRead(runtime_.read_buffer.data(), runtime_.read_buffer.size(), &bytes_read, &error)) {
+        MarkSerialDisconnected(error);
+        return;
+      }
+      runtime_.metrics.RecordSerialRead(bytes_read);
+      if (bytes_read == 0) {
+        break;
+      }
+
+      ++successful_reads;
+      services_.raw_log_store.Append("raw/serial_referee_rx.bin", runtime_.read_buffer.data(), bytes_read);
+      FeedBytes(services_.serial_referee, runtime_.read_buffer.data(), bytes_read);
+    }
+    if (successful_reads > 1) {
+      runtime_.metrics.RecordMultiReadDrain("serial");
+    }
+  }
+
+  void HandleInfoWaveEvents(const RefereeInputPollPlan &poll_plan) {
+    if (!poll_plan.info_wave_index.has_value()) {
+      return;
+    }
+
+    const auto revents = poll_plan.fds[*poll_plan.info_wave_index].revents;
+    if ((revents & POLLOUT) != 0 && services_.info_wave_tcp.is_connecting()) {
+      std::string error;
+      if (services_.info_wave_tcp.FinishConnect(&error)) {
+        runtime_.tcp_log.LogClientState("info_wave_tcp", radar::config::kTcpLocalBindAddress,
+                                        services_.info_wave_tcp.port(), services_.info_wave_tcp.peer_ip(),
+                                        "connected", "connect_completed");
+      } else {
+        runtime_.tcp_log.LogClientState("info_wave_tcp", radar::config::kTcpLocalBindAddress,
+                                        radar::config::kInfoWaveTcpServerPort, radar::config::kTcpServerAddress,
+                                        "disconnected", error);
+      }
+    }
+    if ((revents & POLLIN) != 0 && services_.info_wave_tcp.is_connected()) {
+      std::size_t successful_reads = 0;
+      while (services_.info_wave_tcp.is_connected()) {
+        const auto bytes_read = services_.info_wave_tcp.Read(runtime_.read_buffer.data(), runtime_.read_buffer.size());
+        if (bytes_read == 0) {
+          break;
+        }
+
+        ++successful_reads;
+        services_.raw_log_store.Append("raw/tcp_8001_info_wave_rx.bin", runtime_.read_buffer.data(), bytes_read);
+        FeedBytes(services_.info_wave_referee, runtime_.read_buffer.data(), bytes_read);
+      }
+      if (successful_reads > 1) {
+        runtime_.metrics.RecordMultiReadDrain("8001");
+      }
+    }
+    if ((revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+      const auto port = services_.info_wave_tcp.port();
+      const std::string peer = services_.info_wave_tcp.peer_ip().empty() ? radar::config::kTcpServerAddress
+                                                                         : services_.info_wave_tcp.peer_ip();
+      runtime_.tcp_log.LogClientState("info_wave_tcp", radar::config::kTcpLocalBindAddress, port, peer,
+                                      "disconnected", "poll reported hangup or error");
+      services_.info_wave_tcp.Close();
+    }
+  }
+
+  void HandleEnemyKeyEvents(const RefereeInputPollPlan &poll_plan, TcpClient &client, EnemyKeyReceiverT &receiver,
+                            const std::optional<nfds_t> &index, int connect_port, const char *name,
+                            const char *raw_log_path) {
+    if (!index.has_value()) {
+      return;
+    }
+
+    const auto revents = poll_plan.fds[*index].revents;
+    if ((revents & POLLOUT) != 0 && client.is_connecting()) {
+      std::string error;
+      if (client.FinishConnect(&error)) {
+        runtime_.tcp_log.LogClientState(name, radar::config::kTcpLocalBindAddress, client.port(), client.peer_ip(),
+                                        "connected", "connect_completed");
+      } else {
+        runtime_.tcp_log.LogClientState(name, radar::config::kTcpLocalBindAddress, connect_port,
+                                        radar::config::kTcpServerAddress, "disconnected", error);
+      }
+    }
+    if ((revents & POLLIN) != 0 && client.is_connected()) {
+      std::size_t successful_reads = 0;
+      while (client.is_connected()) {
+        const auto bytes_read = client.Read(runtime_.read_buffer.data(), runtime_.read_buffer.size());
+        if (bytes_read == 0) {
+          break;
+        }
+
+        ++successful_reads;
+        services_.raw_log_store.Append(raw_log_path, runtime_.read_buffer.data(), bytes_read);
+        if (receiver.ProcessBytes(runtime_.read_buffer.data(), bytes_read, services_.serial_referee.data())) {
+          client.Stop();
+          break;
+        }
+      }
+      if (successful_reads > 1) {
+        runtime_.metrics.RecordMultiReadDrain(connect_port == radar::config::kEnemyLevel1KeyTcpServerPort ? "8002"
+                                                                                                           : "8003");
+      }
+    }
+    if (!receiver.completed() && (revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+      const auto port = client.port();
+      const std::string peer = client.peer_ip().empty() ? radar::config::kTcpServerAddress : client.peer_ip();
+      runtime_.tcp_log.LogClientState(name, radar::config::kTcpLocalBindAddress, port, peer, "disconnected",
+                                      "poll reported hangup or error");
+      client.Close();
+    }
+  }
+
+  void HandleExternalServerEvents(const RefereeInputPollPlan &poll_plan) {
+    TcpServer *server = services_.external_tcp_server;
+    if (server == nullptr) {
+      return;
+    }
+
+    if (poll_plan.external_listener_index.has_value()) {
+      const auto revents = poll_plan.fds[*poll_plan.external_listener_index].revents;
+      if ((revents & POLLIN) != 0 && !server->has_client()) {
+        std::string error;
+        if (server->AcceptPending(&error)) {
+          runtime_.tcp_log.LogClientState("external_tcp_server", radar::config::kExternalTcpServerBindAddress,
+                                          radar::config::kExternalTcpServerPort, server->peer_ip(), "connected",
+                                          "accepted_client");
+        } else if (!error.empty()) {
+          runtime_.tcp_log.LogClientState("external_tcp_server", radar::config::kExternalTcpServerBindAddress,
+                                          radar::config::kExternalTcpServerPort, "", "disconnected", error);
+        }
+      }
+      if ((revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+        runtime_.tcp_log.LogChannelState("external_tcp_server", radar::config::kExternalTcpServerBindAddress,
+                                         radar::config::kExternalTcpServerPort, "listener_closed",
+                                         "poll reported hangup or error");
+        server->Close();
+      }
+    }
+
+    if (poll_plan.external_client_index.has_value() && server->has_client()) {
+      const auto revents = poll_plan.fds[*poll_plan.external_client_index].revents;
+      const std::string peer = server->peer_ip();
+      if ((revents & POLLIN) != 0) {
+        std::size_t successful_reads = 0;
+        while (server->has_client()) {
+          const auto bytes_read = server->Read(runtime_.read_buffer.data(), runtime_.read_buffer.size());
+          if (bytes_read == 0) {
+            if (!server->has_client()) {
+              runtime_.tcp_log.LogClientState("external_tcp_server", radar::config::kExternalTcpServerBindAddress,
+                                              radar::config::kExternalTcpServerPort, peer, "disconnected",
+                                              "peer_closed");
+            }
+            break;
+          }
+
+          ++successful_reads;
+          services_.raw_log_store.Append("raw/tcp_external_device_rx.bin", runtime_.read_buffer.data(), bytes_read);
+        }
+        if (successful_reads > 1) {
+          runtime_.metrics.RecordMultiReadDrain("external_tcp_server");
+        }
+      }
+      if ((revents & (POLLHUP | POLLERR | POLLNVAL)) != 0 && server->has_client()) {
+        runtime_.tcp_log.LogClientState("external_tcp_server", radar::config::kExternalTcpServerBindAddress,
+                                        radar::config::kExternalTcpServerPort, peer, "disconnected",
+                                        "poll reported hangup or error");
+        server->CloseClient();
+      }
+    }
+  }
+
+  void TryFastPathMapRobotSend() {
+    if (!services_.map_robot_relay.ConsumeFreshRadar0Refresh()) {
+      return;
+    }
+
+    services_.tx_scheduler.Process();
+    state_.map_robot_early_send_attempted_this_loop = true;
+  }
+
+  void ServicePeriodicTasks(const Clock::time_point &loop_start) {
     const auto log_connect_timeout = [&](TcpClient &client, const std::string &name) {
       const auto port = client.port();
-      if (client.CloseIfConnectTimedOut(radar::config::kTcpConnectTimeoutMs)) {
-        tcp_log.LogClientState(name, radar::config::kTcpLocalBindAddress, port, radar::config::kTcpServerAddress,
-                               "disconnected", "connect_attempt_timed_out");
+      if (client.CloseIfConnectTimedOut(kTcpConnectTimeoutMs)) {
+        runtime_.tcp_log.LogClientState(name, radar::config::kTcpLocalBindAddress, port,
+                                        radar::config::kTcpServerAddress, "disconnected",
+                                        "connect_attempt_timed_out");
       }
     };
-    if (!info_wave_input_is_file) {
-      log_connect_timeout(info_wave_tcp, "info_wave_tcp");
-    }
-    if (!enemy_level1_key_receiver.completed()) {
-      log_connect_timeout(enemy_level1_key_tcp, "enemy_level1_key_tcp");
-    }
-    if (!enemy_level2_key_receiver.completed()) {
-      log_connect_timeout(enemy_level2_key_tcp, "enemy_level2_key_tcp");
-    }
-    if (info_wave_tcp.CloseIdleClientIfTimedOut(radar::config::kInfoWaveTcpIdleTimeoutMs)) {
-      metrics.RecordTcpIdleDisconnect(info_wave_tcp.port());
-    }
-    if (!enemy_level1_key_receiver.completed() &&
-        enemy_level1_key_tcp.CloseIdleClientIfTimedOut(radar::config::kEnemyKeyTcpIdleTimeoutMs)) {
-      metrics.RecordTcpIdleDisconnect(enemy_level1_key_tcp.port());
-    }
-    if (!enemy_level2_key_receiver.completed() &&
-        enemy_level2_key_tcp.CloseIdleClientIfTimedOut(radar::config::kEnemyKeyTcpIdleTimeoutMs)) {
-      metrics.RecordTcpIdleDisconnect(enemy_level2_key_tcp.port());
-    }
-    map_robot_relay.ProcessPeriodic();
-    radar_command_sender.ProcessPending(serial_referee.data());
-    tx_scheduler.Process();
-    const auto loop_end = LoopClock::now();
-    metrics.RecordLoopIteration(std::chrono::duration_cast<std::chrono::microseconds>(loop_end - loop_start),
-                                std::chrono::duration_cast<std::chrono::microseconds>(loop_end - loop_start));
-    metrics.MaybeFlush();
-  };
 
-  /**
-   * @brief 判断文件模式输入是否均已完成
-   * @return 所有文件输入均完成时返回 true
-   */
-  const auto all_file_inputs_completed = [&]() -> bool {
-    const bool serial_done = !serial_input_is_file || (serial_replay != nullptr && serial_replay->completed());
-    const bool info_wave_done =
-        !info_wave_input_is_file || (info_wave_replay != nullptr && info_wave_replay->completed());
-    return serial_done && info_wave_done;
-  };
+    if (!runtime_.info_wave_input_is_file) {
+      log_connect_timeout(services_.info_wave_tcp, "info_wave_tcp");
+    }
+    if (!runtime_.enemy_level1_input_is_file && !services_.enemy_level1_key_receiver.completed()) {
+      log_connect_timeout(services_.enemy_level1_key_tcp, "enemy_level1_key_tcp");
+    }
+    if (!runtime_.enemy_level2_input_is_file && !services_.enemy_level2_key_receiver.completed()) {
+      log_connect_timeout(services_.enemy_level2_key_tcp, "enemy_level2_key_tcp");
+    }
 
-  /**
-   * @brief 计算本轮 poll 的超时时间
-   * @param now 当前时间
-   * @return 超时毫秒数
-   */
-  const auto compute_poll_timeout_ms = [&](const LoopClock::time_point &now) -> int {
+    if (services_.info_wave_tcp.CloseIdleClientIfTimedOut(kInfoWaveTcpIdleTimeoutMs)) {
+      runtime_.metrics.RecordTcpIdleDisconnect(services_.info_wave_tcp.port());
+    }
+    if (!runtime_.enemy_level1_input_is_file && !services_.enemy_level1_key_receiver.completed() &&
+        services_.enemy_level1_key_tcp.CloseIdleClientIfTimedOut(kEnemyKeyTcpIdleTimeoutMs)) {
+      runtime_.metrics.RecordTcpIdleDisconnect(services_.enemy_level1_key_tcp.port());
+    }
+    if (!runtime_.enemy_level2_input_is_file && !services_.enemy_level2_key_receiver.completed() &&
+        services_.enemy_level2_key_tcp.CloseIdleClientIfTimedOut(kEnemyKeyTcpIdleTimeoutMs)) {
+      runtime_.metrics.RecordTcpIdleDisconnect(services_.enemy_level2_key_tcp.port());
+    }
+
+    const std::string external_peer =
+        services_.external_tcp_server != nullptr ? services_.external_tcp_server->peer_ip() : std::string();
+    if (services_.external_tcp_server != nullptr &&
+        services_.external_tcp_server->CloseIdleClientIfTimedOut(kExternalTcpServerIdleTimeoutMs)) {
+      runtime_.metrics.RecordTcpIdleDisconnect(services_.external_tcp_server->port());
+      runtime_.tcp_log.LogClientState("external_tcp_server", radar::config::kExternalTcpServerBindAddress,
+                                      radar::config::kExternalTcpServerPort, external_peer, "disconnected",
+                                      "idle_timeout");
+    }
+
+    if (!state_.map_robot_early_send_attempted_this_loop) {
+      services_.map_robot_relay.ProcessPeriodic();
+    }
+    services_.enemy_level1_key_receiver.ProcessDeferredQueueing();
+    services_.enemy_level2_key_receiver.ProcessDeferredQueueing();
+    services_.radar_command_sender.ProcessPending(services_.serial_referee.data());
+    services_.external_server_sender.ProcessPeriodic();
+    services_.tx_scheduler.Process();
+
+    const auto loop_end = Clock::now();
+    const auto loop_duration = std::chrono::duration_cast<std::chrono::microseconds>(loop_end - loop_start);
+    runtime_.metrics.RecordLoopIteration(loop_duration, loop_duration);
+    runtime_.metrics.MaybeFlush();
+  }
+
+  int SerialBaud() const {
+    return services_.serial.baud() != 0 ? services_.serial.baud() : radar::config::kDefaultRefereeBaud;
+  }
+
+  std::string SerialDevice() const {
+    if (!services_.serial.device().empty()) {
+      return services_.serial.device();
+    }
+    return SelectRefereeDevice();
+  }
+
+  void MarkSerialDisconnected(const std::string &detail) {
+    if (services_.serial.is_open()) {
+      services_.serial.Close();
+    }
+    runtime_.metrics.RecordSerialDisconnect();
+    runtime_.serial_log.LogState("disconnected", SerialDevice(), SerialBaud(), detail, false);
+    state_.serial_retry_state_logged = false;
+  }
+
+  bool AllFileInputsCompleted() const {
+    const bool serial_done = !runtime_.serial_input_is_file ||
+                             (services_.serial_replay != nullptr && services_.serial_replay->completed());
+    const bool info_wave_done = !runtime_.info_wave_input_is_file ||
+                                (services_.info_wave_replay != nullptr && services_.info_wave_replay->completed());
+    const bool enemy_level1_done =
+        !runtime_.enemy_level1_input_is_file ||
+        (services_.enemy_level1_key_replay != nullptr && services_.enemy_level1_key_replay->completed());
+    const bool enemy_level2_done =
+        !runtime_.enemy_level2_input_is_file ||
+        (services_.enemy_level2_key_replay != nullptr && services_.enemy_level2_key_replay->completed());
+    return serial_done && info_wave_done && enemy_level1_done && enemy_level2_done;
+  }
+
+  bool AllConfiguredInputsAreFile() const {
+    return runtime_.serial_input_is_file && runtime_.info_wave_input_is_file && runtime_.enemy_level1_input_is_file &&
+           runtime_.enemy_level2_input_is_file;
+  }
+
+  int ComputePollTimeoutMs(const Clock::time_point &now) const {
     int timeout_ms = 100;
     const auto apply_replay_deadline = [&](const ReplayInputSource *source) {
       if (source == nullptr || source->completed()) {
@@ -281,248 +708,111 @@ void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp
         timeout_ms = std::min(timeout_ms, *wait_ms);
       }
     };
+    const auto apply_due_time = [&](const std::optional<Clock::time_point> &due_time) {
+      if (!due_time.has_value()) {
+        return;
+      }
+      if (*due_time <= now) {
+        timeout_ms = 0;
+        return;
+      }
+      const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(*due_time - now).count();
+      timeout_ms = std::min(timeout_ms, std::max(0, static_cast<int>(wait_ms)));
+    };
 
-    apply_replay_deadline(serial_replay);
-    apply_replay_deadline(info_wave_replay);
+    apply_replay_deadline(services_.serial_replay);
+    apply_replay_deadline(services_.info_wave_replay);
+    apply_replay_deadline(services_.enemy_level1_key_replay);
+    apply_replay_deadline(services_.enemy_level2_key_replay);
+    if (services_.serial.is_open()) {
+      apply_due_time(services_.tx_scheduler.NextDueTime(now));
+    }
     return std::max(0, timeout_ms);
-  };
-
-  std::optional<LoopClock::time_point> drain_deadline;
-
-  while (running.load()) {
-    const auto loop_start = std::chrono::steady_clock::now();
-    try_reconnect_serial();
-    try_reconnect_tcp_client(info_wave_tcp, "info_wave_tcp", radar::config::kInfoWaveTcpServerPort,
-                             !info_wave_input_is_file, true, &last_info_wave_connect_attempt_time,
-                             &info_wave_connect_retry_state_logged);
-    try_reconnect_tcp_client(enemy_level1_key_tcp, "enemy_level1_key_tcp",
-                             radar::config::kEnemyLevel1KeyTcpServerPort, !enemy_level1_key_receiver.completed(), true,
-                             &last_level1_connect_attempt_time, &level1_connect_retry_state_logged);
-    try_reconnect_tcp_client(enemy_level2_key_tcp, "enemy_level2_key_tcp",
-                             radar::config::kEnemyLevel2KeyTcpServerPort, !enemy_level2_key_receiver.completed(), true,
-                             &last_level2_connect_attempt_time, &level2_connect_retry_state_logged);
-    const auto loop_now = LoopClock::now();
-
-    const auto process_serial_replay = [&](const LoopClock::time_point &now) {
-      if (serial_input_is_file && serial_replay != nullptr) {
-        return serial_replay->Process(now, [&](const rm::u8 *bytes, std::size_t size) {
-          raw_log_store.Append("raw/file_serial_referee_rx.bin", bytes, size);
-          FeedBytes(serial_referee, bytes, size);
-        });
-      }
-      return false;
-    };
-
-    const auto process_info_wave_replay = [&](const LoopClock::time_point &now) {
-      if (info_wave_input_is_file && info_wave_replay != nullptr) {
-        return info_wave_replay->Process(now, [&](const rm::u8 *bytes, std::size_t size) {
-          raw_log_store.Append("raw/file_tcp_8001_info_wave_rx.bin", bytes, size);
-          FeedBytes(info_wave_referee, bytes, size);
-        });
-      }
-      return false;
-    };
-
-    (void)process_serial_replay(loop_now);
-    (void)process_info_wave_replay(loop_now);
-
-    if (serial_input_is_file && info_wave_input_is_file && all_file_inputs_completed() &&
-        !drain_deadline.has_value()) {
-      drain_deadline = loop_now + drain_duration;
-    }
-    if (drain_deadline.has_value() && loop_now >= *drain_deadline) {
-      service_periodic_tasks(loop_start);
-      break;
-    }
-
-    std::array<pollfd, 8> fds{};
-    nfds_t nfds = 0;
-
-    std::optional<nfds_t> serial_index;
-    if (!serial_input_is_file && serial.is_open()) {
-      serial_index = nfds;
-      fds[nfds++] = pollfd{serial.fd(), static_cast<short>(POLLIN | POLLHUP | POLLERR), 0};
-    }
-
-    std::optional<nfds_t> info_wave_index;
-    if (!info_wave_input_is_file && info_wave_tcp.is_open()) {
-      info_wave_index = nfds;
-      short events = static_cast<short>(POLLHUP | POLLERR);
-      if (info_wave_tcp.is_connecting()) {
-        events = static_cast<short>(events | POLLOUT);
-      }
-      if (info_wave_tcp.is_connected()) {
-        events = static_cast<short>(events | POLLIN);
-      }
-      fds[nfds++] = pollfd{info_wave_tcp.fd(), events, 0};
-    }
-    std::optional<nfds_t> level1_index;
-    const bool level1_active = !enemy_level1_key_receiver.completed() && enemy_level1_key_tcp.is_open();
-    if (level1_active) {
-      level1_index = nfds;
-      short events = static_cast<short>(POLLHUP | POLLERR);
-      if (enemy_level1_key_tcp.is_connecting()) {
-        events = static_cast<short>(events | POLLOUT);
-      }
-      if (enemy_level1_key_tcp.is_connected()) {
-        events = static_cast<short>(events | POLLIN);
-      }
-      fds[nfds++] = pollfd{enemy_level1_key_tcp.fd(), events, 0};
-    }
-
-    std::optional<nfds_t> level2_index;
-    const bool level2_active = !enemy_level2_key_receiver.completed() && enemy_level2_key_tcp.is_open();
-    if (level2_active) {
-      level2_index = nfds;
-      short events = static_cast<short>(POLLHUP | POLLERR);
-      if (enemy_level2_key_tcp.is_connecting()) {
-        events = static_cast<short>(events | POLLOUT);
-      }
-      if (enemy_level2_key_tcp.is_connected()) {
-        events = static_cast<short>(events | POLLIN);
-      }
-      fds[nfds++] = pollfd{enemy_level2_key_tcp.fd(), events, 0};
-    }
-
-    const int result = ::poll(fds.data(), nfds, compute_poll_timeout_ms(loop_now));
-    if (result < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      throw std::runtime_error("poll failed: " + std::string(std::strerror(errno)));
-    }
-    if (result == 0) {
-      service_periodic_tasks(loop_start);
-      if (drain_deadline.has_value() && loop_now >= *drain_deadline && all_file_inputs_completed()) {
-        break;
-      }
-      continue;
-    }
-
-    const auto after_poll_now = LoopClock::now();
-
-    if (serial_index.has_value()) {
-      const auto revents = fds[*serial_index].revents;
-      if ((revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-        mark_serial_disconnected("serial poll reported hangup or error");
-      } else if ((revents & POLLIN) != 0) {
-        std::size_t bytes_read = 0;
-        std::string error;
-        if (!serial.TryRead(read_buffer.data(), read_buffer.size(), &bytes_read, &error)) {
-          mark_serial_disconnected(error);
-        } else {
-          metrics.RecordSerialRead(bytes_read);
-          raw_log_store.Append("raw/serial_referee_rx.bin", read_buffer.data(), bytes_read);
-          FeedBytes(serial_referee, read_buffer.data(), bytes_read);
-        }
-      }
-    }
-
-    (void)process_serial_replay(after_poll_now);
-    (void)process_info_wave_replay(after_poll_now);
-
-    if (info_wave_index.has_value()) {
-      const auto revents = fds[*info_wave_index].revents;
-      if ((revents & POLLOUT) != 0 && info_wave_tcp.is_connecting()) {
-        std::string error;
-        if (info_wave_tcp.FinishConnect(&error)) {
-          tcp_log.LogClientState("info_wave_tcp", radar::config::kTcpLocalBindAddress, info_wave_tcp.port(),
-                                 info_wave_tcp.peer_ip(), "connected", "connect_completed");
-        } else {
-          tcp_log.LogClientState("info_wave_tcp", radar::config::kTcpLocalBindAddress,
-                                 radar::config::kInfoWaveTcpServerPort, radar::config::kTcpServerAddress,
-                                 "disconnected", error);
-        }
-      }
-      if ((revents & POLLIN) != 0 && info_wave_tcp.is_connected()) {
-        const auto bytes_read = info_wave_tcp.Read(read_buffer.data(), read_buffer.size());
-        if (bytes_read != 0) {
-          raw_log_store.Append("raw/tcp_8001_info_wave_rx.bin", read_buffer.data(), bytes_read);
-          FeedBytes(info_wave_referee, read_buffer.data(), bytes_read);
-        }
-      }
-      if ((revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
-        const auto port = info_wave_tcp.port();
-        const std::string peer = info_wave_tcp.peer_ip().empty() ? radar::config::kTcpServerAddress
-                                                                  : info_wave_tcp.peer_ip();
-        tcp_log.LogClientState("info_wave_tcp", radar::config::kTcpLocalBindAddress, port, peer, "disconnected",
-                               "poll reported hangup or error");
-        info_wave_tcp.Close();
-      }
-    }
-
-    if (level1_index.has_value()) {
-      const auto revents = fds[*level1_index].revents;
-      if ((revents & POLLOUT) != 0 && enemy_level1_key_tcp.is_connecting()) {
-        std::string error;
-        if (enemy_level1_key_tcp.FinishConnect(&error)) {
-          tcp_log.LogClientState("enemy_level1_key_tcp", radar::config::kTcpLocalBindAddress,
-                                 enemy_level1_key_tcp.port(), enemy_level1_key_tcp.peer_ip(), "connected",
-                                 "connect_completed");
-        } else {
-          tcp_log.LogClientState("enemy_level1_key_tcp", radar::config::kTcpLocalBindAddress,
-                                 radar::config::kEnemyLevel1KeyTcpServerPort, radar::config::kTcpServerAddress,
-                                 "disconnected", error);
-        }
-      }
-      if ((revents & POLLIN) != 0 && enemy_level1_key_tcp.is_connected()) {
-        const auto bytes_read = enemy_level1_key_tcp.Read(read_buffer.data(), read_buffer.size());
-        if (bytes_read != 0) {
-          raw_log_store.Append("raw/tcp_8002_enemy_level1_key_rx.bin", read_buffer.data(), bytes_read);
-        }
-        if (enemy_level1_key_receiver.ProcessBytes(read_buffer.data(), bytes_read, serial_referee.data())) {
-          enemy_level1_key_tcp.Stop();
-        }
-      }
-      if (!enemy_level1_key_receiver.completed() && (revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
-        const auto port = enemy_level1_key_tcp.port();
-        const std::string peer = enemy_level1_key_tcp.peer_ip().empty() ? radar::config::kTcpServerAddress
-                                                                         : enemy_level1_key_tcp.peer_ip();
-        tcp_log.LogClientState("enemy_level1_key_tcp", radar::config::kTcpLocalBindAddress, port, peer,
-                               "disconnected", "poll reported hangup or error");
-        enemy_level1_key_tcp.Close();
-      }
-    }
-
-    if (level2_index.has_value()) {
-      const auto revents = fds[*level2_index].revents;
-      if ((revents & POLLOUT) != 0 && enemy_level2_key_tcp.is_connecting()) {
-        std::string error;
-        if (enemy_level2_key_tcp.FinishConnect(&error)) {
-          tcp_log.LogClientState("enemy_level2_key_tcp", radar::config::kTcpLocalBindAddress,
-                                 enemy_level2_key_tcp.port(), enemy_level2_key_tcp.peer_ip(), "connected",
-                                 "connect_completed");
-        } else {
-          tcp_log.LogClientState("enemy_level2_key_tcp", radar::config::kTcpLocalBindAddress,
-                                 radar::config::kEnemyLevel2KeyTcpServerPort, radar::config::kTcpServerAddress,
-                                 "disconnected", error);
-        }
-      }
-      if ((revents & POLLIN) != 0 && enemy_level2_key_tcp.is_connected()) {
-        const auto bytes_read = enemy_level2_key_tcp.Read(read_buffer.data(), read_buffer.size());
-        if (bytes_read != 0) {
-          raw_log_store.Append("raw/tcp_8003_enemy_level2_key_rx.bin", read_buffer.data(), bytes_read);
-        }
-        if (enemy_level2_key_receiver.ProcessBytes(read_buffer.data(), bytes_read, serial_referee.data())) {
-          enemy_level2_key_tcp.Stop();
-        }
-      }
-      if (!enemy_level2_key_receiver.completed() && (revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
-        const auto port = enemy_level2_key_tcp.port();
-        const std::string peer = enemy_level2_key_tcp.peer_ip().empty() ? radar::config::kTcpServerAddress
-                                                                         : enemy_level2_key_tcp.peer_ip();
-        tcp_log.LogClientState("enemy_level2_key_tcp", radar::config::kTcpLocalBindAddress, port, peer,
-                               "disconnected", "poll reported hangup or error");
-        enemy_level2_key_tcp.Close();
-      }
-    }
-
-    service_periodic_tasks(loop_start);
-
-    if (drain_deadline.has_value() && after_poll_now >= *drain_deadline && all_file_inputs_completed()) {
-      break;
-    }
   }
+
+  static void AddTcpClientPollFd(TcpClient &client, bool enable, std::optional<nfds_t> &index,
+                                 RefereeInputPollPlan &plan) {
+    if (!enable || !client.is_open()) {
+      return;
+    }
+
+    index = plan.nfds;
+    short events = static_cast<short>(POLLHUP | POLLERR);
+    if (client.is_connecting()) {
+      events = static_cast<short>(events | POLLOUT);
+    }
+    if (client.is_connected()) {
+      events = static_cast<short>(events | POLLIN);
+    }
+    plan.fds[plan.nfds++] = pollfd{client.fd(), events, 0};
+  }
+
+  RefereeInputLoopRuntime &runtime_;
+  Services &services_;
+  RefereeInputLoopState &state_;
+};
+
+}  // namespace detail
+
+/**
+ * @brief 完整主循环：串口接收 + 多路 TCP + 统一发送调度
+ * @tparam SerialReferee 常规链路解包器类型
+ * @tparam InfoWaveReferee 信息波解包器类型
+ * @tparam EnemyKeyReceiverT 敌方密钥接收器类型
+ * @tparam RadarCommandSenderT 雷达指令发送器类型
+ * @tparam MapRobotRelayT `0x0305` relay 类型
+ * @tparam ExternalServerSenderT 外部 TCP server 原始发送器类型
+ */
+template <typename SerialReferee, typename InfoWaveReferee, typename EnemyKeyReceiverT, typename RadarCommandSenderT,
+          typename MapRobotRelayT, typename ExternalServerSenderT>
+void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp, TcpClient &enemy_level1_key_tcp,
+                                    TcpClient &enemy_level2_key_tcp, SerialReferee &serial_referee,
+                                    InfoWaveReferee &info_wave_referee, ReplayInputSource *serial_replay,
+                                    ReplayInputSource *info_wave_replay, ReplayInputSource *enemy_level1_key_replay,
+                                    ReplayInputSource *enemy_level2_key_replay,
+                                    EnemyKeyReceiverT &enemy_level1_key_receiver,
+                                    EnemyKeyReceiverT &enemy_level2_key_receiver,
+                                    RadarCommandSenderT &radar_command_sender, MapRobotRelayT &map_robot_relay,
+                                    ExternalServerSenderT &external_server_sender, RefereeTxScheduler &tx_scheduler,
+                                    radar::log::BinaryLogStore &raw_log_store, TcpServer *external_tcp_server,
+                                    const std::atomic<bool> &running) {
+  const bool serial_input_is_file =
+      radar::config::kSerialRefereeInputMode == radar::config::RefereeInputSourceMode::kFile;
+  const bool info_wave_input_is_file =
+      radar::config::kInfoWaveInputMode == radar::config::RefereeInputSourceMode::kFile;
+  const bool enemy_level1_input_is_file =
+      radar::config::kEnemyLevel1KeyInputMode == radar::config::RefereeInputSourceMode::kFile;
+  const bool enemy_level2_input_is_file =
+      radar::config::kEnemyLevel2KeyInputMode == radar::config::RefereeInputSourceMode::kFile;
+
+  detail::RefereeInputLoopRuntime runtime(raw_log_store, serial_input_is_file, info_wave_input_is_file,
+                                          enemy_level1_input_is_file, enemy_level2_input_is_file);
+  auto services =
+      detail::RefereeInputLoopServices<SerialReferee, InfoWaveReferee, EnemyKeyReceiverT, RadarCommandSenderT,
+                                       MapRobotRelayT, ExternalServerSenderT>{serial,
+                                                                              info_wave_tcp,
+                                                                              enemy_level1_key_tcp,
+                                                                              enemy_level2_key_tcp,
+                                                                              serial_referee,
+                                                                              info_wave_referee,
+                                                                              serial_replay,
+                                                                              info_wave_replay,
+                                                                              enemy_level1_key_replay,
+                                                                              enemy_level2_key_replay,
+                                                                              enemy_level1_key_receiver,
+                                                                              enemy_level2_key_receiver,
+                                                                              radar_command_sender,
+                                                                              map_robot_relay,
+                                                                              external_server_sender,
+                                                                              tx_scheduler,
+                                                                              raw_log_store,
+                                                                              external_tcp_server,
+                                                                              running};
+  detail::RefereeInputLoopState state(serial.is_open());
+  detail::RefereeInputLoopRunner<SerialReferee, InfoWaveReferee, EnemyKeyReceiverT, RadarCommandSenderT,
+                                 MapRobotRelayT, ExternalServerSenderT>
+      runner(runtime, services, state);
+  runner.Run();
 }
 
 }  // namespace radar::referee

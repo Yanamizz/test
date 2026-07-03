@@ -13,6 +13,7 @@
 
 #include "include/config/config.hpp"
 #include "include/log/referee_main_log.hpp"
+#include "include/referee/external_server_sender.hpp"
 #include "include/referee/map_robot_relay.hpp"
 #include "include/referee/replay_input_source.hpp"
 #include "include/referee/radar_decision_tree.hpp"
@@ -22,6 +23,7 @@
 #include "include/referee/serial_port.hpp"
 #include "include/referee/tcp_client.hpp"
 #include "include/referee/tcp_connection_log.hpp"
+#include "include/referee/tcp_server.hpp"
 #include "librm/device/referee/referee.hpp"
 
 namespace {
@@ -66,13 +68,23 @@ int main() {
                                                  radar::config::kInfoWaveTcpServerPort, true, tcp_log, &std::cerr);
     }
     radar::referee::TcpClient enemy_level1_key_tcp;
-    radar::referee::TryOpenConfiguredTcpClient(&enemy_level1_key_tcp, "enemy_level1_key_tcp",
-                                               radar::config::kEnemyLevel1KeyTcpServerPort, true, tcp_log,
-                                               &std::cerr);
+    if (radar::config::kEnemyLevel1KeyInputMode == radar::config::RefereeInputSourceMode::kReal) {
+      radar::referee::TryOpenConfiguredTcpClient(&enemy_level1_key_tcp, "enemy_level1_key_tcp",
+                                                 radar::config::kEnemyLevel1KeyTcpServerPort, true, tcp_log,
+                                                 &std::cerr);
+    }
     radar::referee::TcpClient enemy_level2_key_tcp;
-    radar::referee::TryOpenConfiguredTcpClient(&enemy_level2_key_tcp, "enemy_level2_key_tcp",
-                                               radar::config::kEnemyLevel2KeyTcpServerPort, true, tcp_log,
-                                               &std::cerr);
+    if (radar::config::kEnemyLevel2KeyInputMode == radar::config::RefereeInputSourceMode::kReal) {
+      radar::referee::TryOpenConfiguredTcpClient(&enemy_level2_key_tcp, "enemy_level2_key_tcp",
+                                                 radar::config::kEnemyLevel2KeyTcpServerPort, true, tcp_log,
+                                                 &std::cerr);
+    }
+    std::optional<radar::referee::TcpServer> external_tcp_server;
+    if (radar::config::kExternalTcpServerEnabled) {
+      external_tcp_server.emplace();
+      radar::referee::TryOpenConfiguredTcpServer(&*external_tcp_server, "external_tcp_server",
+                                                 radar::config::kExternalTcpServerPort, tcp_log, &std::cerr);
+    }
 
     // 创建常规链路、信息波链路与发送链路各自的状态维护对象。
     Referee serial_referee;
@@ -82,6 +94,8 @@ int main() {
     radar::referee::RadarCommandSender radar_command_sender(tx_scheduler, run_log_root);
     radar::referee::RadarDecisionTree<kRevision> radar_decision_tree(radar_command_sender);
     radar::referee::MapRobotRelay<kRevision> relay(tx_scheduler, run_log_root);
+    radar::referee::ExternalServerSender external_server_sender(external_tcp_server ? &*external_tcp_server : nullptr,
+                                                                run_log_root);
     radar::referee::EnemyKeyReceiver<kRevision> enemy_level1_key_receiver(
         "enemy_level1_key", radar::config::kEnemyLevel1KeyTcpServerPort, radar_command_sender, run_log_root);
     radar::referee::EnemyKeyReceiver<kRevision> enemy_level2_key_receiver(
@@ -89,6 +103,8 @@ int main() {
 
     std::optional<radar::referee::ReplayInputSource> serial_replay_source;
     std::optional<radar::referee::ReplayInputSource> info_wave_replay_source;
+    std::optional<radar::referee::ReplayInputSource> enemy_level1_key_replay_source;
+    std::optional<radar::referee::ReplayInputSource> enemy_level2_key_replay_source;
     if (radar::config::kSerialRefereeInputMode == radar::config::RefereeInputSourceMode::kFile) {
       serial_replay_source.emplace(radar::config::kSerialRefereeReplayFile, radar::config::kSerialRefereeReplayRateHz,
                                    "serial_referee_replay");
@@ -96,6 +112,16 @@ int main() {
     if (radar::config::kInfoWaveInputMode == radar::config::RefereeInputSourceMode::kFile) {
       info_wave_replay_source.emplace(radar::config::kInfoWaveReplayFile, radar::config::kInfoWaveReplayRateHz,
                                       "info_wave_replay");
+    }
+    if (radar::config::kEnemyLevel1KeyInputMode == radar::config::RefereeInputSourceMode::kFile) {
+      enemy_level1_key_replay_source.emplace(radar::config::kEnemyLevel1KeyReplayFile,
+                                             radar::config::kEnemyLevel1KeyReplayRateHz,
+                                             "enemy_level1_key_replay");
+    }
+    if (radar::config::kEnemyLevel2KeyInputMode == radar::config::RefereeInputSourceMode::kFile) {
+      enemy_level2_key_replay_source.emplace(radar::config::kEnemyLevel2KeyReplayFile,
+                                             radar::config::kEnemyLevel2KeyReplayRateHz,
+                                             "enemy_level2_key_replay");
     }
 
     radar::log::FileLogStore input_mode_log(run_log_root);
@@ -112,9 +138,27 @@ int main() {
           << "\"info_wave_input_mode\":\""
           << (radar::config::kInfoWaveInputMode == radar::config::RefereeInputSourceMode::kReal ? "real" : "file")
           << "\","
-          << "\"tcp_role\":\"client\","
+          << "\"enemy_level1_key_input_mode\":\""
+          << (radar::config::kEnemyLevel1KeyInputMode == radar::config::RefereeInputSourceMode::kReal ? "real"
+                                                                                                        : "file")
+          << "\","
+          << "\"enemy_level1_key_replay_file\":\"" << radar::config::kEnemyLevel1KeyReplayFile << "\","
+          << "\"enemy_level1_key_replay_rate_hz\":" << radar::config::kEnemyLevel1KeyReplayRateHz << ','
+          << "\"enemy_level2_key_input_mode\":\""
+          << (radar::config::kEnemyLevel2KeyInputMode == radar::config::RefereeInputSourceMode::kReal ? "real"
+                                                                                                        : "file")
+          << "\","
+          << "\"enemy_level2_key_replay_file\":\"" << radar::config::kEnemyLevel2KeyReplayFile << "\","
+          << "\"enemy_level2_key_replay_rate_hz\":" << radar::config::kEnemyLevel2KeyReplayRateHz << ','
+          << "\"tcp_role\":\""
+          << (radar::config::kExternalTcpServerEnabled ? "mixed" : "client")
+          << "\","
           << "\"tcp_server_address\":\"" << radar::config::kTcpServerAddress << "\","
           << "\"tcp_local_bind_address\":\"" << radar::config::kTcpLocalBindAddress << "\","
+          << "\"external_tcp_server_enabled\":" << (radar::config::kExternalTcpServerEnabled ? "true" : "false")
+          << ','
+          << "\"external_tcp_server_bind_address\":\"" << radar::config::kExternalTcpServerBindAddress << "\","
+          << "\"external_tcp_server_port\":" << radar::config::kExternalTcpServerPort << ','
           << "\"info_wave_replay_file\":\"" << radar::config::kInfoWaveReplayFile << "\","
           << "\"info_wave_replay_rate_hz\":" << radar::config::kInfoWaveReplayRateHz << "}";
       input_mode_log.Append("main/input_mode.log", oss.str(), radar::log::LogPriority::kCriticalDecision);
@@ -124,10 +168,11 @@ int main() {
     serial_referee.AttachCallback([&](rm::u16 cmd_id, rm::u8 seq) {
       relay.ProcessSerial(cmd_id, seq, serial_referee);
       radar_decision_tree.ProcessSerial(cmd_id, seq, serial_referee);
+      external_server_sender.ProcessSerial(cmd_id, seq, serial_referee.data());
     });
-    // 信息波回调：维护 `0x0A01~0x0A06` 状态，并驱动 `0x0305` 组包链路。
+    // 信息波回调：维护 `0x0A01~0x0A06` 状态，并结合串口 `0x0301/0x0200` 驱动 `0x0305` 组包链路。
     info_wave_referee.AttachCallback([&](rm::u16 cmd_id, rm::u8 seq) {
-      relay.ProcessInfoWaveTcp(cmd_id, seq, info_wave_referee, serial_referee.data());
+      relay.ProcessInfoWaveTcp(cmd_id, seq, info_wave_referee);
     });
 
     // 主循环统一负责接收、处理、发送与自动重连。
@@ -135,9 +180,14 @@ int main() {
                                                    enemy_level2_key_tcp, serial_referee, info_wave_referee,
                                                    serial_replay_source ? &*serial_replay_source : nullptr,
                                                    info_wave_replay_source ? &*info_wave_replay_source : nullptr,
+                                                   enemy_level1_key_replay_source ? &*enemy_level1_key_replay_source
+                                                                                  : nullptr,
+                                                   enemy_level2_key_replay_source ? &*enemy_level2_key_replay_source
+                                                                                  : nullptr,
                                                    enemy_level1_key_receiver, enemy_level2_key_receiver,
-                                                   radar_command_sender, relay, tx_scheduler,
-                                                   raw_log_store, g_running);
+                                                   radar_command_sender, relay, external_server_sender, tx_scheduler,
+                                                   raw_log_store, external_tcp_server ? &*external_tcp_server : nullptr,
+                                                   g_running);
 
     return 0;
   } catch (const std::exception &error) {

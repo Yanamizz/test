@@ -19,47 +19,50 @@
 
 ## 当前主链路
 
-主入口在 [src/main.cc](/home/hanni/Radar/src/main.cc:45)。
+主入口在 [src/main.cc](src/main.cc:45)。
 
 当前运行链路如下：
 
 1. 串口常规链路通过 `SerialPort` 接收真实裁判系统字节流，或通过 `ReplayInputSource` 从文件回放。
 2. 信息波链路通过 `TcpClient` 主动连接 `8001`，接收真实 TCP 字节流，或通过 `ReplayInputSource` 从文件回放。
-3. 敌方一级/二级密钥链路通过 `TcpClient` 主动连接 `8002/8003`，接收完整 `0x0A06` 协议帧。
-4. 所有输入字节流逐字节喂给各自的 `rm::device::Referee<revision>` 实例维护状态。
-5. `MapRobotRelay` 根据 `0x0A01 + 0x020B` 维护 `0x0305` 状态，并按 5Hz 发送最新地图数据。
-6. `RadarDecisionTree` 根据 `0x020E` 生成自主决策，由 `RadarCommandSender` 组包为 `0x0301(0x0121)`。
-7. `RefereeTxScheduler` 统一调度 `0x0301` 与 `0x0305` 的串口发送节奏。
-8. [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58) 统一负责真实输入、文件回放、串口重连、TCP 重连、周期任务和日志指标刷新。
+3. 敌方一级/二级密钥链路通过 `TcpClient` 主动连接 `8002/8003` 接收真实 TCP 字节流，或通过 `ReplayInputSource` 从文件回放完整 `0x0A06` 协议帧。
+4. 可选的外部设备通道通过 [include/referee/tcp_server.hpp](include/referee/tcp_server.hpp:1) 监听配置端口，接受一条额外的 TCP 会话；当前先只负责建立连接、保持连接和记录原始输入。
+5. 所有输入字节流逐字节喂给各自的 `rm::device::Referee<revision>` 实例维护状态。
+6. `MapRobotRelay` 根据 `0x0A01 + 0x0301/0x0200(AllyRobotPosition)` 维护 `0x0305` 状态，并按 5Hz 发送最新地图数据。
+7. `RadarDecisionTree` 根据 `0x020E` 生成自主决策，由 `RadarCommandSender` 组包为 `0x0301(0x0121)`。
+8. `RefereeTxScheduler` 统一调度 `0x0301` 与 `0x0305` 的串口发送节奏。
+9. [include/referee/referee_input_loop.hpp](include/referee/referee_input_loop.hpp:58) 统一负责真实输入、文件回放、串口重连、TCP 重连、周期任务和日志指标刷新。
 
 ## 关键模块
 
-- [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:32)
+- [include/config/config.hpp](include/config/config.hpp:32)
   - 唯一手动配置入口
-- [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)
+- [include/referee/referee_input_loop.hpp](include/referee/referee_input_loop.hpp:58)
   - 主循环、poll、自动重连、周期任务
-- [include/referee/serial_port.hpp](/home/hanni/Radar/include/referee/serial_port.hpp:75)
+- [include/referee/serial_port.hpp](include/referee/serial_port.hpp:75)
   - 裁判系统串口读写
-- [include/referee/tcp_client.hpp](/home/hanni/Radar/include/referee/tcp_client.hpp:46)
+- [include/referee/tcp_client.hpp](include/referee/tcp_client.hpp:46)
   - `8001/8002/8003` 非阻塞 TCP 客户端
-- [include/referee/map_robot_relay.hpp](/home/hanni/Radar/include/referee/map_robot_relay.hpp:254)
-  - `0x0A01 -> 0x0305` 状态维护、过期处理、发送日志
-- [include/referee/radar_decision_tree.hpp](/home/hanni/Radar/include/referee/radar_decision_tree.hpp:45)
+- [include/referee/tcp_server.hpp](include/referee/tcp_server.hpp:1)
+  - 可选外部设备 TCP server，负责监听、accept 与保活
+- [include/referee/map_robot_relay.hpp](include/referee/map_robot_relay.hpp:254)
+  - `0x0A01 + 0x0301/0x0200(AllyRobotPosition) -> 0x0305` 状态维护、过期处理、发送日志
+- [include/referee/radar_decision_tree.hpp](include/referee/radar_decision_tree.hpp:45)
   - 基于 `0x020E` 的自主决策
-- [include/referee/radar_command_sender.hpp](/home/hanni/Radar/include/referee/radar_command_sender.hpp:85)
+- [include/referee/radar_command_sender.hpp](include/referee/radar_command_sender.hpp:85)
   - `0x0121` 组包、队列、10 秒冷却、日志
-- [include/referee/enemy_key_receiver.hpp](/home/hanni/Radar/include/referee/enemy_key_receiver.hpp:72)
+- [include/referee/enemy_key_receiver.hpp](include/referee/enemy_key_receiver.hpp:72)
   - `8002/8003` 上的 `0x0A06` 解包与校验
-- [include/referee/referee_tx_scheduler.hpp](/home/hanni/Radar/include/referee/referee_tx_scheduler.hpp:33)
+- [include/referee/referee_tx_scheduler.hpp](include/referee/referee_tx_scheduler.hpp:33)
   - `0x0301` FIFO 与 `0x0305` latest-only 发送调度
-- [include/log/log_backend.hpp](/home/hanni/Radar/include/log/log_backend.hpp:129)
+- [include/log/log_backend.hpp](include/log/log_backend.hpp:129)
   - 异步日志后端与 `runtime_metrics.log`
-- [include/log/referee_main_log.hpp](/home/hanni/Radar/include/log/referee_main_log.hpp:739)
+- [include/log/referee_main_log.hpp](include/log/referee_main_log.hpp:739)
   - 主协议结构体日志格式化
 
 ## 配置入口
 
-所有手动配置统一放在 [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:32)。
+所有手动配置统一放在 [include/config/config.hpp](include/config/config.hpp:32)。
 
 常用配置项：
 
@@ -67,28 +70,37 @@
   - 当前裁判系统协议版本
 - `kRadarLogMode`
   - `kDebug` / `kMatch`
+  - `kMatch` 下只保留原始字节流日志与 `serial/tcp` 通信状态日志
 - `kDebugAllowMissingInterfaces`
   - 调试模式下允许接口缺失，缺失链路对应状态按 0 值处理
 - `kSerialRefereeInputMode`
   - 串口主协议使用真实输入或文件回放
 - `kInfoWaveInputMode`
   - 信息波 `8001` 使用真实输入或文件回放
+- `kEnemyLevel1KeyInputMode` / `kEnemyLevel2KeyInputMode`
+  - 敌方密钥 `8002/8003` 各自使用真实输入或文件回放
 - `kSerialRefereeReplayFile` / `kInfoWaveReplayFile`
   - 回放文件路径
+- `kEnemyLevel1KeyReplayFile` / `kEnemyLevel2KeyReplayFile`
+  - `8002/8003` 回放文件路径
 - `kSerialRefereeReplayRateHz` / `kInfoWaveReplayRateHz`
   - 回放频率
+- `kEnemyLevel1KeyReplayRateHz` / `kEnemyLevel2KeyReplayRateHz`
+  - `8002/8003` 回放频率
 - `kTcpServerAddress`
   - `8001/8002/8003` 的对端服务端地址
 - `kTcpLocalBindAddress`
   - 本机绑定地址，留空表示让系统自动选路由出口
+- `kExternalTcpServerEnabled` / `kExternalTcpServerBindAddress` / `kExternalTcpServerPort`
+  - 额外 server 通道是否启用、监听地址和端口
 - `kInfoWaveTcpServerPort` / `kEnemyLevel1KeyTcpServerPort` / `kEnemyLevel2KeyTcpServerPort`
   - 三条 TCP 客户端链路端口
 - `kSerialReconnectIntervalMs` / `kTcpReconnectIntervalMs`
   - 自动重连周期
-- `kInfoWaveTcpIdleTimeoutMs` / `kEnemyKeyTcpIdleTimeoutMs`
+- `kInfoWaveTcpIdleTimeoutMs` / `kEnemyKeyTcpIdleTimeoutMs` / `kExternalTcpServerIdleTimeoutMs`
   - TCP 空闲断开策略
 
-当前代码语义上是 TCP client-only，本机不再监听 `8001/8002/8003`。
+当前主接收链路中的 `8001/8002/8003` 仍是 TCP client-only；同时项目新增了一条可选的外部设备 server 通道，不影响原有三条输入链路角色。
 
 ## 输入模式
 
@@ -99,19 +111,19 @@
   - 信息波来自真实 TCP `8001`
   - 敌方密钥来自真实 TCP `8002/8003`
 - `kFile`
-  - 串口与信息波 `8001` 可分别从预制 `.bin` 文件回放完整协议帧
+  - 串口、信息波 `8001` 与敌方密钥 `8002/8003` 都可分别从预制 `.bin` 文件回放完整协议帧
 
 当前约束：
 
 - 串口主协议与信息波 `8001` 可以独立切换 `kReal/kFile`
-- `8002/8003` 目前只走真实 TCP，不走文件回放
+- `8002/8003` 也可以各自独立切换 `kReal/kFile`
 - 即使串口输入改成文件回放，发送仍尝试走真实串口
 
 样例文件位于：
 
-- [test/info/outputInfo.bin](/home/hanni/Radar/test/info/outputInfo.bin)
-- [test/info/outputInfo2.bin](/home/hanni/Radar/test/info/outputInfo2.bin)
-- [test/info/map_robot_sender_sample.bin](/home/hanni/Radar/test/info/map_robot_sender_sample.bin)
+- [test/info/outputInfo.bin](test/info/outputInfo.bin)
+- [test/info/outputInfo2.bin](test/info/outputInfo2.bin)
+- [test/info/map_robot_sender_sample.bin](test/info/map_robot_sender_sample.bin)
 
 ## 构建与运行
 
@@ -141,7 +153,7 @@ python3 test/serialtest.py
 
 辅助脚本文件：
 
-- [test/serialtest.py](/home/hanni/Radar/test/serialtest.py:1)
+- [test/serialtest.py](test/serialtest.py:1)
 
 当前仓库不再维护独立的 C++ 测试可执行程序；测试能力已经回收到主程序、回放链路和日志链路中。
 
@@ -162,11 +174,13 @@ python3 test/serialtest.py
 - `main/tcp_startup.log`
 - `main/tcp_channel_state.log`
 - `main/tcp_client_state.log`
-- `main/runtime_metrics.log`
 - `main/0x0305_map_robot_data.log`
 - `main/0x0305_map_robot_data_skipped.log`
+- `raw/tcp_external_device_rx.bin`
 
 当前代码不再创建 `latest/` 快照目录，所有证据链都保留在当次运行目录中。
+
+`kMatch` 模式下不会保留 `runtime_metrics.log`、结构化发送日志和决策日志，只保留 `raw/*.bin` 与通信状态日志。
 
 ## 调试注意事项
 
@@ -176,11 +190,11 @@ python3 test/serialtest.py
 
 ## 相关文档
 
-- [AGENTS.md](/home/hanni/Radar/AGENTS.md:1)
+- [AGENTS.md](AGENTS.md:1)
   - 仓库协作约束与修改边界
-- [.agent/handoff.md](/home/hanni/Radar/.agent/handoff.md:1)
+- [.agent/handoff.md](.agent/handoff.md:1)
   - 当前代码状态的接手说明
-- [.agent/full_pipeline.md](/home/hanni/Radar/.agent/full_pipeline.md:1)
+- [.agent/full_pipeline.md](.agent/full_pipeline.md:1)
   - 从接收到发送的完整链路说明
-- [.agent/radar_stability_review.md](/home/hanni/Radar/.agent/radar_stability_review.md:1)
+- [.agent/radar_stability_review.md](.agent/radar_stability_review.md:1)
   - 稳定性现状、已完成保护与剩余风险

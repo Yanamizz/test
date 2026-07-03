@@ -119,6 +119,19 @@ class EnemyKeyReceiver {
   std::size_t update_count() const { return update_count_; }
   std::size_t valid_frame_count() const { return valid_frame_count_; }
 
+  /**
+   * @brief 推进一次“已接收但尚未满足发送门控”的密钥提交
+   */
+  void ProcessDeferredQueueing() {
+    if (!has_key_ || queued_to_sender_ || !RequiresLevel1Gate()) {
+      return;
+    }
+    if (!command_sender_.HasSentOpponentKeyFromPort(radar::config::kEnemyLevel1KeyTcpServerPort)) {
+      return;
+    }
+    QueueAcceptedKey();
+  }
+
  private:
   /**
    * @brief 处理一次完整主协议帧
@@ -149,8 +162,22 @@ class EnemyKeyReceiver {
 
     has_key_ = true;
     completed_ = true;
-    command_sender_.QueueOpponentKey(name_, source_port_, latest_key_);
+    QueueAcceptedKey();
     LogAcceptedFrame(seq);
+  }
+
+  bool RequiresLevel1Gate() const { return source_port_ == radar::config::kEnemyLevel2KeyTcpServerPort; }
+
+  void QueueAcceptedKey() {
+    if (queued_to_sender_) {
+      return;
+    }
+    if (RequiresLevel1Gate() &&
+        !command_sender_.HasSentOpponentKeyFromPort(radar::config::kEnemyLevel1KeyTcpServerPort)) {
+      return;
+    }
+    command_sender_.QueueOpponentKey(name_, source_port_, latest_key_);
+    queued_to_sender_ = true;
   }
 
   /**
@@ -226,6 +253,7 @@ class EnemyKeyReceiver {
   bool has_key_ = false;                   ///< 是否收到过合法密钥
   bool completed_ = false;                 ///< 当前端口是否已完成一次有效接收
   bool rejected_ = false;                  ///< 是否收到过非法密钥
+  bool queued_to_sender_ = false;          ///< 当前密钥是否已进入 `0x0121` 待发送队列
   std::size_t update_count_ = 0;           ///< 已成功解出的 `0x0A06` 次数
   std::size_t valid_frame_count_ = 0;      ///< 所有 CRC 正确主协议帧计数
 };

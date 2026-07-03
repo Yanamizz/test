@@ -14,11 +14,12 @@
 #include "include/config/config.hpp"
 #include "include/log/referee_main_log.hpp"
 #include "include/referee/tcp_client.hpp"
+#include "include/referee/tcp_server.hpp"
 
 namespace radar::referee {
 
 /**
- * @brief 维护 TCP 启动、连接通道与客户端连接状态日志
+ * @brief 维护 TCP 启动、连接通道与会话状态日志
  */
 class TcpConnectionLog {
  public:
@@ -104,6 +105,32 @@ inline void TryOpenConfiguredTcpClient(TcpClient *client, const std::string &nam
   if (optional_in_debug && radar::config::kDebugAllowMissingInterfaces) {
     tcp_log.LogStartup(name, radar::config::kTcpLocalBindAddress, port, "disabled", "debug_allow_missing");
     tcp_log.LogChannelState(name, radar::config::kTcpLocalBindAddress, port, "disabled", "debug_allow_missing");
+  }
+}
+
+/**
+ * @brief 启动阶段按配置尝试拉起额外 TCP server 监听
+ */
+inline void TryOpenConfiguredTcpServer(TcpServer *server, const std::string &name, int port, TcpConnectionLog &tcp_log,
+                                       std::ostream *error_stream = nullptr) {
+  std::string error;
+  if (server->TryOpen(radar::config::kExternalTcpServerBindAddress, port, &error)) {
+    const std::string detail = "listening_for_peer";
+    tcp_log.LogStartup(name, radar::config::kExternalTcpServerBindAddress, port, "listening", detail);
+    tcp_log.LogChannelState(name, radar::config::kExternalTcpServerBindAddress, port, "listening", detail);
+    return;
+  }
+
+  tcp_log.LogStartup(name, radar::config::kExternalTcpServerBindAddress, port, "listen_failed", error);
+  tcp_log.LogChannelState(name, radar::config::kExternalTcpServerBindAddress, port, "listen_failed", error);
+  if (error_stream != nullptr) {
+    *error_stream << error << '\n';
+  }
+
+  if (radar::config::kDebugAllowMissingInterfaces) {
+    tcp_log.LogStartup(name, radar::config::kExternalTcpServerBindAddress, port, "disabled", "debug_allow_missing");
+    tcp_log.LogChannelState(name, radar::config::kExternalTcpServerBindAddress, port, "disabled",
+                            "debug_allow_missing");
   }
 }
 

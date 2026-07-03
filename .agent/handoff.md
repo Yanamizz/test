@@ -8,7 +8,8 @@
 
 - 接收裁判系统串口主协议
 - 接收信息波 TCP `8001`
-- 接收敌方密钥 TCP `8002/8003`
+- 接收敌方密钥 TCP `8002/8003`，也支持文件回放
+- 可选地作为 TCP server 监听另一设备接入
 - 维护协议结构体状态
 - 发送 `0x0305` 与 `0x0301(0x0121)`
 - 记录结构体日志、原始字节流和运行指标
@@ -27,18 +28,19 @@
 
 1. 创建本轮运行日志目录。
 2. 尝试打开裁判系统串口。
-3. 按配置主动连接 TCP `8001/8002/8003`。
-4. 创建两个主协议解包器：
+3. 按配置拉起真实 TCP `8001/8002/8003`，或为对应链路创建文件回放输入源。
+4. 若启用额外 server 通道，则启动监听并等待另一设备接入。
+5. 创建两个主协议解包器：
    - `serial_referee`
    - `info_wave_referee`
-5. 创建发送与业务模块：
+6. 创建发送与业务模块：
    - `RefereeTxScheduler`
    - `RadarCommandSender`
    - `RadarDecisionTree`
    - `MapRobotRelay`
    - 两个 `EnemyKeyReceiver`
-6. 给串口链路与信息波链路挂回调。
-7. 进入 [`RunSerialInfoWaveAndKeyTcpLoop(...)`](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)。
+7. 给串口链路与信息波链路挂回调。
+8. 进入 [`RunSerialInfoWaveAndKeyTcpLoop(...)`](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)。
 
 这意味着当前项目的真实主链并不在 [src/main.cc](/home/hanni/Radar/src/main.cc:45) 里展开，而是分散在 `include/referee/*.hpp` 的项目侧封装中。
 
@@ -86,7 +88,7 @@
 职责：
 
 - 本端只作为 TCP 客户端
-- 主动连接 `8002/8003`
+- 主动连接 `8002/8003`，或从回放文件输入完整协议帧
 - 每个端口内部维护一个独立的 `Referee` 解包器
 - 只接受完整 `0x0A06` 帧，而不是裸 6 字节
 - 成功拿到一次合法密钥后，将其送入 `RadarCommandSender` 的待发队列
@@ -96,7 +98,29 @@
 - 两个端口当前语义是“一级密钥 / 二级密钥”两个独立来源。
 - 当前实现完成一次合法接收后会关闭该端口连接，不再持续保持。
 
-### 3.4 文件回放
+### 3.4 外部设备 server 通道
+
+文件：
+
+- [include/referee/tcp_server.hpp](/home/hanni/Radar/include/referee/tcp_server.hpp:1)
+- [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:59)
+
+职责：
+
+- 由本程序监听一个独立端口，等待另一设备主动 connect
+- 当前只维护一条已接入会话
+- 当前先不承载业务协议发送，只完成监听、accept、保活和原始字节流记录
+- 若对端有输入字节，会写入 `raw/tcp_external_device_rx.bin`
+
+配置入口：
+
+- [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:54)
+  - `kExternalTcpServerEnabled`
+  - `kExternalTcpServerBindAddress`
+  - `kExternalTcpServerPort`
+  - `kExternalTcpServerIdleTimeoutMs`
+
+### 3.5 文件回放
 
 文件：
 
@@ -106,10 +130,7 @@
 
 - 串口主协议回放
 - 信息波 `8001` 回放
-
-当前不支持：
-
-- `8002/8003` 文件回放
+- 敌方密钥 `8002/8003` 回放
 
 ## 4. 当前发送职责
 
@@ -122,12 +143,12 @@
 职责：
 
 - 从信息波 `0x0A01` 维护敌方位置
-- 从串口 `0x020B` 维护己方地面机器人位置
+- 从串口 `0x0301` 下的 `0x0200 AllyRobotPosition` 维护己方位置
 - 按 5Hz latest-only 节奏发送 `0x0305`
 - 状态过期后自动置 0
 - 记录成功发送和跳过发送原因
 
-调试模式下若允许缺失接口，则即便 `0x0A01` 或 `0x020B` 缺失，也会按 0 值继续跑主链路。
+调试模式下若允许缺失接口，则即便 `0x0A01` 或 `0x0301/0x0200` 缺失，也会按 0 值继续跑主链路。
 
 ### 4.2 `0x0301(0x0121 RadarCMD)`
 
@@ -193,11 +214,11 @@
 - `main/serial_state.log`
   - 串口打开失败、掉线、重连
 - `main/tcp_startup.log`
-  - 启动阶段各 TCP 客户端是否拉起
+  - 启动阶段各 TCP 客户端 / server 是否拉起
 - `main/tcp_channel_state.log`
-  - 连接通道的状态变化
+  - 连接通道的状态变化，包括 server 监听状态
 - `main/tcp_client_state.log`
-  - TCP 客户端连接完成、断开、超时
+  - TCP 客户端连接完成、断开、超时，以及 server 侧已接入会话状态
 - `main/runtime_metrics.log`
   - 主循环耗时、日志队列压力、loss_rate 快照
 - `main/0x0305_map_robot_data.log`
@@ -282,6 +303,16 @@
 如果问题是：
 
 - TCP 连不上：优先看 [include/referee/tcp_client.hpp](/home/hanni/Radar/include/referee/tcp_client.hpp:46)、[include/referee/tcp_connection_log.hpp](/home/hanni/Radar/include/referee/tcp_connection_log.hpp:23) 和 `main/tcp_*.log`
+- 外部设备 server 通道要继续发数据：优先看 [include/referee/tcp_server.hpp](/home/hanni/Radar/include/referee/tcp_server.hpp:212)、[src/main.cc](/home/hanni/Radar/src/main.cc:77)、[include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:584)
 - `0x0305` 发送异常：优先看 [include/referee/map_robot_relay.hpp](/home/hanni/Radar/include/referee/map_robot_relay.hpp:254)、[include/referee/referee_tx_scheduler.hpp](/home/hanni/Radar/include/referee/referee_tx_scheduler.hpp:33)
 - `0x0121` 发送异常：优先看 [include/referee/radar_decision_tree.hpp](/home/hanni/Radar/include/referee/radar_decision_tree.hpp:45)、[include/referee/radar_command_sender.hpp](/home/hanni/Radar/include/referee/radar_command_sender.hpp:85)
 - 运行卡顿或日志过多：优先看 [include/log/log_backend.hpp](/home/hanni/Radar/include/log/log_backend.hpp:129) 与 `runtime_metrics.log`
+
+## 11. 留给后续模型的接手提示
+
+若后续需要让本程序通过外部 server 通道主动发内容，不要重做 socket 底层，直接沿现有实现往上接：
+
+1. 当前监听与 accept 已在 [src/main.cc](/home/hanni/Radar/src/main.cc:77) 和 [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:350) 打通。
+2. 已接入会话对象就是 [`TcpServer`](/home/hanni/Radar/include/referee/tcp_server.hpp:54)，未来发送直接复用 [`TcpServer::TryWriteAll(...)`](/home/hanni/Radar/include/referee/tcp_server.hpp:212)。
+3. 若要把发送逻辑接入主链，优先新增项目侧发送模块或调度器封装，再由 `main.cc` 注入，不要把业务发送细节硬写在主循环里。
+4. 若发送内容需要独立限频、排队或断线重发，建议仿照 [include/referee/referee_tx_scheduler.hpp](/home/hanni/Radar/include/referee/referee_tx_scheduler.hpp:33) 的思路做一个单独 scheduler，而不是在 `poll` 分支里直接临时 `send()`。

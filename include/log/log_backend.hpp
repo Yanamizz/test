@@ -34,6 +34,19 @@
 
 namespace radar::log {
 
+/// 运行指标刷新周期。
+inline constexpr int kRuntimeMetricsFlushIntervalMs = 1000;
+/// 主循环告警阈值。
+inline constexpr int kRuntimeLoopWarnMs = 5;
+/// 主循环长尾阈值。
+inline constexpr int kRuntimeLoopTailMs = 20;
+/// 主循环严重阻塞阈值。
+inline constexpr int kRuntimeLoopCriticalMs = 100;
+/// Best-effort 日志队列上限。
+inline constexpr std::size_t kBestEffortLogQueueCapacity = 4096;
+/// Critical 日志软上限，超过后优先挤出低优先级日志。
+inline constexpr std::size_t kCriticalLogSoftQueueCapacity = 8192;
+
 /**
  * @brief 日志优先级
  */
@@ -42,6 +55,21 @@ enum class LogPriority {
   kCriticalDecision, ///< 关键决策日志，尽量保留
   kCriticalRaw,      ///< 原始二进制日志，优先级最高
 };
+
+/**
+ * @brief 当前文本日志是否允许写入指定相对路径
+ * @param relative_path 日志相对路径
+ * @return 当前日志模式下允许写入时返回 true
+ */
+inline bool ShouldWriteTextLog(const std::filesystem::path &relative_path) {
+  if (radar::config::kRadarLogMode != radar::config::RadarLogMode::kMatch) {
+    return true;
+  }
+
+  const auto path = relative_path.generic_string();
+  return path == "main/serial_state.log" || path == "main/tcp_startup.log" || path == "main/tcp_channel_state.log" ||
+         path == "main/tcp_client_state.log";
+}
 
 namespace detail {
 
@@ -154,13 +182,13 @@ class RuntimeMetrics {
       max_process_loop_ms_ = process_ms;
     }
     ++loop_iteration_count_;
-    if (total_ms > static_cast<double>(config::kRuntimeLoopWarnMs)) {
+    if (total_ms > static_cast<double>(kRuntimeLoopWarnMs)) {
       ++loop_over_warn_count_;
     }
-    if (total_ms > static_cast<double>(config::kRuntimeLoopTailMs)) {
+    if (total_ms > static_cast<double>(kRuntimeLoopTailMs)) {
       ++loop_over_tail_count_;
     }
-    if (total_ms > static_cast<double>(config::kRuntimeLoopCriticalMs)) {
+    if (total_ms > static_cast<double>(kRuntimeLoopCriticalMs)) {
       ++loop_over_critical_count_;
     }
   }
@@ -202,6 +230,21 @@ class RuntimeMetrics {
     std::lock_guard<std::mutex> lock(mutex_);
     ++tcp_idle_disconnect_count_;
     ++tcp_idle_disconnects_by_port_[port];
+  }
+
+  /// 记录一次因 poll 超时而唤醒的主循环。
+  void RecordPollTimeoutWakeup() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++poll_timeout_wakeup_count_;
+  }
+
+  /**
+   * @brief 记录一次单轮唤醒中的多次成功读取排空
+   * @param source 链路名称
+   */
+  void RecordMultiReadDrain(const std::string &source) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++multi_read_drains_by_source_[source];
   }
 
   /**
@@ -307,10 +350,13 @@ class RuntimeMetrics {
    * @brief 到达周期时将聚合指标落盘
    */
   void MaybeFlush() {
+    if (radar::config::kRadarLogMode == radar::config::RadarLogMode::kMatch) {
+      return;
+    }
     const auto now = Clock::now();
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (now - last_flush_time_ < std::chrono::milliseconds(config::kRuntimeMetricsFlushIntervalMs)) {
+      if (now - last_flush_time_ < std::chrono::milliseconds(kRuntimeMetricsFlushIntervalMs)) {
         return;
       }
       last_flush_time_ = now;
@@ -345,7 +391,9 @@ class RuntimeMetrics {
       snapshot.serial_disconnect_count = serial_disconnect_count_;
       snapshot.serial_reconnect_count = serial_reconnect_count_;
       snapshot.tcp_idle_disconnect_count = tcp_idle_disconnect_count_;
+      snapshot.poll_timeout_wakeup_count = poll_timeout_wakeup_count_;
       snapshot.tcp_idle_disconnects_by_port = tcp_idle_disconnects_by_port_;
+      snapshot.multi_read_drains_by_source = multi_read_drains_by_source_;
       snapshot.map_robot_rate_limited_skip_count = map_robot_rate_limited_skip_count_;
       snapshot.map_robot_opponent_stale_skip_count = map_robot_opponent_stale_skip_count_;
       snapshot.radar_command_waiting_cooldown_count = radar_command_waiting_cooldown_count_;
@@ -375,7 +423,9 @@ class RuntimeMetrics {
       serial_disconnect_count_ = 0;
       serial_reconnect_count_ = 0;
       tcp_idle_disconnect_count_ = 0;
+      poll_timeout_wakeup_count_ = 0;
       tcp_idle_disconnects_by_port_.clear();
+      multi_read_drains_by_source_ = DefaultMultiReadDrainsBySource();
       map_robot_rate_limited_skip_count_ = 0;
       map_robot_opponent_stale_skip_count_ = 0;
       radar_command_waiting_cooldown_count_ = 0;
@@ -416,7 +466,9 @@ class RuntimeMetrics {
     std::size_t serial_disconnect_count = 0;
     std::size_t serial_reconnect_count = 0;
     std::size_t tcp_idle_disconnect_count = 0;
+    std::size_t poll_timeout_wakeup_count = 0;
     std::map<int, std::size_t> tcp_idle_disconnects_by_port;
+    std::map<std::string, std::size_t> multi_read_drains_by_source;
     std::size_t map_robot_rate_limited_skip_count = 0;
     std::size_t map_robot_opponent_stale_skip_count = 0;
     std::size_t radar_command_waiting_cooldown_count = 0;
@@ -441,7 +493,7 @@ class RuntimeMetrics {
             ? 0.0
             : (static_cast<double>(snapshot.log_queue_size_sum) /
                static_cast<double>(snapshot.log_queue_size_sample_count)) /
-                  static_cast<double>(config::kCriticalLogSoftQueueCapacity) *
+                  static_cast<double>(kCriticalLogSoftQueueCapacity) *
                   100.0;
 
     std::ostringstream oss;
@@ -478,6 +530,7 @@ class RuntimeMetrics {
         << "\"serial_disconnects\":" << snapshot.serial_disconnect_count << ','
         << "\"serial_reconnects\":" << snapshot.serial_reconnect_count << ','
         << "\"tcp_idle_disconnects_total\":" << snapshot.tcp_idle_disconnect_count << ','
+        << "\"poll_timeout_wakeups\":" << snapshot.poll_timeout_wakeup_count << ','
         << "\"map_0305_rate_limited_skips\":" << snapshot.map_robot_rate_limited_skip_count << ','
         << "\"map_0305_opponent_stale_skips\":" << snapshot.map_robot_opponent_stale_skip_count << ','
         << "\"radar_0121_waiting_cooldown\":" << snapshot.radar_command_waiting_cooldown_count << ','
@@ -489,6 +542,15 @@ class RuntimeMetrics {
       }
       first = false;
       oss << '"' << port << "\":" << count;
+    }
+    oss << "},\"multi_read_drains_by_source\":{";
+    first = true;
+    for (const auto &[source, count] : snapshot.multi_read_drains_by_source) {
+      if (!first) {
+        oss << ',';
+      }
+      first = false;
+      oss << '"' << source << "\":" << count;
     }
     oss << "},\"loss_rate_by_source\":{";
     first = true;
@@ -515,6 +577,10 @@ class RuntimeMetrics {
       total += value;
     }
     return total / static_cast<double>(values.size());
+  }
+
+  static std::map<std::string, std::size_t> DefaultMultiReadDrainsBySource() {
+    return {{"8001", 0}, {"8002", 0}, {"8003", 0}, {"external_tcp_server", 0}, {"serial", 0}};
   }
 
   std::filesystem::path root_;
@@ -545,7 +611,9 @@ class RuntimeMetrics {
   std::size_t serial_disconnect_count_ = 0;
   std::size_t serial_reconnect_count_ = 0;
   std::size_t tcp_idle_disconnect_count_ = 0;
+  std::size_t poll_timeout_wakeup_count_ = 0;
   std::map<int, std::size_t> tcp_idle_disconnects_by_port_;
+  std::map<std::string, std::size_t> multi_read_drains_by_source_ = DefaultMultiReadDrainsBySource();
   std::size_t map_robot_rate_limited_skip_count_ = 0;
   std::size_t map_robot_opponent_stale_skip_count_ = 0;
   std::size_t radar_command_waiting_cooldown_count_ = 0;
@@ -580,7 +648,8 @@ class AsyncLogManager {
    * @brief 创建异步日志管理器
    * @param root 本轮运行日志根目录
    */
-  explicit AsyncLogManager(std::filesystem::path root) : root_(std::move(root)) {
+  explicit AsyncLogManager(std::filesystem::path root)
+      : root_(std::move(root)), metrics_(GetRuntimeMetrics(root_)) {
     std::filesystem::create_directories(root_);
     std::filesystem::create_directories(root_ / "main");
     std::filesystem::create_directories(root_ / "raw");
@@ -668,21 +737,21 @@ class AsyncLogManager {
    * @brief 将任务压入异步队列
    */
   void EnqueueTask(LogTask task) {
-    auto &metrics = GetRuntimeMetrics(root_);
+    auto &metrics = metrics_;
     std::lock_guard<std::mutex> lock(mutex_);
     if (task.priority == LogPriority::kBestEffort &&
-        best_effort_queue_size_ >= config::kBestEffortLogQueueCapacity) {
+        best_effort_queue_size_ >= kBestEffortLogQueueCapacity) {
       metrics.RecordLogDrop(task.priority);
       return;
     }
 
     if (task.priority != LogPriority::kBestEffort &&
-        queue_.size() >= config::kCriticalLogSoftQueueCapacity) {
+        queue_.size() >= kCriticalLogSoftQueueCapacity) {
       DropOldestBestEffortLocked();
     }
 
     if (task.priority == LogPriority::kBestEffort &&
-        best_effort_queue_size_ >= config::kBestEffortLogQueueCapacity) {
+        best_effort_queue_size_ >= kBestEffortLogQueueCapacity) {
       metrics.RecordLogDrop(task.priority);
       return;
     }
@@ -699,7 +768,7 @@ class AsyncLogManager {
    * @brief 在 critical 队列压力过高时剔除最旧的 best-effort 日志
    */
   void DropOldestBestEffortLocked() {
-    auto &metrics = GetRuntimeMetrics(root_);
+    auto &metrics = metrics_;
     for (auto it = queue_.begin(); it != queue_.end(); ++it) {
       if (it->priority == LogPriority::kBestEffort) {
         queue_.erase(it);
@@ -729,7 +798,7 @@ class AsyncLogManager {
         best_effort_queue_size_ = 0;
       }
 
-      auto &metrics = GetRuntimeMetrics(root_);
+      auto &metrics = metrics_;
       metrics.ObserveLogQueue(0);
 
       const auto flush_start = RuntimeMetrics::Clock::now();
@@ -758,7 +827,7 @@ class AsyncLogManager {
           }
         }
         stream << task.payload << '\n';
-        GetRuntimeMetrics(root_).RecordLogWrite(task.payload.size() + 1, false);
+        metrics_.RecordLogWrite(task.payload.size() + 1, false);
         return;
       }
       case LogTask::Type::kAppendBinary: {
@@ -772,13 +841,14 @@ class AsyncLogManager {
           }
         }
         stream.write(task.payload.data(), static_cast<std::streamsize>(task.payload.size()));
-        GetRuntimeMetrics(root_).RecordLogWrite(task.payload.size(), true);
+        metrics_.RecordLogWrite(task.payload.size(), true);
         return;
       }
     }
   }
 
   std::filesystem::path root_;
+  RuntimeMetrics &metrics_;  ///< 缓存的运行指标单例引用，避免热路径反复加全局锁
   std::mutex mutex_;
   std::condition_variable cv_;
   std::deque<LogTask> queue_;
@@ -824,6 +894,9 @@ class FileLogStore {
    */
   void Append(const std::filesystem::path &relative_path, const std::string &line,
               LogPriority priority = LogPriority::kBestEffort) {
+    if (!ShouldWriteTextLog(relative_path)) {
+      return;
+    }
     GetAsyncLogManager(root_).AppendText(relative_path, line, priority);
   }
 

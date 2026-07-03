@@ -19,12 +19,12 @@
 -> info_wave_referee
 -> 维护 0x0A01~0x0A06 状态
 -> MapRobotRelay 读取 0x0A01
--> 结合串口侧 0x020B
+-> 结合串口侧 0x0301/0x0200 AllyRobotPosition
 -> 生成 0x0305
 -> RefereeTxScheduler
 -> 串口发送
 
-真实 TCP 8002/8003
+真实 TCP 8002/8003 or 文件回放
 -> EnemyKeyReceiver
 -> 解析完整 0x0A06
 -> RadarCommandSender 等待队列
@@ -51,20 +51,21 @@
 2. 初始化 [include/referee/tcp_connection_log.hpp](/home/hanni/Radar/include/referee/tcp_connection_log.hpp:23) 中的 `TcpConnectionLog`。
 3. 尝试打开裁判系统串口。
 4. 如果 `8001` 配置为真实输入，则尝试拉起信息波 TCP 客户端。
-5. 尝试拉起 `8002/8003` 两个敌方密钥 TCP 客户端。
-6. 创建两个主协议解包器：
+5. 如果 `8002/8003` 配置为真实输入，则尝试拉起两个敌方密钥 TCP 客户端。
+6. 若启用了外部设备 server 通道，则启动一条独立监听。
+7. 创建两个主协议解包器：
    - `serial_referee`
    - `info_wave_referee`
-7. 创建发送和业务模块：
+8. 创建发送和业务模块：
    - `RefereeTxScheduler`
    - `RadarCommandSender`
    - `RadarDecisionTree`
    - `MapRobotRelay`
    - `EnemyKeyReceiver(enemy_level1_key)`
    - `EnemyKeyReceiver(enemy_level2_key)`
-8. 如果配置为文件回放，则创建 [include/referee/replay_input_source.hpp](/home/hanni/Radar/include/referee/replay_input_source.hpp:43) 中的 `ReplayInputSource`。
-9. 记录 `main/input_mode.log`。
-10. 挂接串口/信息波回调并进入统一主循环。
+9. 如果配置为文件回放，则为对应链路创建 [include/referee/replay_input_source.hpp](/home/hanni/Radar/include/referee/replay_input_source.hpp:43) 中的 `ReplayInputSource`。
+10. 记录 `main/input_mode.log`。
+11. 挂接串口/信息波回调并进入统一主循环。
 
 主程序本身只负责接线，不在 [src/main.cc](/home/hanni/Radar/src/main.cc:45) 中堆业务逻辑。
 
@@ -130,6 +131,8 @@ int main() {
   - 串口真实输入或文件回放
 - `kInfoWaveInputMode`
   - `8001` 真实输入或文件回放
+- `kEnemyLevel1KeyInputMode` / `kEnemyLevel2KeyInputMode`
+  - `8002/8003` 各自真实输入或文件回放
 - `kTcpServerAddress`
   - 三条 TCP 客户端连接的对端 IP
 - `kTcpLocalBindAddress`
@@ -140,8 +143,8 @@ int main() {
   - `8002/8003` 空闲多久主动断开
 - `kMapRobotMinSendIntervalMs`
   - `0x0305` 限频
-- `kRadarPasswordVerifyCooldownMs`
-  - `password_cmd=2` 冷却
+- `password_cmd=2`
+  - 当前默认冷却 10 秒
 
 ## 4. 字节流是如何进入解包器的
 
@@ -185,14 +188,14 @@ void FeedBytes(Referee &referee, const rm::u8 *data, std::size_t size) {
 - 读取到的字节写入 `raw/tcp_8001_info_wave_rx.bin`
 - 再逐字节喂给 `info_wave_referee`
 
-### 4.3 真实 TCP `8002/8003`
+### 4.3 `8002/8003` 真实 TCP / 文件回放
 
 文件：
 
 - [include/referee/enemy_key_receiver.hpp](/home/hanni/Radar/include/referee/enemy_key_receiver.hpp:72)
 - [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)
 
-行为：
+真实 TCP 行为：
 
 - 同样由 `TcpClient` 拉起非阻塞连接
 - 收到字节流后分别写入：
@@ -200,6 +203,14 @@ void FeedBytes(Referee &referee, const rm::u8 *data, std::size_t size) {
   - `raw/tcp_8003_enemy_level2_key_rx.bin`
 - 然后交给各自的 [`EnemyKeyReceiver::ProcessBytes(...)`](/home/hanni/Radar/include/referee/enemy_key_receiver.hpp:104)
 - 每个接收器内部都有独立的 `Referee` 解析完整 `0x0A06`
+
+文件回放行为：
+
+- 分别从对应的 `ReplayInputSource` 按帧节拍释放完整 `0x0A06`
+- 原始字节写入：
+  - `raw/file_tcp_8002_enemy_level1_key_rx.bin`
+  - `raw/file_tcp_8003_enemy_level2_key_rx.bin`
+- 然后同样交给各自的 `EnemyKeyReceiver::ProcessBytes(...)`
 
 关键代码如下：
 
@@ -290,14 +301,14 @@ void OnFrame(rm::u16 cmd_id, rm::u8 seq) {
 
 也就是说串口帧一旦落地：
 
-- 一方面进入结构体日志与 `0x020B` 状态维护
+- 一方面进入结构体日志，并在 `0x0301/0x0200` 到达时刷新 `ally_position` 状态
 - 另一方面若是 `0x020E`，会进入自主决策树
 
 ### 5.2 信息波回调
 
 在 [src/main.cc](/home/hanni/Radar/src/main.cc:128) 里，`info_wave_referee.AttachCallback(...)` 当前做的事：
 
-1. `relay.ProcessInfoWaveTcp(cmd_id, seq, info_wave_referee, serial_referee.data())`
+1. `relay.ProcessInfoWaveTcp(cmd_id, seq, info_wave_referee)`
 
 也就是说信息波帧一旦落地：
 
@@ -317,7 +328,7 @@ void OnFrame(rm::u16 cmd_id, rm::u8 seq) {
 
 - [`ProcessSerial(...)`](/home/hanni/Radar/include/referee/map_robot_relay.hpp:290)
   - 记录串口结构体日志
-  - 如果 `cmd_id == 0x020B`，更新己方地面机器人位置与时间戳
+  - 如果 `cmd_id == 0x0301` 且子命令为 `0x0200 AllyRobotPosition`，更新己方位置与时间戳
 - [`ProcessInfoWaveTcp(...)`](/home/hanni/Radar/include/referee/map_robot_relay.hpp:309)
   - 记录信息波结构体日志
   - 如果 `cmd_id == 0x0A01`，更新敌方位置、到达间隔与时间戳
@@ -325,31 +336,23 @@ void OnFrame(rm::u16 cmd_id, rm::u8 seq) {
 当前实现片段如下：
 
 ```cpp
-void ProcessSerial(rm::u16 cmd_id, rm::u8 seq, const Referee &serial_referee) {
+void ProcessSerial(rm::u16 cmd_id, rm::u8 seq, Referee &serial_referee) {
   main_logger_.LogFrame(cmd_id, seq, serial_referee.data(), serial_referee.loss_rate());
   radar::log::GetRuntimeMetrics(main_logger_.root()).RecordLossRate("serial", serial_referee.loss_rate());
 
-  if (cmd_id == Cmd::kGroundRobotPosition) {
-    has_ground_robot_position_ = true;
-    ++ground_seen_count_;
-    latest_ally_protocol_ = serial_referee.data();
-    last_ground_robot_position_time_ = Clock::now();
+  if (cmd_id == Cmd::kRobotInteractionData) {
+    UpdateAllyRobotPositionState(serial_referee, cmd_id);
   }
 }
 
-void ProcessInfoWaveTcp(rm::u16 cmd_id, rm::u8 seq, const Referee &info_wave_referee,
-                        const Protocol &serial_protocol) {
+void ProcessInfoWaveTcp(rm::u16 cmd_id, rm::u8 seq, const Referee &info_wave_referee) {
   main_logger_.LogFrame(cmd_id, seq, info_wave_referee.data(), info_wave_referee.loss_rate());
   radar::log::GetRuntimeMetrics(main_logger_.root()).RecordLossRate("info_wave_tcp", info_wave_referee.loss_rate());
 
   if (cmd_id == Cmd::kRadar0) {
-    if (last_radar0_time_.has_value()) {
-      last_radar0_interval_ms_ =
-          std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - *last_radar0_time_).count();
-    }
-    latest_opponent_protocol_ = info_wave_referee.data();
-    latest_ally_protocol_ = serial_protocol;
-    last_radar0_time_ = Clock::now();
+    const auto now = Clock::now();
+    UpdateRadar0State(info_wave_referee.data(), now);
+    RefreshLatestMapRobotFrame(now);
   }
 }
 ```
@@ -359,7 +362,7 @@ void ProcessInfoWaveTcp(rm::u16 cmd_id, rm::u8 seq, const Referee &info_wave_ref
 [`ProcessPeriodic()`](/home/hanni/Radar/include/referee/map_robot_relay.hpp:329) 每轮都会检查：
 
 - `0x0A01` 是否还在有效期内
-- `0x020B` 是否还在有效期内
+- `0x0301/0x0200` 是否还在有效期内
 - 当前是否已经到达 `0x0305` 最小发送间隔
 
 然后：
@@ -375,36 +378,37 @@ void ProcessInfoWaveTcp(rm::u16 cmd_id, rm::u8 seq, const Referee &info_wave_ref
 void ProcessPeriodic() {
   const auto now = Clock::now();
   const bool opponent_fresh = IsFreshAt(last_radar0_time_, now, InfoWaveTimeout());
-  const bool ground_fresh = IsFreshAt(last_ground_robot_position_time_, now, RefereeTimeout());
+  const bool ally_position_fresh = IsFreshAt(last_ally_robot_position_time_, now, AllyPositionTimeout());
   if (!opponent_fresh && !AllowMissingInterfaces()) {
     tx_scheduler_.ClearLatestMapRobotFrame();
     if (last_radar0_time_.has_value()) {
-      LogMapRobotSkip(now, opponent_fresh, ground_fresh, "opponent_stale");
+      LogMapRobotSkip(now, opponent_fresh, ally_position_fresh, "opponent_stale");
     } else {
-      LogMapRobotSkip(now, opponent_fresh, ground_fresh, "opponent_missing");
+      LogMapRobotSkip(now, opponent_fresh, ally_position_fresh, "opponent_missing");
     }
     return;
   }
   if (!tx_scheduler_.IsMapRobotSendDue(now)) {
-    LogMapRobotSkip(now, opponent_fresh, ground_fresh, "rate_limited");
+    LogMapRobotSkip(now, opponent_fresh, ally_position_fresh, "rate_limited");
   }
 
-  QueueMapRobotPosition(latest_opponent_protocol_, latest_ally_protocol_, now);
+  QueueMapRobotPosition(latest_opponent_protocol_, latest_ally_robot_position_, now);
 }
 
-void QueueMapRobotPosition(const Protocol &opponent_protocol, const Protocol &ally_protocol, TimePoint now) {
+void QueueMapRobotPosition(const Protocol &opponent_protocol, const rm::device::AllyRobotPosition &ally_position,
+                           TimePoint now) {
   Protocol opponent_zero_filled_protocol = opponent_protocol;
-  Protocol ground_protocol = ally_protocol;
+  rm::device::AllyRobotPosition ally_position_zero_filled = ally_position;
   const bool opponent_fresh = IsFreshAt(last_radar0_time_, now, InfoWaveTimeout());
-  const bool ground_fresh = IsFreshAt(last_ground_robot_position_time_, now, RefereeTimeout());
+  const bool ally_position_fresh = IsFreshAt(last_ally_robot_position_time_, now, AllyPositionTimeout());
   if (!opponent_fresh) {
     opponent_zero_filled_protocol.radar0 = {};
   }
-  if (!ground_fresh) {
-    ground_protocol.ground_robot_position = {};
+  if (!ally_position_fresh) {
+    ally_position_zero_filled = {};
   }
 
-  const auto map = BuildMapRobotPosition<revision>(opponent_zero_filled_protocol, ground_protocol);
+  const auto map = BuildMapRobotPosition<revision>(opponent_zero_filled_protocol, ally_position_zero_filled);
   std::array<rm::u8, rm::device::kRefProtocolFrameMaxLen> tx_buffer{};
   const rm::u8 frame_len = rm::device::RefereePrepare(tx_buffer.data(), 0, map);
   std::vector<rm::u8> frame(tx_buffer.begin(), tx_buffer.begin() + frame_len);
@@ -712,17 +716,18 @@ const auto service_periodic_tasks = [&](const LoopClock::time_point &loop_start)
 
 ### 11.1 TCP 角色
 
-当前本端是 TCP client-only，不再监听端口。
+当前主接收链路中的 `8001/8002/8003` 仍是 TCP client-only。  
+另外项目新增了一条可选的外部设备 server 通道，见 [include/referee/tcp_server.hpp](/home/hanni/Radar/include/referee/tcp_server.hpp:1)。
 
 ### 11.2 `loss_rate`
 
 `loss_rate()` 是 `librm` 提供的通用指标，不保证等于真实网络丢包率。  
 对信息波 TCP 流尤其如此。
 
-### 11.3 `0x020B`
+### 11.3 `0x0301/0x0200`
 
-当前 `0x0305` 的己方地面机器人位置仍主要来自串口 `0x020B`。  
-如果实机链路里雷达收不到 `0x020B`，己方坐标会长期为 0。
+当前 `0x0305` 的 `ally_position` 主要来自串口 `0x0301` 下的 `0x0200 AllyRobotPosition`。  
+如果实机链路里雷达收不到这一路子命令，己方坐标会长期为 0。
 
 ### 11.4 调试模式
 

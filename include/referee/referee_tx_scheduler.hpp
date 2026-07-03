@@ -34,7 +34,7 @@ class RefereeTxScheduler {
  public:
   using Clock = std::chrono::steady_clock;
   using TimePoint = Clock::time_point;
-  using SentCallback = std::function<void()>;
+  using SentCallback = std::function<void(const rm::u8 *frame, std::size_t frame_len)>;
 
   /**
    * @brief 创建发送调度器
@@ -53,20 +53,20 @@ class RefereeTxScheduler {
    * @param on_sent 真正写出后的回调
    * @return 是否成功进入队列
    */
-  bool EnqueueRadarCommand(std::vector<rm::u8> frame, std::string name, int source_port, std::string decision,
-                           SentCallback on_sent) {
-    if (radar_command_queue_.size() >= kRadarCommandQueueCapacity) {
-      LogRadarCommandQueueDrop(name, source_port, decision, frame);
+  bool EnqueueRobotInteraction(std::vector<rm::u8> frame, std::string name, int source_port, std::string decision,
+                               SentCallback on_sent) {
+    if (robot_interaction_queue_.size() >= kRobotInteractionQueueCapacity) {
+      LogRobotInteractionQueueDrop(name, source_port, decision, frame);
       return false;
     }
 
-    RadarCommandTask task;
+    RobotInteractionTask task;
     task.frame = std::move(frame);
     task.name = std::move(name);
     task.source_port = source_port;
     task.decision = std::move(decision);
     task.on_sent = std::move(on_sent);
-    radar_command_queue_.push_back(std::move(task));
+    robot_interaction_queue_.push_back(std::move(task));
     return true;
   }
 
@@ -90,13 +90,34 @@ class RefereeTxScheduler {
    * @brief 判断是否仍有待发送内容
    * @return 队列或 latest-only 帧非空时返回 true
    */
-  bool HasPending() const { return !radar_command_queue_.empty() || latest_map_robot_frame_.has_value(); }
+  bool HasPending() const { return !robot_interaction_queue_.empty() || latest_map_robot_frame_.has_value(); }
 
   /**
    * @brief 判断当前是否存在待发送的 `0x0305`
    * @return latest-only 帧存在时返回 true
    */
   bool HasLatestMapRobotFrame() const { return latest_map_robot_frame_.has_value(); }
+
+  /**
+   * @brief 返回下一次真正需要唤醒发送调度的时间
+   * @param now 当前时间点
+   * @return 若存在待发送内容，则返回最早到期时间
+   */
+  std::optional<TimePoint> NextDueTime(TimePoint now) const {
+    std::optional<TimePoint> due_time;
+    const auto apply_due_time = [&](std::optional<TimePoint> candidate) {
+      if (!candidate.has_value()) {
+        return;
+      }
+      if (!due_time.has_value() || *candidate < *due_time) {
+        due_time = *candidate;
+      }
+    };
+
+    apply_due_time(NextRobotInteractionDueTime(now));
+    apply_due_time(NextMapRobotDueTime(now));
+    return due_time;
+  }
 
   /**
    * @brief 推进一次发送调度
@@ -108,18 +129,18 @@ class RefereeTxScheduler {
       return;
     }
 
-    if (!radar_command_queue_.empty() && IsRadarCommandSendDue(now)) {
-      auto &task = radar_command_queue_.front();
+    if (!robot_interaction_queue_.empty() && IsRobotInteractionSendDue(now)) {
+      auto &task = robot_interaction_queue_.front();
       std::string error;
       if (!serial_.TryWriteAll(task.frame.data(), task.frame.size(), &error)) {
         HandleSerialWriteFailure(error);
         return;
       }
       auto sent_task = std::move(task);
-      radar_command_queue_.pop_front();
-      last_radar_command_send_time_ = now;
+      robot_interaction_queue_.pop_front();
+      last_robot_interaction_send_time_ = now;
       if (sent_task.on_sent) {
-        sent_task.on_sent();
+        sent_task.on_sent(sent_task.frame.data(), sent_task.frame.size());
       }
     }
 
@@ -134,7 +155,7 @@ class RefereeTxScheduler {
       }
       last_map_robot_send_time_ = now;
       if (latest_map_robot_frame_->on_sent) {
-        latest_map_robot_frame_->on_sent();
+        latest_map_robot_frame_->on_sent(latest_map_robot_frame_->frame.data(), latest_map_robot_frame_->frame.size());
       }
     }
   }
@@ -151,7 +172,7 @@ class RefereeTxScheduler {
 
  private:
   /// `0x0301` 队列中的单个待发送任务。
-  struct RadarCommandTask {
+  struct RobotInteractionTask {
     std::vector<rm::u8> frame;
     std::string name;
     int source_port = 0;
@@ -166,16 +187,49 @@ class RefereeTxScheduler {
   };
 
   /// `0x0301` 队列最大容量。
-  static constexpr std::size_t kRadarCommandQueueCapacity = 32;
+  static constexpr std::size_t kRobotInteractionQueueCapacity = 32;
 
   /**
    * @brief 判断当前是否允许发送下一帧 `0x0301`
    * @param now 当前时间点
    * @return 是否已满足发送窗口
    */
-  bool IsRadarCommandSendDue(TimePoint now) const {
-    return !last_radar_command_send_time_.has_value() ||
-           now - *last_radar_command_send_time_ >= std::chrono::milliseconds(34);
+  bool IsRobotInteractionSendDue(TimePoint now) const {
+    return !last_robot_interaction_send_time_.has_value() ||
+           now - *last_robot_interaction_send_time_ >= std::chrono::milliseconds(34);
+  }
+
+  /**
+   * @brief 返回下一帧 `0x0301` 的理论可发时间
+   * @param now 当前时间点
+   * @return 队列非空时返回最早可发时间
+   */
+  std::optional<TimePoint> NextRobotInteractionDueTime(TimePoint now) const {
+    if (robot_interaction_queue_.empty()) {
+      return std::nullopt;
+    }
+    if (!last_robot_interaction_send_time_.has_value()) {
+      return now;
+    }
+    const auto due_time = *last_robot_interaction_send_time_ + std::chrono::milliseconds(34);
+    return due_time <= now ? now : due_time;
+  }
+
+  /**
+   * @brief 返回下一帧 `0x0305` 的理论可发时间
+   * @param now 当前时间点
+   * @return latest-only 帧存在时返回最早可发时间
+   */
+  std::optional<TimePoint> NextMapRobotDueTime(TimePoint now) const {
+    if (!latest_map_robot_frame_.has_value()) {
+      return std::nullopt;
+    }
+    if (!last_map_robot_send_time_.has_value()) {
+      return now;
+    }
+    const auto due_time =
+        *last_map_robot_send_time_ + std::chrono::milliseconds(config::kMapRobotMinSendIntervalMs);
+    return due_time <= now ? now : due_time;
   }
 
   /**
@@ -185,8 +239,8 @@ class RefereeTxScheduler {
    * @param decision 决策标签
    * @param frame 被丢弃的完整帧
    */
-  void LogRadarCommandQueueDrop(const std::string &name, int source_port, const std::string &decision,
-                                const std::vector<rm::u8> &frame) {
+  void LogRobotInteractionQueueDrop(const std::string &name, int source_port, const std::string &decision,
+                                    const std::vector<rm::u8> &frame) {
     std::ostringstream entry;
     entry << "{"
           << "\"timestamp\":\"" << radar::log::TimestampNow() << "\","
@@ -195,7 +249,7 @@ class RefereeTxScheduler {
           << "\"source_port\":" << source_port << ','
           << "\"decision\":\"" << decision << "\","
           << "\"result\":\"dropped_queue_full\","
-          << "\"queue_capacity\":" << kRadarCommandQueueCapacity << ','
+          << "\"queue_capacity\":" << kRobotInteractionQueueCapacity << ','
           << "\"frame_hex\":\"" << radar::log::HexBytes(frame.data(), frame.size()) << "\"}";
     log_store_.Append("main/tx_scheduler.log", entry.str(), radar::log::LogPriority::kCriticalDecision);
   }
@@ -216,9 +270,9 @@ class RefereeTxScheduler {
   SerialPort &serial_;                                 ///< 实际发送串口
   radar::log::FileLogStore log_store_;                ///< 调度器自身日志
   SerialConnectionLog serial_log_;                    ///< 串口掉线日志
-  std::deque<RadarCommandTask> radar_command_queue_;  ///< `0x0301` FIFO 队列
+  std::deque<RobotInteractionTask> robot_interaction_queue_;  ///< `0x0301` FIFO 队列
   std::optional<MapRobotTask> latest_map_robot_frame_;  ///< 当前最新 `0x0305`
-  std::optional<TimePoint> last_radar_command_send_time_;  ///< 最近一次 `0x0301` 发送时间
+  std::optional<TimePoint> last_robot_interaction_send_time_;  ///< 最近一次 `0x0301` 发送时间
   std::optional<TimePoint> last_map_robot_send_time_;      ///< 最近一次 `0x0305` 发送时间
 };
 

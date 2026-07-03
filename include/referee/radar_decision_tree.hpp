@@ -114,17 +114,7 @@ class RadarDecisionTree {
    * @return 是否需要自增 `radar_cmd`
    */
   bool ShouldRequestDoubleDebuff(rm::u8 double_debuff_chances) {
-    if (double_debuff_chances == 0) {
-      last_requested_double_debuff_chances_ = 0;
-      return false;
-    }
-
-    if (double_debuff_chances == last_requested_double_debuff_chances_) {
-      return false;
-    }
-
-    last_requested_double_debuff_chances_ = double_debuff_chances;
-    return true;
+    return double_debuff_chances >= 1;
   }
 
   /**
@@ -171,7 +161,6 @@ class RadarDecisionTree {
   }
 
   RadarCommandSender &command_sender_;               ///< 指令发送入口
-  rm::u8 last_requested_double_debuff_chances_ = 0; ///< 上次已响应的双倍易伤机会值
   bool last_can_modify_ally_key_ = false;           ///< 用于检测密钥修改权限上升沿
   std::size_t ally_key_update_count_ = 0;           ///< 已消耗的预置己方密钥次数
 };

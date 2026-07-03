@@ -51,6 +51,12 @@ constexpr rm::u8 kRadarNoPasswordCommand = 0;
 constexpr rm::u8 kRadarUpdateAllyKeyCommand = 1;
 /// 提交敌方密钥时的 `password_cmd`。
 constexpr rm::u8 kRadarVerifyOpponentKeyCommand = 2;
+/// 默认雷达发送方 ID。
+constexpr rm::u16 kDefaultRadarSenderId = 9;  // 9：红方雷达  109：蓝方雷达
+/// 裁判系统服务器接收 ID。
+constexpr rm::u16 kRefereeServerReceiverId = 0x8080;
+/// `password_cmd=2` 冷却时间。
+constexpr int kRadarPasswordVerifyCooldownMs = 10000;
 
 /**
  * @brief 一次 `0x0121` 指令的上下文信息
@@ -141,13 +147,14 @@ class RadarCommandSender {
                   "RadarCMD interaction frame exceeds referee protocol frame buffer");
     std::array<rm::u8, rm::device::kRefProtocolFrameMaxLen> tx_buffer{};
     const rm::u16 sender_id = ResolveSenderId(serial_protocol);
-    const rm::u16 receiver_id = radar::config::kRefereeServerReceiverId;
+    const rm::u16 receiver_id = kRefereeServerReceiverId;
     const rm::u8 frame_len = rm::device::Referee0x301Prepare(tx_buffer.data(), 0, cmd, sender_id, receiver_id);
     std::vector<rm::u8> frame(tx_buffer.begin(), tx_buffer.begin() + frame_len);
-    const auto accepted = tx_scheduler_.EnqueueRadarCommand(
-        frame, context.name, context.source_port, context.decision,
-        [this, cmd, frame, sender_id, receiver_id, context, on_sent = std::move(on_sent)]() {
-          LogCommand(cmd, frame.data(), frame.size(), sender_id, receiver_id, context);
+    const auto accepted = tx_scheduler_.EnqueueRobotInteraction(
+        std::move(frame), context.name, context.source_port, context.decision,
+        [this, cmd, sender_id, receiver_id, context, on_sent = std::move(on_sent)](const rm::u8 *frame,
+                                                                                    std::size_t frame_len) {
+          LogCommand(cmd, frame, frame_len, sender_id, receiver_id, context);
           if (on_sent) {
             on_sent();
           }
@@ -203,7 +210,8 @@ class RadarCommandSender {
     context.source = "tcp";
     context.source_port = pending.source_port;
     context.decision = "sent";
-    const bool queued = Send(cmd, serial_protocol, context, [this]() {
+    const bool queued = Send(cmd, serial_protocol, context, [this, source_port = pending.source_port]() {
+      MarkOpponentKeySent(source_port);
       password_verify_in_flight_ = false;
       password_verify_next_allowed_time_ = Clock::now() + PasswordVerifyCooldown();
     });
@@ -225,6 +233,21 @@ class RadarCommandSender {
    * @return 队列非空时返回 true
    */
   bool HasQueuedPending() const { return !pending_opponent_keys_.empty(); }
+
+  /**
+   * @brief 判断指定来源端口的敌方密钥是否已经真正发出
+   * @param source_port 来源端口
+   * @return 已成功写串口发送后返回 true
+   */
+  bool HasSentOpponentKeyFromPort(int source_port) const {
+    if (source_port == radar::config::kEnemyLevel1KeyTcpServerPort) {
+      return enemy_level1_key_sent_;
+    }
+    if (source_port == radar::config::kEnemyLevel2KeyTcpServerPort) {
+      return enemy_level2_key_sent_;
+    }
+    return false;
+  }
 
   /**
    * @brief 记录一条被拒绝的敌方密钥
@@ -264,7 +287,7 @@ class RadarCommandSender {
     if (serial_protocol.robot_status.robot_id != 0) {
       return serial_protocol.robot_status.robot_id;
     }
-    return radar::config::kDefaultRadarSenderId;
+    return kDefaultRadarSenderId;
   }
 
   /**
@@ -278,6 +301,8 @@ class RadarCommandSender {
    */
   void LogCommand(const rm::device::RadarCMD &cmd, const rm::u8 *frame, std::size_t frame_len,
                   rm::u16 sender_id, rm::u16 receiver_id, const RadarCommandContext &context) {
+    const std::array<rm::u8, 6> password_bytes{
+        cmd.password_1, cmd.password_2, cmd.password_3, cmd.password_4, cmd.password_5, cmd.password_6};
     std::ostringstream entry;
     entry << "{"
           << "\"timestamp\":\"" << radar::log::TimestampNow() << "\","
@@ -302,12 +327,13 @@ class RadarCommandSender {
           << "\"state\":{"
           << "\"radar_cmd\":" << radar::log::JsonScalar(cmd.radar_cmd) << ','
           << "\"password_cmd\":" << radar::log::JsonScalar(cmd.password_cmd) << ','
-          << "\"password_1\":" << radar::log::JsonScalar(cmd.password_1) << ','
-          << "\"password_2\":" << radar::log::JsonScalar(cmd.password_2) << ','
-          << "\"password_3\":" << radar::log::JsonScalar(cmd.password_3) << ','
-          << "\"password_4\":" << radar::log::JsonScalar(cmd.password_4) << ','
-          << "\"password_5\":" << radar::log::JsonScalar(cmd.password_5) << ','
-          << "\"password_6\":" << radar::log::JsonScalar(cmd.password_6) << "}}";
+          << "\"password_hex\":\"" << radar::log::HexBytes(password_bytes.data(), password_bytes.size()) << "\","
+          << "\"password_1\":\"" << radar::log::HexU8(cmd.password_1) << "\","
+          << "\"password_2\":\"" << radar::log::HexU8(cmd.password_2) << "\","
+          << "\"password_3\":\"" << radar::log::HexU8(cmd.password_3) << "\","
+          << "\"password_4\":\"" << radar::log::HexU8(cmd.password_4) << "\","
+          << "\"password_5\":\"" << radar::log::HexU8(cmd.password_5) << "\","
+          << "\"password_6\":\"" << radar::log::HexU8(cmd.password_6) << "\"}}";
 
     const auto basename = std::string("0x0121_") + context.name;
     log_store_.Append(std::filesystem::path("main") / (basename + ".log"), entry.str(),
@@ -378,7 +404,7 @@ class RadarCommandSender {
    * @return 冷却时间
    */
   static std::chrono::milliseconds PasswordVerifyCooldown() {
-    return std::chrono::milliseconds(radar::config::kRadarPasswordVerifyCooldownMs);
+    return std::chrono::milliseconds(kRadarPasswordVerifyCooldownMs);
   }
 
   /**
@@ -389,12 +415,24 @@ class RadarCommandSender {
     return std::chrono::milliseconds(1000);
   }
 
+  void MarkOpponentKeySent(int source_port) {
+    if (source_port == radar::config::kEnemyLevel1KeyTcpServerPort) {
+      enemy_level1_key_sent_ = true;
+      return;
+    }
+    if (source_port == radar::config::kEnemyLevel2KeyTcpServerPort) {
+      enemy_level2_key_sent_ = true;
+    }
+  }
+
   RefereeTxScheduler &tx_scheduler_;                   ///< 统一发送调度器
   radar::log::FileLogStore log_store_;                ///< `0x0121` 发送日志输出器
   std::deque<PendingOpponentKey> pending_opponent_keys_;  ///< `password_cmd=2` FIFO 队列
   std::optional<TimePoint> password_verify_next_allowed_time_;  ///< 下一次允许验证密钥的时间
   std::optional<TimePoint> last_waiting_cooldown_log_time_;     ///< 上次输出等待中日志的时间
   bool password_verify_in_flight_ = false;            ///< 当前是否已有一条验证指令等待真正发出
+  bool enemy_level1_key_sent_ = false;                ///< `8002` 密钥是否已真正发出
+  bool enemy_level2_key_sent_ = false;                ///< `8003` 密钥是否已真正发出
   rm::u8 radar_cmd_counter_ = kRadarInitialCommandCounter;  ///< 当前 `radar_cmd`
 };
 

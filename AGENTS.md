@@ -1,7 +1,7 @@
 # Radar - Project Agent Guide
 
 本文件描述仓库根目录下代码的项目级协作约束。  
-若进入 `include/radar/libs/librm/` 子树，需同时遵守该目录下已有的 [AGENTS.md](/home/hanni/Radar/include/radar/libs/librm/AGENTS.md:1)。
+若进入 `include/radar/libs/librm/` 子树，需同时遵守该目录下已有的 [AGENTS.md](include/radar/libs/librm/AGENTS.md:1)。
 
 ## 1. 项目定位
 
@@ -47,22 +47,22 @@
 
 协议版本、输入源模式、日志模式、回放参数、端口和超时，统一以：
 
-- [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:32)
+- [include/config/config.hpp](include/config/config.hpp:32)
 
 为唯一手动配置入口。
 
 重要约定：
 
 - 版本切换优先只改 `radar::config::kRefereeRevision`
-- 串口/TCP 真实输入或文件回放，只改 [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:32)
-- 调试模式是否允许接口缺失，只改 [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:32)
-- 不要在 [src/main.cc](/home/hanni/Radar/src/main.cc:45)、测试程序或各业务模块中重复硬编码版本名、端口、路径、频率
+- 串口/TCP 真实输入或文件回放，只改 [include/config/config.hpp](include/config/config.hpp:32)
+- 调试模式是否允许接口缺失，只改 [include/config/config.hpp](include/config/config.hpp:32)
+- 不要在 [src/main.cc](src/main.cc:45)、测试程序或各业务模块中重复硬编码版本名、端口、路径、频率
 
 ## 4. 当前主链路
 
 主入口：
 
-- [src/main.cc](/home/hanni/Radar/src/main.cc:45)
+- [src/main.cc](src/main.cc:45)
 
 主程序保持尽量简洁，只保留主链：
 
@@ -74,29 +74,29 @@
 
 当前关键模块：
 
-- [include/referee/referee_input_loop.hpp](/home/hanni/Radar/include/referee/referee_input_loop.hpp:58)
+- [include/referee/referee_input_loop.hpp](include/referee/referee_input_loop.hpp:58)
   - 统一主循环
   - 负责真实输入与文件回放输入调度
   - 负责串口自动重连
   - 负责 TCP 自动重连、连接超时、idle timeout
   - 负责周期任务推进
-- [include/referee/serial_port.hpp](/home/hanni/Radar/include/referee/serial_port.hpp:75)
+- [include/referee/serial_port.hpp](include/referee/serial_port.hpp:75)
   - 裁判系统串口读写
-- [include/referee/tcp_client.hpp](/home/hanni/Radar/include/referee/tcp_client.hpp:46)
+- [include/referee/tcp_client.hpp](include/referee/tcp_client.hpp:46)
   - `8001/8002/8003` TCP 客户端接入
-- [include/referee/tcp_connection_log.hpp](/home/hanni/Radar/include/referee/tcp_connection_log.hpp:23)
+- [include/referee/tcp_connection_log.hpp](include/referee/tcp_connection_log.hpp:23)
   - TCP 启动、通道状态、客户端状态日志
-- [include/referee/replay_input_source.hpp](/home/hanni/Radar/include/referee/replay_input_source.hpp:43)
+- [include/referee/replay_input_source.hpp](include/referee/replay_input_source.hpp:43)
   - 预制 `.bin` 文件按频率回放
-- [include/referee/map_robot_relay.hpp](/home/hanni/Radar/include/referee/map_robot_relay.hpp:254)
-  - `0x0A01 -> 0x0305` 状态维护、过期处理、发送日志
-- [include/referee/radar_decision_tree.hpp](/home/hanni/Radar/include/referee/radar_decision_tree.hpp:45)
+- [include/referee/map_robot_relay.hpp](include/referee/map_robot_relay.hpp:254)
+  - `0x0A01 + 0x0301/0x0200(AllyRobotPosition) -> 0x0305` 状态维护、过期处理、发送日志
+- [include/referee/radar_decision_tree.hpp](include/referee/radar_decision_tree.hpp:45)
   - 基于 `0x020E` 的自主决策
-- [include/referee/radar_command_sender.hpp](/home/hanni/Radar/include/referee/radar_command_sender.hpp:85)
+- [include/referee/radar_command_sender.hpp](include/referee/radar_command_sender.hpp:85)
   - `0x0121` 组包、冷却、排队和日志
-- [include/referee/enemy_key_receiver.hpp](/home/hanni/Radar/include/referee/enemy_key_receiver.hpp:72)
+- [include/referee/enemy_key_receiver.hpp](include/referee/enemy_key_receiver.hpp:72)
   - `8002/8003` 上 `0x0A06` 的解包与校验
-- [include/referee/referee_tx_scheduler.hpp](/home/hanni/Radar/include/referee/referee_tx_scheduler.hpp:33)
+- [include/referee/referee_tx_scheduler.hpp](include/referee/referee_tx_scheduler.hpp:33)
   - `0x0301` / `0x0305` 统一发送调度
 
 ## 5. 输入源约定
@@ -114,16 +114,17 @@
 
 - 串口主协议与信息波 `8001` 可独立切换真实/文件模式
 - 串口与信息波各自独立配置回放频率
-- `8002/8003` 目前保持真实 TCP 输入，不走文件回放
+- `8002/8003` 也可独立切换真实/文件模式
+- `8002/8003` 各自独立配置回放频率
 - 当前 TCP 角色为 client-only，不在本机监听 `8001/8002/8003`
 - 即使串口输入改为文件回放，发送仍继续走真实串口
 - `kDebug` 模式下允许缺失接口，缺失链路对应状态按 0 值处理
 
 样例文件位于：
 
-- [test/info/outputInfo.bin](/home/hanni/Radar/test/info/outputInfo.bin)
-- [test/info/outputInfo2.bin](/home/hanni/Radar/test/info/outputInfo2.bin)
-- [test/info/map_robot_sender_sample.bin](/home/hanni/Radar/test/info/map_robot_sender_sample.bin)
+- [test/info/outputInfo.bin](test/info/outputInfo.bin)
+- [test/info/outputInfo2.bin](test/info/outputInfo2.bin)
+- [test/info/map_robot_sender_sample.bin](test/info/map_robot_sender_sample.bin)
 
 ## 6. 日志与可观测性
 
@@ -137,8 +138,8 @@
 
 相关模块：
 
-- [include/log/log_backend.hpp](/home/hanni/Radar/include/log/log_backend.hpp:129)
-- [include/log/referee_main_log.hpp](/home/hanni/Radar/include/log/referee_main_log.hpp:739)
+- [include/log/log_backend.hpp](include/log/log_backend.hpp:129)
+- [include/log/referee_main_log.hpp](include/log/referee_main_log.hpp:739)
 
 约定：
 
@@ -154,7 +155,7 @@
 
 1. 检查 `include/radar/libs/librm/src/librm/device/referee/` 下协议头是否已支持新版本
 2. 若未支持，补协议结构体、命令码和映射
-3. 回到 [include/config/config.hpp](/home/hanni/Radar/include/config/config.hpp:32) 切换 `kRefereeRevision`
+3. 回到 [include/config/config.hpp](include/config/config.hpp:32) 切换 `kRefereeRevision`
 4. 检查 `include/referee/` 中是否存在版本差异需要适配
 5. 验证 `0x0305`、`0x0121`、日志链路是否仍正确
 
@@ -185,7 +186,7 @@ cmake --build build --target radar -j2
 
 - `test/info/*.bin`
   - 文件回放输入样例
-- [test/serialtest.py](/home/hanni/Radar/test/serialtest.py:1)
+- [test/serialtest.py](test/serialtest.py:1)
   - 调用主程序的简单辅助脚本
 
 说明：
@@ -197,7 +198,7 @@ cmake --build build --target radar -j2
 
 推荐做法：
 
-- 保持 [src/main.cc](/home/hanni/Radar/src/main.cc:45) 简洁
+- 保持 [src/main.cc](src/main.cc:45) 简洁
 - 复杂逻辑放进 `include/referee/` 或 `include/log/`
 - 新增功能优先做项目侧封装，不直接污染协议头
 - 先维护状态，再做决策，再统一发送
@@ -207,17 +208,17 @@ cmake --build build --target radar -j2
 
 - 在多个文件重复写同一套版本/端口/路径常量
 - 把日志打印散落到主程序各处
-- 为临时调试把关键逻辑写死在 [src/main.cc](/home/hanni/Radar/src/main.cc:45)
+- 为临时调试把关键逻辑写死在 [src/main.cc](src/main.cc:45)
 - 没有必要时大范围改动 `include/radar/`
 
 ## 10. 相关文档
 
 建议优先参考：
 
-- [README.md](/home/hanni/Radar/README.md:1)
-- [.agent/handoff.md](/home/hanni/Radar/.agent/handoff.md:1)
-- [.agent/full_pipeline.md](/home/hanni/Radar/.agent/full_pipeline.md:1)
-- [.agent/radar_stability_review.md](/home/hanni/Radar/.agent/radar_stability_review.md:1)
+- [README.md](README.md:1)
+- [.agent/handoff.md](.agent/handoff.md:1)
+- [.agent/full_pipeline.md](.agent/full_pipeline.md:1)
+- [.agent/radar_stability_review.md](.agent/radar_stability_review.md:1)
 
 这些文档分别对应：
 

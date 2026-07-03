@@ -94,14 +94,34 @@ inline std::filesystem::path CreateRunLogRoot(const std::filesystem::path &base_
 }
 
 /**
+ * @brief 以 `0xNN` 形式格式化 8 位值
+ * @param value 待格式化值
+ * @return 十六进制字符串
+ */
+inline std::string HexU8(rm::u8 value) {
+  static constexpr char kHexDigits[] = "0123456789abcdef";
+  std::string out(4, '0');
+  out[1] = 'x';
+  out[2] = kHexDigits[(value >> 4) & 0xF];
+  out[3] = kHexDigits[value & 0xF];
+  return out;
+}
+
+/**
  * @brief 以 `0xNNNN` 形式格式化 16 位值
  * @param value 待格式化值
  * @return 十六进制字符串
  */
 inline std::string HexU16(rm::u16 value) {
-  std::ostringstream oss;
-  oss << "0x" << std::hex << std::nouppercase << std::setfill('0') << std::setw(4) << static_cast<unsigned>(value);
-  return oss.str();
+  // 手写格式化，输出与 `"0x" + std::hex/setw(4)/setfill('0')` 逐字节一致，但避开 ostringstream 开销。
+  static constexpr char kHexDigits[] = "0123456789abcdef";
+  std::string out(6, '0');
+  out[1] = 'x';
+  out[2] = kHexDigits[(value >> 12) & 0xF];
+  out[3] = kHexDigits[(value >> 8) & 0xF];
+  out[4] = kHexDigits[(value >> 4) & 0xF];
+  out[5] = kHexDigits[value & 0xF];
+  return out;
 }
 
 /**
@@ -111,12 +131,14 @@ inline std::string HexU16(rm::u16 value) {
  * @return 十六进制字符串
  */
 inline std::string HexBytes(const rm::u8 *data, std::size_t size) {
-  std::ostringstream oss;
-  oss << std::hex << std::nouppercase << std::setfill('0');
+  // 手写格式化，输出与逐字节 `std::hex/setw(2)/setfill('0')` 完全一致，但避开 ostringstream 开销。
+  static constexpr char kHexDigits[] = "0123456789abcdef";
+  std::string out(size * 2, '0');
   for (std::size_t i = 0; i < size; ++i) {
-    oss << std::setw(2) << static_cast<unsigned>(data[i]);
+    out[2 * i] = kHexDigits[(data[i] >> 4) & 0xF];
+    out[2 * i + 1] = kHexDigits[data[i] & 0xF];
   }
-  return oss.str();
+  return out;
 }
 
 /**
@@ -737,15 +759,21 @@ class RefereeMainLogger {
    * @param loss_rate 当前链路丢包率
    */
   void LogFrame(rm::u16 cmd_id, rm::u8 seq, const Protocol &protocol, float loss_rate) {
+    if (!radar::config::kEnableMainProtocolStructLog) {
+      return;
+    }
+
     const auto payload_json = FormatMainPayload<revision>(cmd_id, protocol);
-    const auto basename = HexU16(cmd_id) + "_" + MainCmdName<revision>(cmd_id);
+    const auto cmd_hex = HexU16(cmd_id);
+    const auto cmd_name = MainCmdName<revision>(cmd_id);
+    const auto basename = cmd_hex + "_" + cmd_name;
 
     std::ostringstream entry;
     entry << "{"
           << "\"timestamp\":\"" << TimestampNow() << "\","
           << "\"seq\":" << JsonScalar(seq) << ','
-          << "\"cmd_id\":\"" << HexU16(cmd_id) << "\","
-          << "\"name\":\"" << MainCmdName<revision>(cmd_id) << "\","
+          << "\"cmd_id\":\"" << cmd_hex << "\","
+          << "\"name\":\"" << cmd_name << "\","
           << "\"loss_rate\":" << JsonScalar(loss_rate) << ','
           << "\"state\":" << payload_json << "}";
 
