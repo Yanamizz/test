@@ -3,8 +3,8 @@
  * @brief   收口阶段预测器切换、副作用应用与待切换状态。
  *
  * StagePredictorController 管理 stage1/2 与 stage3 推理器选择、stage3 后台预热、
- * 目标丢失延时切换、GUI 手动切换和切换副作用应用。副作用包括曝光模式、
- * 相机 ROI 请求、扫描配置、距离标定阶段和相关状态重置。
+ * GUI/TCP 驱动的切换和切换副作用应用。副作用包括曝光模式、相机 ROI 请求、
+ * 扫描配置、距离标定阶段和相关状态重置。
  */
 
 #pragma once
@@ -54,8 +54,6 @@ public:
             Tools::RuntimeStage::Stage12, scan_send_hz_cap)),
         stage3_profile_(Tools::MakeStageRuntimeProfile(
             Tools::RuntimeStage::Stage3, scan_send_hz_cap)),
-        stage3_switch_target_lost_delay_(
-            std::chrono::milliseconds(stage3_profile_.switch_target_lost_delay_ms)),
         hooks_(std::move(hooks)) {}
 
   ImageRecognize::ImagePredict *ActivePredictor() const {
@@ -64,50 +62,15 @@ public:
 
   bool UsingStage3Predictor() const { return using_stage3_predictor_; }
 
-  bool PendingStage3Switch() const { return pending_stage3_switch_; }
+  Tools::RuntimeStage CurrentRuntimeStage() const {
+    return using_stage3_predictor_ ? Tools::RuntimeStage::Stage3
+                                   : Tools::RuntimeStage::Stage12;
+  }
 
   const Tools::StageRuntimeProfile &
   ProfileFor(Tools::RuntimeStage stage) const {
     return stage == Tools::RuntimeStage::Stage3 ? stage3_profile_
                                                 : stage12_profile_;
-  }
-
-  void RequestStage3SwitchAfterTargetLoss(const char *reason = "strict_progress",
-                                          bool probe_switch = false) {
-    if (using_stage3_predictor_ || pending_stage3_switch_) {
-      return;
-    }
-    StartStage3WarmupIfNeeded_();
-    pending_stage3_switch_ = true;
-    pending_stage3_probe_switch_ = probe_switch;
-    std::cout << "[空中机器人阶段] 请求 stage3，原因="
-              << (reason == nullptr ? "unknown" : reason)
-              << "，probe=" << (probe_switch ? "true" : "false")
-              << "，等待目标丢失持续 "
-              << stage3_switch_target_lost_delay_.count() << "ms 后切换模型"
-              << std::endl;
-  }
-
-  bool Stage3ProbeActive() const {
-    return using_stage3_predictor_ && stage3_probe_active_;
-  }
-
-  void ConfirmStage3Probe() {
-    if (!stage3_probe_active_) {
-      return;
-    }
-    stage3_probe_active_ = false;
-    std::cout << "[空中机器人阶段] stage3 probe 已识别到目标，确认保持 stage3"
-              << std::endl;
-  }
-
-  bool ShouldSwitchToStage3AfterLostTarget(
-      bool target_lost_since_initialized,
-      const std::chrono::steady_clock::time_point &now,
-      const std::chrono::steady_clock::time_point &target_lost_since) const {
-    return pending_stage3_switch_ && !using_stage3_predictor_ &&
-           target_lost_since_initialized &&
-           (now - target_lost_since) >= stage3_switch_target_lost_delay_;
   }
 
   bool SwitchToStage3(const char *reason) {
@@ -121,9 +84,6 @@ public:
       const auto switch_start = std::chrono::steady_clock::now();
       active_predictor_ = stage3_predictor_.get();
       using_stage3_predictor_ = true;
-      pending_stage3_switch_ = false;
-      stage3_probe_active_ = pending_stage3_probe_switch_;
-      pending_stage3_probe_switch_ = false;
       if (hooks_.on_stage_changed) {
         hooks_.on_stage_changed();
       }
@@ -154,9 +114,6 @@ public:
     ApplyStageSideEffects_(stage12_profile_);
     active_predictor_ = stage12_predictor_;
     using_stage3_predictor_ = false;
-    pending_stage3_switch_ = false;
-    pending_stage3_probe_switch_ = false;
-    stage3_probe_active_ = false;
     if (hooks_.on_stage_changed) {
       hooks_.on_stage_changed();
     }
@@ -165,6 +122,16 @@ public:
               << LoggedExposureTimeUs_(stage12_profile_) << " 原因="
               << reason << std::endl;
   }
+
+  void EnsureRuntimeStage(Tools::RuntimeStage stage, const char *reason) {
+    if (stage == Tools::RuntimeStage::Stage3) {
+      SwitchToStage3(reason);
+      return;
+    }
+    SwitchToStage12(reason);
+  }
+
+  void WarmupStage3IfNeeded() { StartStage3WarmupIfNeeded_(); }
 
 private:
   static double ElapsedMilliseconds_(
@@ -323,12 +290,8 @@ private:
   std::string device_name_;
   Tools::StageRuntimeProfile stage12_profile_{};
   Tools::StageRuntimeProfile stage3_profile_{};
-  std::chrono::milliseconds stage3_switch_target_lost_delay_{0};
   Hooks hooks_{};
   bool using_stage3_predictor_ = false;
-  bool pending_stage3_switch_ = false;
-  bool pending_stage3_probe_switch_ = false;
-  bool stage3_probe_active_ = false;
 };
 
 } // namespace ImageRecognize

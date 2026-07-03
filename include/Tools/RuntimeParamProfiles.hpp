@@ -13,7 +13,6 @@
 #include <chrono>
 #include <cstdint>
 
-#include "ImageRecognize/Stage3FallbackController.hpp"
 #include "Tools/RuntimeParams.hpp"
 
 namespace Tools {
@@ -38,26 +37,6 @@ struct OutputRuntimeConfig {
   std::uint64_t gui_poll_every_n_frames = 1;
   std::uint64_t latency_print_interval_frames = 1;
 };
-
-inline ImageRecognize::Stage3FallbackController::Config
-MakeStage3FallbackControllerConfig() {
-  const auto &params = Params();
-  return ImageRecognize::Stage3FallbackController::Config{
-      ImageRecognize::Stage3FallbackSwitchGuard::Config{
-          std::max(0.0, params.stage3_fallback_min_stage2_progress),
-          std::chrono::milliseconds(
-              std::max(0, params.stage3_fallback_no_target_ms)),
-          std::chrono::milliseconds(
-              std::max(0, params.stage3_fallback_recent_purple_ms)),
-          std::chrono::milliseconds(std::max(
-              0, params.stage3_fallback_high_progress_no_target_probe_ms)),
-          std::chrono::milliseconds(
-              std::max(0, params.stage3_fallback_stage2_no_target_force_ms))},
-      params.stage3_fallback_motor_probe_yaw_offset_deg,
-      params.stage3_fallback_motor_probe_min_imu_delta_deg,
-      std::chrono::milliseconds(
-          std::max(0, params.stage3_fallback_motor_probe_wait_ms))};
-}
 
 inline ControlRuntimeConfig MakeControlRuntimeConfig() {
   const auto &params = Params();

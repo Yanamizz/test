@@ -3,7 +3,7 @@
  * @brief   定义图像识别主流程使用的默认运行参数集合。
  *
  * RuntimeParams 是 ImagePredict 主程序的集中默认配置源，覆盖模型路径、
- * 相机采集/ROI、阶段切换、IMU 时序容差、角度控制、速度前馈、扫描、
+ * 相机采集/ROI、TCP 阶段控制、IMU 时序容差、角度控制、速度前馈、扫描、
  * 显示和录像等运行参数。该文件只提供编译期默认值；少量运行时可调项
  * 如曝光会通过专门的控制器/ini 文件维护，距离与激光几何标定则集中在
  * LaserAngleCalculate.hpp。新增默认参数时需同步更新 RuntimeParams 字段
@@ -46,6 +46,9 @@ struct RuntimeParams {
   std::string openvino_device_name; // OpenVINO 设备名，如 CPU/GPU/AUTO
   std::string angle_filter_type; // 角度滤波器类型，如 ONE_EURO/KF/UKF
   std::string target_camp_mode;  // 目标阵营筛选模式，如 RED/BLUE/ALL
+  std::string tcp_stage_bind_ip; // TCP 阶段信号监听 IP，默认监听 0.0.0.0
+  int tcp_stage_bind_port;       // TCP 阶段信号监听端口
+  int tcp_stage_idle_sleep_ms;   // TCP 阶段线程空闲轮询休眠（毫秒）
 
   // ===== 相机采集与 ROI =====
   int capture_timeout_ms;        // 相机抓帧超时时间（毫秒）
@@ -60,31 +63,6 @@ struct RuntimeParams {
                            // keep_centered=false 时生效
   double stage12_exposure_time_us; // stage1/2 默认曝光时间（微秒）
   double stage3_exposure_time_us;  // stage3 默认曝光时间（微秒）
-
-  // ===== 阶段切换与 stage3 兜底恢复 =====
-  int stage3_switch_target_lost_delay_ms; // 满足 stage3
-                                          // 后，丢目标持续多久再切模型（毫秒）
-  double stage3_fallback_min_stage2_progress; // stage2 进度达到该值后，允许
-                                              // 丢目标兜底进入 stage3 候选
-  int stage3_fallback_no_target_ms; // 高进度后连续空框多久触发 stage3 兜底
-                                    // （毫秒）
-  int stage3_fallback_recent_purple_ms; // 兜底触发前，最近一次紫色观测必须在
-                                        // 该窗口内（毫秒）
-  int stage3_fallback_high_progress_no_target_probe_ms; // stage2 P 曾达到阈值后
-                                                        // 连续无目标多久进入
-                                                        // stage3 probe（毫秒）
-  int stage3_fallback_stage2_no_target_force_ms; // 进入 stage2 后连续无目标多久
-                                                 // 且 P 未达阈值时，强制兜底
-                                                 // 进入 stage3（毫秒）
-  int stage3_probe_no_target_rollback_ms; // stage3 probe 连续无目标多久回退
-                                          // stage2（毫秒）
-  float stage3_fallback_motor_probe_yaw_offset_deg; // 异常兜底切换前探测电机
-                                                    // 上电的小 yaw 偏角（度）
-  float
-      stage3_fallback_motor_probe_min_imu_delta_deg; // 探测期间判定电机有响应的
-                                                     // 最小 IMU 变化（度）
-  int stage3_fallback_motor_probe_wait_ms; // 探测命令发出后等待 IMU 响应的
-                                           // 时长（毫秒）
 
   // ===== 线程等待与时序容差 =====
   int capture_empty_sleep_ms; // 相机空帧时休眠时长（毫秒）
@@ -173,6 +151,7 @@ inline const RuntimeParams &Params() {
       "antidrone_stage12.xml",
       "/home/nuc/antidrone/src/model/final_s_int8_openvino_model/final_s.xml",
       "CPU", "ONE_EURO", "ALL",
+      "0.0.0.0", 19001, 10,
 
       // ===== 相机采集与 ROI =====
       1000, // capture_timeout_ms: 相机抓帧超时 1000ms
@@ -184,23 +163,6 @@ inline const RuntimeParams &Params() {
       180,    // stage3_roi_offset_y: ROI 偏移 Y
       1000.0, // stage12_exposure_time_us: stage1/2 默认曝光 1000us
       4000.0, // stage3_exposure_time_us: stage3 默认曝光 4000us
-
-      // ===== 阶段切换与 stage3 兜底恢复 =====
-      200, // stage3_switch_target_lost_delay_ms: stage3 后丢目标 200ms 再切模型
-      60.0, // stage3_fallback_min_stage2_progress: stage2 P>=60 后才允许兜底
-      300, // stage3_fallback_no_target_ms: 连续空框 400ms 后触发兜底
-      500, // stage3_fallback_recent_purple_ms: 最近 500ms 内必须见过紫色
-      10000, // stage3_fallback_high_progress_no_target_probe_ms: P 曾达到阈值后
-             // 连续无目标 10s，进入 stage3 probe
-      60000, // stage3_fallback_stage2_no_target_force_ms: stage2 连续空框
-             // 60s 且 P 未达阈值后，强制兜底进入 stage3
-      20000, // stage3_probe_no_target_rollback_ms: stage3 probe 连续无目标
-             // 20s 后回退 stage2
-      0.30f, // stage3_fallback_motor_probe_yaw_offset_deg: 异常切换前发送
-             // 0.30deg yaw 探测电机是否上电
-      0.05f, // stage3_fallback_motor_probe_min_imu_delta_deg: IMU 变化超过
-             // 0.05deg 视为电机有响应
-      350,   // stage3_fallback_motor_probe_wait_ms: 探测后等待 350ms
 
       // ===== 线程等待与时序容差 =====
       5,   // capture_empty_sleep_ms: 空帧休眠 5ms

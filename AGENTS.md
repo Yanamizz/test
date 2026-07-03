@@ -36,7 +36,7 @@
 - 去畸变策略：由于畸变参数不准确，项目约定可去除去畸变操作。  
 - 上下文维护：最新交接统一追加到 `agent-context/06-latest-handoff.md`。  
 - 代码改动前，先核对 `agent-context/05-change-entrypoints.md` 的入口映射。
-- 当前主流程已新增关键 seam：`TargetTrackPipeline`、`StageRuntimeProfile`、`StagePredictorController`、`Stage3FallbackController`、`AimbotCommandArbiter`、`OverlayFrameRenderer`；扫描发送线程已新增 `ScanSendController`。后续优先沿这些 seam 深化，避免把状态重新摊回 `src/ImagePredict.cc`。
+- 当前主流程已新增关键 seam：`TargetTrackPipeline`、`StageRuntimeProfile`、`StagePredictorController`、`AimbotCommandArbiter`、`OverlayFrameRenderer`、`TcpStageSignalReceiver`；扫描发送线程已新增 `ScanSendController`。后续优先沿这些 seam 深化，避免把状态重新摊回 `src/ImagePredict.cc`。
 
 ## 提交前校对清单
 

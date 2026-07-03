@@ -1,10 +1,45 @@
 # Latest Handoff
 
 用途：记录最近一次交接结论与后续建议。  
-更新时间：2026-06-08
+更新时间：2026-06-27
 适用场景：新 Agent 快速接续、避免重复排查。
 
 ## 本轮完成事项（延迟优先）
+
+34. 删除五阶段 TCP 主导后失效的 stage3 fallback/probe 残留
+- 文件：`include/ImageRecognize/AerialRobotLaserLockJudge.hpp`
+- 文件：`include/ImageRecognize/Stage3FallbackController.hpp`
+- 文件：`include/Tools/RuntimeParams.hpp`
+- 文件：`include/Tools/StageRuntimeProfile.hpp`
+- 文件：`agent-context/05-change-entrypoints.md`
+- 文件：`agent-context/06-latest-handoff.md`
+- 变更：删除已不再进入主流程的 `Stage3FallbackController` 与 `Stage3FallbackSwitchGuard`，避免在五阶段 TCP 外部主导后继续保留无调用侧的异常兜底/probe seam。
+- 变更：同步删除仅服务旧 fallback/probe 流程的运行参数与 `StageRuntimeProfile::switch_target_lost_delay_ms`，把阶段运行 profile 收敛回“模型/曝光/ROI/扫描”四类真实差异。
+- 变更：修正锁定进度实现为“未照射按 `0.5/s` 衰减，连续照射时每 `0.1s` 按 `P += 0.6 * n` 增长”，与 `03-business-contracts.md` 和 `README.md` 保持一致。
+- 风险判断：低风险清理。该轮不改变 TCP `0x00/0x01` 上升沿推进五阶段、资源组 `1/2/3 -> stage12`、`4/5 -> stage3`、按键切换联动参数或串口 `AimbotTarget` 语义。
+- 当前状态：待本轮重新执行相关目标编译确认无残留引用。
+
+33. 五阶段业务阶段 + TCP 边沿推进改造
+- 文件：`include/ImageRecognize/AerialRobotLaserLockJudge.hpp`
+- 文件：`include/Tools/AimbotLaserStateController.hpp`
+- 文件：`include/Tools/TcpStageSignalReceiver.hpp`
+- 文件：`include/Tools/RuntimeParams.hpp`
+- 文件：`include/ImageRecognize/StagePredictorController.hpp`
+- 文件：`src/ImagePredict.cc`
+- 文件：`src/TcpStageRecvTest.cc`
+- 文件：`src/TcpStageSendTest.cc`
+- 文件：`README.md`
+- 文件：`agent-context/01-core-overview.md`
+- 文件：`agent-context/03-business-contracts.md`
+- 文件：`agent-context/04-integration-and-troubleshooting.md`
+- 文件：`agent-context/05-change-entrypoints.md`
+- 变更：把原三阶段业务语义提升为五阶段，其中 `1/2/3` 继续复用现有 `stage12` 资源组，`4/5` 继续复用现有 `stage3` 资源组，避免把推理/ROI/曝光/扫描资源重新拆成五份。
+- 变更：新增 `TcpStageSignalReceiver`，主程序作为 TCP server 默认监听 `0.0.0.0:19001`，只接收 `0x00/0x01` 单字节；每次 `0x00 -> 0x01` 上升沿推进一次阶段。
+- 变更：主流程从“视觉判定自动推进 stage3 / probe 回退 / 丢目标兜底切模型”切为“TCP 外部阶段主导”；现有 `StagePredictorController` 继续只负责两套资源组切换与副作用应用。
+- 变更：锁定进度 `P` 的连续增长规则改为“未照射按 `0.5/s` 衰减；连续照射时每 `0.1s` 按 `P += 0.6 * n` 增长”；显示与录像仍沿用现有 overlay 文本。
+- 变更：新增 `src/TcpStageRecvTest.cc` 与 `src/TcpStageSendTest.cc` 两个 TCP 联调测试入口。
+- 风险判断：中风险业务语义变更。现有自动 `stage3` 兜底/回退决策不再主导阶段推进，外部 TCP 边沿发送正确性成为阶段行为的前提。
+- 当前状态：已于 2026-06-27 本地执行 `cmake --build build -j --target ImagePredict` 编译通过；仍有 Galaxy SDK typedef、Eigen/UKF、OpenVINO/STL 既有 warning，未在本轮处理。
 
 32. 全项目低风险死代码与复杂化残留清理
 - 文件：`CMakeLists.txt`

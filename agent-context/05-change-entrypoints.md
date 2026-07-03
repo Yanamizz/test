@@ -8,7 +8,7 @@
 
 1. 主流程与线程协作  
 - `src/ImagePredict.cc`
-- 阶段异常兜底与 stage3 probe：`include/ImageRecognize/Stage3FallbackController.hpp`
+- 阶段资源组切换与副作用应用：`include/ImageRecognize/StagePredictorController.hpp`
 - 目标控制/扫描发送仲裁：`include/Tools/AimbotCommandArbiter.hpp`
 - 发送命令数据结构：`include/Tools/AimbotCommand.hpp`
 - 显示/录像叠加帧生成：`include/ImageRecognize/OverlayFrameRenderer.hpp`
@@ -24,7 +24,10 @@
 - `include/SerialTask/SerialSend.hpp`
 
 5. TCP 网络控制链路
-- 旧 `include/NetworkTask/` 与独立 TCP 示例已删除；主程序不再通过网络控制激光。
+- `include/Tools/TcpStageSignalReceiver.hpp`
+- `src/ImagePredict.cc` 中 `TCPStageThread`
+- `src/TcpStageRecvTest.cc`
+- `src/TcpStageSendTest.cc`
 
 6. 角度/激光补偿与扫描控制  
 - `include/Tools/AngleCalculate.hpp`

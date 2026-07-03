@@ -61,7 +61,6 @@ struct StageRuntimeProfile {
   const std::string *model_path = nullptr;
   double exposure_time_us = 0.0;
   bool enable_light_preprocess = false;
-  int switch_target_lost_delay_ms = 0;
   StageCameraRoiProfile roi{};
   StageScanProfile scan{};
 
@@ -81,8 +80,6 @@ inline StageRuntimeProfile MakeStageRuntimeProfile(RuntimeStage stage,
   profile.exposure_time_us = stage3_mode ? params.stage3_exposure_time_us
                                          : params.stage12_exposure_time_us;
   profile.enable_light_preprocess = stage3_mode;
-  profile.switch_target_lost_delay_ms =
-      stage3_mode ? std::max(0, params.stage3_switch_target_lost_delay_ms) : 0;
 
   profile.roi.enabled = stage3_mode && params.stage3_enable_camera_roi;
   profile.roi.keep_centered = params.stage3_roi_keep_centered;
