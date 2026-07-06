@@ -15,6 +15,7 @@
 
 #include "Tools/CameraData.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <mutex>
 
@@ -22,6 +23,7 @@ namespace Tools {
 inline constexpr float kLinearInterpEpsilon = 1e-6f;
 inline constexpr float kRadiansToDegrees = 57.29577951308232f;
 inline constexpr float kNearCalibrationHorizontalDistanceM = 10.0f;
+inline constexpr float kMidCalibrationHorizontalDistanceM = 17.0f;
 inline constexpr float kFarCalibrationHorizontalDistanceM = 24.0f;
 
 enum class CalibrationStage {
@@ -31,6 +33,17 @@ enum class CalibrationStage {
 
 class DistanceCalculator {
 public:
+  static constexpr std::size_t kCalibrationSampleCount = 3;
+
+  struct PixelDistanceCalibrationSample {
+    float distance_m = 0.0f;
+    float width_pixel = 0.0f;
+    float height_pixel = 0.0f;
+  };
+
+  using CalibrationSampleSet =
+      std::array<PixelDistanceCalibrationSample, kCalibrationSampleCount>;
+
   struct CalibrationTargetHeights {
     float near_calibration_target_height;
     float far_calibration_target_height;
@@ -40,6 +53,7 @@ public:
     float near_calibration_target_width;
     float far_calibration_target_width;
     float near_width_pixel;
+    float mid_width_pixel;
     float far_width_pixel;
   };
 
@@ -55,16 +69,26 @@ public:
     float width_distance = 0.0f;
     float height_distance = 0.0f;
     DistanceSource source = DistanceSource::None;
+    float legacy_width_distance = 0.0f;
+    float legacy_height_distance = 0.0f;
+    float shadow_width_distance = 0.0f;
+    float shadow_height_distance = 0.0f;
+    bool shadow_width_valid = false;
+    bool shadow_height_valid = false;
   };
 
   static CalibrationTargetHeights GetCalibrationTargetHeights() {
-    const auto params = DistanceCalibrationParamsForStage(ActiveStage());
+    const auto params = LegacyDistanceCalibrationParamsForStage(ActiveStage());
     return {params.near_calibration_target_height,
             params.far_calibration_target_height};
   }
 
   static CalibrationTargetWidths GetCalibrationTargetWidths() {
     return GetCalibrationTargetWidths(ActiveStage());
+  }
+
+  static CalibrationSampleSet GetCalibrationSamples() {
+    return GetCalibrationSamples(ActiveStage());
   }
 
   static float
@@ -124,17 +148,26 @@ public:
 
   static CalibrationTargetHeights
   GetCalibrationTargetHeights(CalibrationStage stage) {
-    const auto params = DistanceCalibrationParamsForStage(stage);
+    const auto params = LegacyDistanceCalibrationParamsForStage(stage);
     return {params.near_calibration_target_height,
             params.far_calibration_target_height};
   }
 
   static CalibrationTargetWidths
   GetCalibrationTargetWidths(CalibrationStage stage) {
-    const auto params = DistanceCalibrationParamsForStage(stage);
-    return {params.near_calibration_target_width,
-            params.far_calibration_target_width, params.near_width_pixel,
-            params.far_width_pixel};
+    std::lock_guard<std::mutex> lk(ParamsMutex());
+    const auto &params = MutableParams();
+    const auto &legacy = StageLegacyDistanceCalibrationParams(params, stage);
+    const auto &samples = StageDistanceCalibrationSamples(params, stage);
+    return {legacy.near_calibration_target_width,
+            legacy.far_calibration_target_width, legacy.near_width_pixel,
+            samples[kMidCalibrationSampleIndex].width_pixel,
+            legacy.far_width_pixel};
+  }
+
+  static CalibrationSampleSet GetCalibrationSamples(CalibrationStage stage) {
+    std::lock_guard<std::mutex> lk(ParamsMutex());
+    return StageDistanceCalibrationSamples(MutableParams(), stage);
   }
 
   static void SetCalibrationTargetHeights(float near_height, float far_height) {
@@ -145,7 +178,7 @@ public:
                                           float near_height, float far_height) {
     std::lock_guard<std::mutex> lk(ParamsMutex());
     auto &params = MutableParams();
-    auto &stage_params = StageDistanceCalibrationParams(params, stage);
+    auto &stage_params = StageLegacyDistanceCalibrationParams(params, stage);
     stage_params.near_calibration_target_height = near_height;
     stage_params.far_calibration_target_height = far_height;
   }
@@ -154,7 +187,7 @@ public:
                                          float near_width, float far_width) {
     std::lock_guard<std::mutex> lk(ParamsMutex());
     auto &params = MutableParams();
-    auto &stage_params = StageDistanceCalibrationParams(params, stage);
+    auto &stage_params = StageLegacyDistanceCalibrationParams(params, stage);
     stage_params.near_calibration_target_width = near_width;
     stage_params.far_calibration_target_width = far_width;
   }
@@ -210,10 +243,13 @@ public:
   }
 
 private:
+  static constexpr std::size_t kNearCalibrationSampleIndex = 0;
+  static constexpr std::size_t kMidCalibrationSampleIndex = 1;
+  static constexpr std::size_t kFarCalibrationSampleIndex = 2;
   static constexpr float kDistanceFusionMaxRelativeGap = 0.16f;
   static constexpr float kDistanceFusionMaxHeightWeight = 0.25f;
 
-  struct DistanceCalibrationParams {
+  struct LegacyDistanceCalibrationParams {
     float near_calibration_target_height;
     float near_height_pixel;
     float far_calibration_target_height;
@@ -235,9 +271,13 @@ private:
 
   struct TunableParams {
     struct {
-      DistanceCalibrationParams stage12;
-      DistanceCalibrationParams stage3;
+      LegacyDistanceCalibrationParams stage12;
+      LegacyDistanceCalibrationParams stage3;
     } distance_calibration;
+    struct {
+      CalibrationSampleSet stage12;
+      CalibrationSampleSet stage3;
+    } distance_samples;
     struct {
       LaserPitchCompensationParams stage12;
       LaserPitchCompensationParams stage3;
@@ -250,7 +290,8 @@ private:
   };
 
   struct RuntimeSnapshot {
-    DistanceCalibrationParams distance_calibration;
+    LegacyDistanceCalibrationParams legacy_distance_calibration;
+    CalibrationSampleSet distance_samples;
     float distance_filter_alpha;
     float distance_filter_reset_ratio;
   };
@@ -260,9 +301,14 @@ private:
       return 0.0f;
 
     const RuntimeSnapshot params = SnapshotCurrentRuntime_();
+    bool shadow_valid = false;
+    const float shadow_distance = EstimateDistanceFromHeightSamplesShadow(
+        box_height_pixel, params.distance_samples, &shadow_valid);
     const float raw_distance =
-        EstimateCalibratedDistanceByHeight(box_height_pixel,
-                                           params.distance_calibration);
+        shadow_valid
+            ? shadow_distance
+            : EstimateCalibratedDistanceByHeight(
+                  box_height_pixel, params.legacy_distance_calibration);
     if (!std::isfinite(raw_distance) || raw_distance <= 0.0f)
       return 0.0f;
     return FilterDistance(raw_distance, params);
@@ -272,12 +318,20 @@ private:
                                                  float box_height_pixel) {
     const RuntimeSnapshot params = SnapshotCurrentRuntime_();
     DistanceDebugInfo result{};
-    result.width_distance =
-        EstimateCalibratedDistanceByWidth(box_width_pixel,
-                                          params.distance_calibration);
-    result.height_distance =
-        EstimateCalibratedDistanceByHeight(box_height_pixel,
-                                           params.distance_calibration);
+    result.legacy_width_distance = EstimateCalibratedDistanceByWidth(
+        box_width_pixel, params.legacy_distance_calibration);
+    result.legacy_height_distance = EstimateCalibratedDistanceByHeight(
+        box_height_pixel, params.legacy_distance_calibration);
+    result.shadow_width_distance = EstimateDistanceFromWidthSamplesShadow(
+        box_width_pixel, params.distance_samples, &result.shadow_width_valid);
+    result.shadow_height_distance = EstimateDistanceFromHeightSamplesShadow(
+        box_height_pixel, params.distance_samples, &result.shadow_height_valid);
+    result.width_distance = result.shadow_width_valid
+                                ? result.shadow_width_distance
+                                : result.legacy_width_distance;
+    result.height_distance = result.shadow_height_valid
+                                 ? result.shadow_height_distance
+                                 : result.legacy_height_distance;
 
     const float selected_distance =
         SelectDistanceEstimate(result, &result.source);
@@ -289,9 +343,9 @@ private:
     return result;
   }
 
-  float
-  EstimateCalibratedDistanceByHeight(
-      float box_height_pixel, const DistanceCalibrationParams &params) const {
+  float EstimateCalibratedDistanceByHeight(
+      float box_height_pixel,
+      const LegacyDistanceCalibrationParams &params) const {
     const float near_height = params.near_calibration_target_height;
     const float far_height = params.far_calibration_target_height;
     const float near_height_pixel = params.near_height_pixel;
@@ -304,24 +358,24 @@ private:
       return EstimateDistanceByHeight(far_height, box_height_pixel);
     }
 
-    const float t = std::clamp(
-        (box_height_pixel - near_height_pixel) /
-            (far_height_pixel - near_height_pixel),
-        0.0f, 1.0f);
+    const float t = std::clamp((box_height_pixel - near_height_pixel) /
+                                   (far_height_pixel - near_height_pixel),
+                               0.0f, 1.0f);
     const float target_height = near_height + t * (far_height - near_height);
     return EstimateDistanceByHeight(target_height, box_height_pixel);
   }
 
-  float
-  EstimateCalibratedDistanceByWidth(
-      float box_width_pixel, const DistanceCalibrationParams &params) const {
+  float EstimateCalibratedDistanceByWidth(
+      float box_width_pixel,
+      const LegacyDistanceCalibrationParams &params) const {
     const float target_width =
         EstimateCalibratedTargetWidthByPixelWidth(box_width_pixel, params);
     return EstimateDistanceByWidth(target_width, box_width_pixel);
   }
 
   float EstimateCalibratedTargetWidthByPixelWidth(
-      float box_width_pixel, const DistanceCalibrationParams &params) const {
+      float box_width_pixel,
+      const LegacyDistanceCalibrationParams &params) const {
     const float near_width = params.near_calibration_target_width;
     const float far_width = params.far_calibration_target_width;
     const float near_width_pixel = params.near_width_pixel;
@@ -336,10 +390,9 @@ private:
       return far_width;
     }
 
-    const float t = std::clamp(
-        (box_width_pixel - near_width_pixel) /
-            (far_width_pixel - near_width_pixel),
-        0.0f, 1.0f);
+    const float t = std::clamp((box_width_pixel - near_width_pixel) /
+                                   (far_width_pixel - near_width_pixel),
+                               0.0f, 1.0f);
     return near_width + t * (far_width - near_width);
   }
 
@@ -363,17 +416,109 @@ private:
     return (target_width * focal_x_px_) / box_width_pixel;
   }
 
+  float
+  EstimateDistanceFromWidthSamplesShadow(float box_width_pixel,
+                                         const CalibrationSampleSet &samples,
+                                         bool *valid) const {
+    return EstimateDistanceFromSamplesShadow(
+        box_width_pixel, samples,
+        [](const PixelDistanceCalibrationSample &sample) {
+          return sample.width_pixel;
+        },
+        valid);
+  }
+
+  float
+  EstimateDistanceFromHeightSamplesShadow(float box_height_pixel,
+                                          const CalibrationSampleSet &samples,
+                                          bool *valid) const {
+    return EstimateDistanceFromSamplesShadow(
+        box_height_pixel, samples,
+        [](const PixelDistanceCalibrationSample &sample) {
+          return sample.height_pixel;
+        },
+        valid);
+  }
+
+  template <typename PixelAccessor>
+  float EstimateDistanceFromSamplesShadow(float box_pixel,
+                                          const CalibrationSampleSet &samples,
+                                          PixelAccessor pixel_accessor,
+                                          bool *valid) const {
+    struct ShadowFitPoint {
+      float inverse_pixel = 0.0f;
+      float distance_m = 0.0f;
+    };
+
+    if (valid != nullptr) {
+      *valid = false;
+    }
+    if (!IsValidPixel(box_pixel)) {
+      return 0.0f;
+    }
+
+    std::array<ShadowFitPoint, kCalibrationSampleCount> points{};
+    std::size_t count = 0;
+    for (const auto &sample : samples) {
+      const float pixel = pixel_accessor(sample);
+      if (!IsValidPixel(pixel) || !IsValidDistance(sample.distance_m)) {
+        continue;
+      }
+      points[count++] = ShadowFitPoint{1.0f / pixel, sample.distance_m};
+    }
+
+    if (count < 2) {
+      return 0.0f;
+    }
+
+    std::sort(points.begin(),
+              points.begin() + static_cast<std::ptrdiff_t>(count),
+              [](const ShadowFitPoint &lhs, const ShadowFitPoint &rhs) {
+                return lhs.inverse_pixel < rhs.inverse_pixel;
+              });
+
+    const float box_inverse_pixel = 1.0f / box_pixel;
+    if (valid != nullptr) {
+      *valid = true;
+    }
+
+    if (box_inverse_pixel <= points[0].inverse_pixel) {
+      return points[0].distance_m;
+    }
+    if (box_inverse_pixel >= points[count - 1].inverse_pixel) {
+      return points[count - 1].distance_m;
+    }
+
+    for (std::size_t i = 1; i < count; ++i) {
+      if (box_inverse_pixel > points[i].inverse_pixel) {
+        continue;
+      }
+      const float x0 = points[i - 1].inverse_pixel;
+      const float x1 = points[i].inverse_pixel;
+      if (std::abs(x1 - x0) <= kLinearInterpEpsilon) {
+        return points[i].distance_m;
+      }
+      const float t =
+          std::clamp((box_inverse_pixel - x0) / (x1 - x0), 0.0f, 1.0f);
+      return points[i - 1].distance_m +
+             t * (points[i].distance_m - points[i - 1].distance_m);
+    }
+
+    return points[count - 1].distance_m;
+  }
+
   float SelectDistanceEstimate(const DistanceDebugInfo &distance_debug,
                                DistanceSource *source) const {
-    const bool has_width_distance = IsValidDistance(distance_debug.width_distance);
+    const bool has_width_distance =
+        IsValidDistance(distance_debug.width_distance);
     const bool has_height_distance =
         IsValidDistance(distance_debug.height_distance);
 
     if (has_width_distance && has_height_distance) {
-      const float larger_distance =
-          std::max(distance_debug.width_distance, distance_debug.height_distance);
-      const float smaller_distance =
-          std::min(distance_debug.width_distance, distance_debug.height_distance);
+      const float larger_distance = std::max(distance_debug.width_distance,
+                                             distance_debug.height_distance);
+      const float smaller_distance = std::min(distance_debug.width_distance,
+                                              distance_debug.height_distance);
       const float relative_gap =
           larger_distance > 0.0f
               ? (larger_distance - smaller_distance) / larger_distance
@@ -444,14 +589,15 @@ private:
   static RuntimeSnapshot SnapshotCurrentRuntime_() {
     std::lock_guard<std::mutex> lk(ParamsMutex());
     const auto &params = MutableParams();
-    return {StageDistanceCalibrationParams(params, params.active_stage),
+    return {StageLegacyDistanceCalibrationParams(params, params.active_stage),
+            StageDistanceCalibrationSamples(params, params.active_stage),
             params.distance_filter.alpha, params.distance_filter.reset_ratio};
   }
 
-  static DistanceCalibrationParams
-  DistanceCalibrationParamsForStage(CalibrationStage stage) {
+  static LegacyDistanceCalibrationParams
+  LegacyDistanceCalibrationParamsForStage(CalibrationStage stage) {
     std::lock_guard<std::mutex> lk(ParamsMutex());
-    return StageDistanceCalibrationParams(MutableParams(), stage);
+    return StageLegacyDistanceCalibrationParams(MutableParams(), stage);
   }
 
   static LaserPitchCompensationParams
@@ -460,20 +606,34 @@ private:
     return StageLaserCompensationParams(MutableParams(), stage);
   }
 
-  static DistanceCalibrationParams &
-  StageDistanceCalibrationParams(TunableParams &params,
-                                 CalibrationStage stage) {
+  static LegacyDistanceCalibrationParams &
+  StageLegacyDistanceCalibrationParams(TunableParams &params,
+                                       CalibrationStage stage) {
     return stage == CalibrationStage::Stage3
                ? params.distance_calibration.stage3
                : params.distance_calibration.stage12;
   }
 
-  static const DistanceCalibrationParams &
-  StageDistanceCalibrationParams(const TunableParams &params,
-                                 CalibrationStage stage) {
+  static const LegacyDistanceCalibrationParams &
+  StageLegacyDistanceCalibrationParams(const TunableParams &params,
+                                       CalibrationStage stage) {
     return stage == CalibrationStage::Stage3
                ? params.distance_calibration.stage3
                : params.distance_calibration.stage12;
+  }
+
+  static CalibrationSampleSet &
+  StageDistanceCalibrationSamples(TunableParams &params,
+                                  CalibrationStage stage) {
+    return stage == CalibrationStage::Stage3 ? params.distance_samples.stage3
+                                             : params.distance_samples.stage12;
+  }
+
+  static const CalibrationSampleSet &
+  StageDistanceCalibrationSamples(const TunableParams &params,
+                                  CalibrationStage stage) {
+    return stage == CalibrationStage::Stage3 ? params.distance_samples.stage3
+                                             : params.distance_samples.stage12;
   }
 
   static const LaserPitchCompensationParams &
@@ -500,6 +660,29 @@ private:
                : 0.0f;
   }
 
+  static LegacyDistanceCalibrationParams
+  MakeLegacyDistanceCalibrationParams(const CalibrationSampleSet &samples) {
+    const auto &near_sample = samples[kNearCalibrationSampleIndex];
+    const auto &far_sample = samples[kFarCalibrationSampleIndex];
+    return {
+        CalibrationTargetMetersFromPixel(near_sample.distance_m,
+                                         near_sample.height_pixel,
+                                         CameraData::kFocalY),
+        near_sample.height_pixel,
+        CalibrationTargetMetersFromPixel(far_sample.distance_m,
+                                         far_sample.height_pixel,
+                                         CameraData::kFocalY),
+        far_sample.height_pixel,
+        CalibrationTargetMetersFromPixel(near_sample.distance_m,
+                                         near_sample.width_pixel,
+                                         CameraData::kFocalX),
+        near_sample.width_pixel,
+        CalibrationTargetMetersFromPixel(
+            far_sample.distance_m, far_sample.width_pixel, CameraData::kFocalX),
+        far_sample.width_pixel,
+    };
+  }
+
   static TunableParams &MutableParams() {
     static TunableParams params = DefaultParams();
     return params;
@@ -512,73 +695,51 @@ private:
 
   static const TunableParams &DefaultParams() {
     // ===== 调参集中区：先按功能分组，再在功能内区分 stage =====
-    static const TunableParams p{
-        {
-            {
-                CalibrationTargetMetersFromPixel(
-                    kNearCalibrationHorizontalDistanceM, 111.982f,
-                    CameraData::kFocalY),
-                // stage12 near_calibration_target_height（米，按 height pixel
-                // 与水平距离自动反推）
-                111.982f, // stage12 near_height_pixel（px）
-                CalibrationTargetMetersFromPixel(
-                    kFarCalibrationHorizontalDistanceM, 47.952f,
-                    CameraData::kFocalY),
-                47.952f, // stage12 far_height_pixel（px）
-                CalibrationTargetMetersFromPixel(
-                    kNearCalibrationHorizontalDistanceM, 105.029f,
-                    CameraData::kFocalX),
-                105.029f, // stage12 near_width_pixel（px，未标定时置 0）
-                CalibrationTargetMetersFromPixel(
-                    kFarCalibrationHorizontalDistanceM, 43.274f,
-                    CameraData::kFocalX),
-                43.274f, // stage12 far_width_pixel（px，未标定时置 0）
-            },
-            {
-                CalibrationTargetMetersFromPixel(
-                    kNearCalibrationHorizontalDistanceM, 102.006f,
-                    CameraData::kFocalY),
-                // stage3 near_calibration_target_height（米，按 height pixel
-                // 与水平距离自动反推）
-                102.006f, // stage3 near_height_pixel（px）
-                CalibrationTargetMetersFromPixel(
-                    kFarCalibrationHorizontalDistanceM, 56.941f,
-                    CameraData::kFocalY),
-                56.941f, // stage3 far_height_pixel（px）
-                CalibrationTargetMetersFromPixel(
-                    kNearCalibrationHorizontalDistanceM, 85.880f,
-                    CameraData::kFocalX),
-                85.880f, // stage3 near_width_pixel（px，未标定时置 0）
-                CalibrationTargetMetersFromPixel(
-                    kFarCalibrationHorizontalDistanceM, 49.605f,
-                    CameraData::kFocalX),
-                49.605f, // stage3 far_width_pixel（px，未标定时置 0）
-            },
-        },
-        {
-            {
-                0.090f,  // stage12 laser_z_offset_m: 激光在相机上方 0.09m
-                14.313f, // stage12 laser_converge_x_m: 光轴交汇前向距离
-                10.0f,   // stage12 laser_comp_min_distance_m
-                24.0f,   // stage12 laser_comp_max_distance_m
-                true,    // stage12 enable_laser_pitch_compensation
-                0.004f,  // stage12 laser_target_vertical_trim_m: 目标面下移 4mm
-            },
-            {
-                0.090f,  // stage3 laser_z_offset_m: 激光在相机上方 0.09m
-                14.313f, // stage3 laser_converge_x_m: 光轴交汇前向距离
-                10.0f,   // stage3 laser_comp_min_distance_m
-                24.0f,   // stage3 laser_comp_max_distance_m
-                true,    // stage3 enable_laser_pitch_compensation
-                0.004f,  // stage3 laser_target_vertical_trim_m
-            },
-        },
-        {
-            0.25f, // distance_filter.alpha: 一阶滤波系数，越大响应越快
-            0.5f,  // distance_filter.reset_ratio: 距离突变超过该比例时重置
-        },
-        CalibrationStage::Stage12 // active_stage: 当前使用的标定阶段
-    };
+    static const TunableParams p = [] {
+      const CalibrationSampleSet stage12_samples{{
+          {kNearCalibrationHorizontalDistanceM, 105.029f, 111.982f},
+          {kMidCalibrationHorizontalDistanceM, 61.713f, 65.551f},
+          {kFarCalibrationHorizontalDistanceM, 43.274f, 47.952f},
+      }};
+      const CalibrationSampleSet stage3_samples{{
+          {kNearCalibrationHorizontalDistanceM, 73.543f, 98.528f},
+          {kMidCalibrationHorizontalDistanceM, 47.984f, 64.574f},
+          {kFarCalibrationHorizontalDistanceM, 39.462f, 51.549f},
+      }};
+      return TunableParams{
+          {
+              MakeLegacyDistanceCalibrationParams(stage12_samples),
+              MakeLegacyDistanceCalibrationParams(stage3_samples),
+          },
+          {
+              stage12_samples,
+              stage3_samples,
+          },
+          {
+              {
+                  -0.065f, // stage12 laser_z_offset_m: 激光在相机下方 0.065m
+                  14.313f, // stage12 laser_converge_x_m: 光轴交汇前向距离
+                  10.0f,   // stage12 laser_comp_min_distance_m
+                  24.0f,   // stage12 laser_comp_max_distance_m
+                  false,   // stage12 enable_laser_pitch_compensation
+                  0.0f, // stage12 laser_target_vertical_trim_m: 目标面下移 4mm
+              },
+              {
+                  -0.065f, // stage3 laser_z_offset_m: 激光在相机下方 0.065m
+                  14.313f, // stage3 laser_converge_x_m: 光轴交汇前向距离
+                  10.0f,   // stage3 laser_comp_min_distance_m
+                  24.0f,   // stage3 laser_comp_max_distance_m
+                  false,   // stage3 enable_laser_pitch_compensation
+                  0.0f,    // stage3 laser_target_vertical_trim_m
+              },
+          },
+          {
+              0.25f, // distance_filter.alpha: 一阶滤波系数，越大响应越快
+              0.5f, // distance_filter.reset_ratio: 距离突变超过该比例时重置
+          },
+          CalibrationStage::Stage12 // active_stage: 当前使用的标定阶段
+      };
+    }();
     return p;
   }
 

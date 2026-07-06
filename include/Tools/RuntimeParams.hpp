@@ -48,7 +48,7 @@ struct RuntimeParams {
   std::string target_camp_mode;  // 目标阵营筛选模式，如 RED/BLUE/ALL
   std::string tcp_stage_bind_ip; // TCP 阶段信号监听 IP，默认监听 0.0.0.0
   int tcp_stage_bind_port;       // TCP 阶段信号监听端口
-  int tcp_stage_idle_sleep_ms;   // TCP 阶段线程空闲轮询休眠（毫秒）
+  int tcp_stage_idle_sleep_ms; // TCP 阶段线程空闲轮询休眠（毫秒）
 
   // ===== 相机采集与 ROI =====
   int capture_timeout_ms;        // 相机抓帧超时时间（毫秒）
@@ -149,9 +149,9 @@ inline const RuntimeParams &Params() {
       // ===== 基础模型与策略 =====
       "/home/nuc/antidrone/src/model/antidrone_stage12_int8_openvino_model/"
       "antidrone_stage12.xml",
-      "/home/nuc/antidrone/src/model/final_s_int8_openvino_model/final_s.xml",
-      "CPU", "ONE_EURO", "ALL",
-      "0.0.0.0", 19001, 10,
+      "/home/nuc/antidrone/src/model/antidrone_stage3_int8_openvino_model/"
+      "antidrone_stage3.xml",
+      "CPU", "ONE_EURO", "ALL", "0.0.0.0", 9001, 10,
 
       // ===== 相机采集与 ROI =====
       1000, // capture_timeout_ms: 相机抓帧超时 1000ms
@@ -201,10 +201,11 @@ inline const RuntimeParams &Params() {
               // 0.15deg 追加误差方向速度前馈
       0.08f,  // pitch_velocity_feedforward_error_threshold_deg: pitch 超过
               // 0.10deg 追加误差方向速度前馈
-      50.0f,  // yaw_error_feedforward_gain_deg_per_sec_per_deg: yaw
-              // 每 1deg 误差追加速度
-      15.0f,  // pitch_error_feedforward_gain_deg_per_sec_per_deg: pitch
-              // 每 1deg 误差追加速度
+      10.0f,  // yaw_error_feedforward_gain_deg_per_sec_per_deg: yaw
+
+      // 每 1deg 误差追加速度
+      5.0f, // pitch_error_feedforward_gain_deg_per_sec_per_deg: pitch
+            // 每 1deg 误差追加速度
 
       // ===== 时延统计 =====
       false, // enable_latency_profile: 默认关闭时延统计

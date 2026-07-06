@@ -31,6 +31,11 @@ struct OverlayData {
   float width_distance = 0.0f;
   float height_distance = 0.0f;
   const char *distance_source = "NONE";
+  bool show_shadow_distance_debug = false;
+  float shadow_width_distance = 0.0f;
+  float shadow_height_distance = 0.0f;
+  bool shadow_width_valid = false;
+  bool shadow_height_valid = false;
   bool show_angle_offset_debug = false;
   float yaw_offset_deg = 0.0f;
   float pitch_offset_deg = 0.0f;
@@ -99,6 +104,12 @@ public:
       ShowDistanceDebug(frame, overlay_data.width_distance,
                         overlay_data.height_distance, overlay_data.distance_source);
     }
+    if (overlay_data.show_shadow_distance_debug) {
+      ShowShadowDistanceDebug(frame, overlay_data.shadow_width_distance,
+                              overlay_data.shadow_height_distance,
+                              overlay_data.shadow_width_valid,
+                              overlay_data.shadow_height_valid);
+    }
     if (overlay_data.show_angle_offset_debug) {
       ShowAngleOffsetDebug(frame, overlay_data.yaw_offset_deg,
                            overlay_data.pitch_offset_deg);
@@ -152,12 +163,27 @@ public:
                 {10, 150}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {255, 255, 0}, 2);
   }
 
+  static void ShowShadowDistanceDebug(cv::Mat &frame, float shadow_width_distance,
+                                      float shadow_height_distance,
+                                      bool shadow_width_valid,
+                                      bool shadow_height_valid) {
+    const std::string dw_text = shadow_width_valid
+                                    ? cv::format("%.2f", shadow_width_distance)
+                                    : std::string("--");
+    const std::string dh_text = shadow_height_valid
+                                    ? cv::format("%.2f", shadow_height_distance)
+                                    : std::string("--");
+    cv::putText(frame,
+                "DwL: " + dw_text + " DhL: " + dh_text,
+                {10, 178}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {255, 220, 120}, 2);
+  }
+
   static void ShowAngleOffsetDebug(cv::Mat &frame, float yaw_offset_deg,
                                    float pitch_offset_deg) {
     cv::putText(frame,
                 "YawOff: " + cv::format("%.3f", yaw_offset_deg) +
                     " PitchOff: " + cv::format("%.3f", pitch_offset_deg),
-                {10, 178}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {255, 255, 0}, 2);
+                {10, 206}, cv::FONT_HERSHEY_SIMPLEX, 0.62, {255, 255, 0}, 2);
   }
 
   static void ShowControlDebug(cv::Mat &frame,
@@ -180,7 +206,7 @@ public:
       text += std::string("Scan: ") + (overlay_data.scan_active ? "ON" : "OFF");
     }
     if (!text.empty()) {
-      cv::putText(frame, text, {10, 206}, cv::FONT_HERSHEY_SIMPLEX, 0.62,
+      cv::putText(frame, text, {10, 234}, cv::FONT_HERSHEY_SIMPLEX, 0.62,
                   {255, 255, 0}, 2);
     }
   }

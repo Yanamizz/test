@@ -6,6 +6,39 @@
 
 ## 本轮完成事项（延迟优先）
 
+38. 多点距离标定正式切入主链路，旧 near/far 保留作对照显示
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/ImageRecognize/ImageShow.hpp`
+- 文件：`src/ImagePredict.cc`
+- 文件：`src/DISTANCE_CALIBRATION_README.md`
+- 变更：`DistanceCalculator` 的主链路 `Dw/Dh/used_distance` 已从旧 near/far 逻辑切到样本表 `1/pixel` 分段线性拟合；若某维度样本不足 2 个有效点，则自动回退旧逻辑。
+- 变更：overlay 中新增的第二行距离调试改为显示旧链路对照值 `DwL/DhL`，便于现场比较“新主链路 vs 旧 near/far”。
+- 变更：`stage12` 的 `17m` 样本若暂时仍为 `0`，运行时会自动退化为 `10m/24m` 两点反比分段；后续只需把 `17m` 样本填进调参区，无需再改代码即可自动接入主链路。
+- 风险判断：中低风险行为变更。该轮会直接改变 `used_distance`、`LaserPc` 与控制角发送结果，建议优先复核 `stage12/stage3` 的 `Dw`、`Dh`、`DwL`、`DhL` 与非锚点误差。
+- 当前状态：待本轮重新执行 `cmake --build build -j --target ImagePredict` 与 `git diff --check` 复验。
+
+37. 多点距离标定影子链路：固定三点样本表 + `1/pixel` 分段线性对比
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/ImageRecognize/ImageShow.hpp`
+- 文件：`include/Tools/CalibrationSliderPanel.hpp`
+- 文件：`src/ImagePredict.cc`
+- 文件：`src/DISTANCE_CALIBRATION_README.md`
+- 变更：`DistanceCalculator` 的标定数据结构收口为每阶段固定三点样本表 `10m / 17m / 24m`，同时保留一套由样本自动派生的旧 near/far 主链路参数，确保 `used_distance`、`LaserPc` 和控制发送行为不变。
+- 变更：新增 width/height 两条影子距离估计 helper，在 `1/pixel` 域按样本做分段线性插值；样本范围外 clamp 到最近端点，不做外推。
+- 变更：`DistanceDebugInfo`、overlay 和标定面板扩展出影子观测面：显示 `DwS/DhS` 与 `near/mid/far` 三点宽度像素，但影子结果只用于人工验收，不参与距离选路、激光补偿或串口控制。
+- 风险判断：低风险观测增强。该轮不会改变主流程控制链路，但若后续实测确认影子结果明显更好，可在下一轮替换现有 near/far 主链路。
+- 当前状态：已于 2026-07-06 本地执行 `cmake --build build -j --target ImagePredict` 构建通过；仍有 Galaxy SDK `GXDef.h` 既有 typedef warning，未在本轮处理。
+
+36. 识别框稳定性调参：提高跨帧粘连并收紧 stage12/stage3 稳框滤波
+- 文件：`include/ImageRecognize/TargetAssociation.hpp`
+- 文件：`include/ImageRecognize/TargetTrackPipeline.hpp`
+- 文件：`agent-context/06-latest-handoff.md`
+- 变更：提高跨帧关联对 IoU 连续性的偏好，进一步降低普通/粘连分支里“新高置信框抢占旧目标”的权重；具体表现为提高 `iou_weight`、`sticky_iou_weight`，降低 `confidence_weight` 与 `sticky_confidence_threshold`。
+- 变更：`stage1/2` 与 `stage3` 的 `TemporalBoxStabilizer` 同步调向“更稳”档：降低中心点和尺寸 One Euro 截止频率与 beta，放宽 IoU/中心/面积门控使稳框链路更少因中等抖动而重置，同时略收紧高度单帧上跳钳制以压制框高尖峰。
+- 意图：优先减少同类目标换框、框中心高频抖动和框尺寸呼吸感；接受一定响应速度下降，但不改检测阈值、NMS、主控制角度滤波或距离公式。
+- 风险判断：中低风险调参。快速横向机动或目标突然逼近时，框的跟随会比之前更“黏”，若现场感觉滞后过大，应优先回调 `center_x_beta/center_y_beta` 与 `center_*_min_cutoff_hz`。
+- 当前状态：已于 2026-07-05 本地执行 `cmake --build build -j --target ImagePredict` 构建通过；仍有 Galaxy SDK `GXDef.h` 既有 typedef warning，未在本轮处理。
+
 35. TCP 阶段链路升级为 `0x91/0x92` 命令帧协议
 - 文件：`include/Tools/TcpStageSignalReceiver.hpp`
 - 文件：`include/Tools/AimbotLaserStateController.hpp`

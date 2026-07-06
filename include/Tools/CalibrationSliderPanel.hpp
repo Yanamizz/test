@@ -5,7 +5,7 @@
  * 该面板在调试显示开启时提供独立窗口，允许现场切换 stage1/2 与 stage3
  * 的编辑对象，并通过滑块调整当前 stage 的等效目标高度/宽度、曝光时间
  * 和目标阵营模式。目标尺寸滑块会写入 DistanceCalculator 的运行时标定
- * 参数，用于实机距离估计；近/远处的检测框像素观测值仍集中保存在
+ * 参数，用于实机距离估计；近/中/远三点的检测框像素样本仍集中保存在
  * LaserAngleCalculate.hpp 的调参区，避免滑块误改基准采样数据。
  */
 
@@ -293,8 +293,9 @@ private:
                 {12, 126}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);
     cv::putText(panel,
-                "width_pixels near/far:         " +
-                    cv::format("%.1f / %.1f px", widths.near_width_pixel,
+                "width_pixels n/m/f:            " +
+                    cv::format("%.1f / %.1f / %.1f px", widths.near_width_pixel,
+                               widths.mid_width_pixel,
                                widths.far_width_pixel),
                 {12, 190}, cv::FONT_HERSHEY_SIMPLEX, 0.50,
                 cv::Scalar(230, 236, 240), 1, cv::LINE_AA);

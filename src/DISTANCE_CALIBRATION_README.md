@@ -10,8 +10,9 @@
 2. `Tools::DistanceCalculator::CalculateDistanceWithDebug()` 接收目标框坐标。
 3. `include/Tools/LaserAngleCalculate.hpp` 计算并输出：
    - `Wpx/Hpx`：目标框宽/高像素。
-   - `Dw`：由宽度估计的距离。
-   - `Dh`：由高度估计的距离。
+   - `Dw`：当前主链路宽度距离。优先使用三点样本 `1/pixel` 分段线性拟合；样本不足时回退旧 near/far 逻辑。
+   - `Dh`：当前主链路高度距离。优先使用三点样本 `1/pixel` 分段线性拟合；样本不足时回退旧 near/far 逻辑。
+   - `DwL/DhL`：旧 near/far 主链路的对照值，仅用于观察。
    - `Src`：最终距离来源，可能是 `FUSED`、`WIDTH`、`HEIGHT`、`NONE`。
    - `Distance`：滤波后的 `used_distance`。
 4. `LaserPc` 使用 `used_distance` 计算激光 pitch 补偿角。
@@ -21,28 +22,33 @@
 调参集中区在 `include/Tools/LaserAngleCalculate.hpp` 文件末尾，当前按“功能 -> 阶段”分组：
 
 ```text
-distance_calibration.stage12
-distance_calibration.stage3
+distance_samples.stage12
+distance_samples.stage3
+legacy distance_calibration.stage12/stage3（由 near/far 样本自动派生）
 laser_pitch_compensation.stage12
 laser_pitch_compensation.stage3
 distance_filter
 ```
 
-当前代码内置两点标定距离：
+当前代码内置固定三点采样距离：
 
 ```text
 kNearCalibrationHorizontalDistanceM = 10.0m
+kMidCalibrationHorizontalDistanceM  = 17.0m
 kFarCalibrationHorizontalDistanceM  = 24.0m
 ```
 
-每个阶段保存四个实机像素锚点：
+其中 `17m` 当前作为样本表中的中点观测值。只要该点填了有效像素，它就会自动进入当前主链路 `used_distance`、`LaserPc` 和控制发送；若该点仍为 `0`，运行时会自动退化为基于 `10m/24m` 两点的分段反比拟合。
+
+每个阶段保存一组固定三点样本：
 
 ```text
-near_height_pixel
-far_height_pixel
-near_width_pixel
-far_width_pixel
+sample[0] = 10m  -> width_pixel, height_pixel
+sample[1] = 17m  -> width_pixel, height_pixel
+sample[2] = 24m  -> width_pixel, height_pixel
 ```
+
+旧 near/far 运行参数会由 `10m` 和 `24m` 样本自动派生，并保留作对照显示；当前主链路直接使用 `10m / 17m / 24m` 三点样本。
 
 代码会用这些像素锚点和相机焦距自动反推等效目标宽高：
 
@@ -50,7 +56,7 @@ far_width_pixel
 target_size_m = distance_m * pixel_size / focal_px
 ```
 
-所以在当前两点标定方案下，你主要改的是 `*_pixel`，不是手算 `*_calibration_target_*`。
+所以在当前方案下，你主要改的是样本表里的 `width_pixel/height_pixel`，不是手算 `*_calibration_target_*`。
 
 ## 标定前固定条件
 
@@ -85,6 +91,7 @@ target_size_m = distance_m * pixel_size / focal_px
    ```text
    Wpx Hpx
    Dw Dh Src
+   DwL DhL
    Distance
    LaserPc
    ```
@@ -101,10 +108,10 @@ target_size_m = distance_m * pixel_size / focal_px
 
 5. 分阶段重复采集。
 
-   当前两点标定至少采：
+   当前三点样本至少采：
 
    ```text
-   10m, 24m
+   10m, 17m, 24m
    ```
 
    建议额外验证：
@@ -129,6 +136,7 @@ stage: stage12 或 stage3
 distance_m | width_median_px | height_median_px | width_p25_px | height_p25_px | note
 -----------|-----------------|------------------|--------------|---------------|-----
 10         |                 |                  |              |               |
+17         |                 |                  |              |               |
 12         |                 |                  |              |               |
 16         |                 |                  |              |               |
 20         |                 |                  |              |               |
@@ -137,38 +145,39 @@ distance_m | width_median_px | height_median_px | width_p25_px | height_p25_px |
 
 推荐用 `median` 做标定。若目标框偶尔因拖影、眩光、误框膨胀而变大，可以参考 `P25` 判断保守值。
 
-## 当前两点标定怎么改
+## 当前三点样本怎么改
 
-如果只是更新现有两点标定，在 `include/Tools/LaserAngleCalculate.hpp` 的 `distance_calibration` 调参区修改像素锚点。
+如果只是更新现有样本，在 `include/Tools/LaserAngleCalculate.hpp` 的 `stage12_samples` / `stage3_samples` 调参区修改三点像素样本。
 
 `stage12` 当前对应：
 
 ```cpp
-111.982f, // stage12 near_height_pixel
-47.952f,  // stage12 far_height_pixel
-105.029f, // stage12 near_width_pixel
-43.274f,  // stage12 far_width_pixel
+{10.0f, 105.029f, 111.982f},
+{17.0f,   0.0f,     0.0f},
+{24.0f,  43.274f,  47.952f},
 ```
 
 `stage3` 当前对应：
 
 ```cpp
-102.006f, // stage3 near_height_pixel
-56.941f,  // stage3 far_height_pixel
-85.880f,  // stage3 near_width_pixel
-49.605f,  // stage3 far_width_pixel
+{10.0f, 73.543f, 98.528f},
+{17.0f, 47.984f, 64.574f},
+{24.0f, 39.462f, 51.549f},
 ```
 
 替换规则：
 
 ```text
-near_*_pixel = 10m 时的中位像素
-far_*_pixel  = 24m 时的中位像素
+sample[0].width_pixel/height_pixel = 10m 时的中位像素
+sample[1].width_pixel/height_pixel = 17m 时的中位像素
+sample[2].width_pixel/height_pixel = 24m 时的中位像素
 ```
+
+更新样本表后，旧 near/far 对照参数会自动按 `10m` 与 `24m` 样本重建；`17m` 样本一旦填入有效值，就会自动进入当前主链路，不需要再改代码。
 
 默认等效目标宽高由 `CalibrationTargetMetersFromPixel()` 自动反推，不需要手动计算并填 `near_calibration_target_width` 或 `far_calibration_target_height`。
 
-## 两点标定后的验证
+## 样本更新后的验证
 
 1. 重新编译。
 
@@ -198,7 +207,7 @@ far_*_pixel  = 24m 时的中位像素
 
 ## 如果要增加更多标定距离点
 
-当前代码还没有保存任意多点标定表。现在是用 10m 和 24m 两个像素锚点，在中间插值等效目标尺寸。
+当前主链路已经切到基于样本表的 `1/pixel` 分段线性拟合；旧 near/far 逻辑保留为对照值，便于观察是否需要继续微调样本。
 
 如果你要加入更多距离点，建议这样扩展：
 

@@ -185,12 +185,12 @@ class CrossFrameTargetTracker {
 };
 
 inline CrossFrameTargetTrackerParams::CrossFrameTargetTrackerParams()
-    : iou_weight(0.75f),                   // 历史框关联的 IoU 权重，略提高以减少换框
-      center_weight(0.2f),                 // 历史框关联的中心点权重，略降低以保留几何连续性
-      confidence_weight(0.04f),            // 历史框关联的置信度权重，进一步降低高置信新框抢占概率
-      sticky_iou_weight(0.84f),            // 粘连模式下的 IoU 权重，优先维持上一帧目标
-      sticky_center_weight(0.16f),         // 粘连模式下的中心点权重
-      sticky_confidence_threshold(0.75f),  // 前一帧框达到该置信度时继续粘连
+    : iou_weight(0.79f),                   // 历史框关联更偏向几何连续性，进一步减少换框
+      center_weight(0.17f),                // 中心点仍参与关联，但弱于 IoU
+      confidence_weight(0.02f),            // 尽量避免高置信新框抢走已锁定目标
+      sticky_iou_weight(0.90f),            // 粘连模式更强调与上一帧的重叠连续性
+      sticky_center_weight(0.10f),         // 粘连模式下中心点仅做辅助约束
+      sticky_confidence_threshold(0.68f),  // 略降低门槛，让稳定目标更早进入粘连分支
       max_lost_frames(6) {}                // 允许的最长丢失帧数，略增大以避免短暂漏检就松锁
 
 }  // namespace ImageRecognize
