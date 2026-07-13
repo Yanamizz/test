@@ -679,43 +679,88 @@ void CaptureThread(CameraTask::GalaxyCamera *camera,
 
 void TCPStageThread() {
   Tools::BindCurrentThreadToAuxCore(3);
-  Tools::TcpStageSignalReceiver receiver(
-      Tools::TcpStageSignalConfig{Tools::Params().tcp_stage_bind_ip,
-                                  static_cast<std::uint16_t>(std::max(
-                                      0, Tools::Params().tcp_stage_bind_port)),
-                                  1});
+  // 若 tcp_stage_bind_ip 被设置为非空且非 0.0.0.0，则视为“客户端模式”，
+  // 主动连接到远端 server 并接收阶段 / 反制状态；否则保留监听行为。
   const auto idle_sleep = std::chrono::milliseconds(
       std::max(1, Tools::Params().tcp_stage_idle_sleep_ms));
 
-  while (g_running) {
-    Tools::TcpStageCommand command{};
-    if (!receiver.PollNextCommand(&command)) {
-      std::this_thread::sleep_for(idle_sleep);
-      continue;
-    }
+  const std::string configured_ip = Tools::Params().tcp_stage_bind_ip;
+  const int configured_port = Tools::Params().tcp_stage_bind_port;
 
-    const auto apply_result =
-        g_aimbot_laser_state_controller.ApplyTcpCommand(command);
-    if (apply_result.command.type == Tools::TcpStageCommandType::GameState91) {
-      std::cout << "[TCP阶段] 收到 0x91 game_progress="
-                << static_cast<int>(apply_result.command.game_progress)
+  if (!configured_ip.empty() && configured_ip != "0.0.0.0") {
+    // Client mode: connect to the remote server and receive stage commands.
+    Tools::TcpStageSignalClientReceiver receiver(
+        Tools::TcpStageClientReceiveConfig{
+            configured_ip,
+            static_cast<std::uint16_t>(std::max(0, configured_port)),
+            500,
+            1000,
+            "tcp_stage_receive.log"});
+
+    while (g_running) {
+      Tools::TcpStageCommand command{};
+      if (!receiver.PollNextCommand(&command)) {
+        std::this_thread::sleep_for(idle_sleep);
+        continue;
+      }
+
+      const auto apply_result =
+          g_aimbot_laser_state_controller.ApplyTcpCommand(command);
+      if (apply_result.command.type == Tools::TcpStageCommandType::GameState91) {
+        std::cout << "[TCP阶段-客户端] 收到 0x91 game_progress="
+                  << static_cast<int>(apply_result.command.game_progress)
+                  << " stage_remain_time="
+                  << apply_result.command.stage_remain_time << std::endl;
+        continue;
+      }
+
+      std::cout << "[TCP阶段-客户端] 收到 0x92 countered="
+                << (apply_result.command.countered ? 1 : 0)
+                << " current_stage=" << apply_result.current_stage;
+      if (apply_result.stage_advanced) {
+        std::cout << " (advanced from " << apply_result.previous_stage << ")";
+      }
+      std::cout << std::endl;
+    }
+  } else {
+    // Server / listener mode: 保持原有行为
+    Tools::TcpStageSignalReceiver receiver(Tools::TcpStageSignalConfig{
+        Tools::Params().tcp_stage_bind_ip,
+        static_cast<std::uint16_t>(
+            std::max(0, Tools::Params().tcp_stage_bind_port)),
+        1});
+
+    while (g_running) {
+      Tools::TcpStageCommand command{};
+      if (!receiver.PollNextCommand(&command)) {
+        std::this_thread::sleep_for(idle_sleep);
+        continue;
+      }
+
+      const auto apply_result =
+          g_aimbot_laser_state_controller.ApplyTcpCommand(command);
+      if (apply_result.command.type ==
+          Tools::TcpStageCommandType::GameState91) {
+        std::cout << "[TCP阶段] 收到 0x91 game_progress="
+                  << static_cast<int>(apply_result.command.game_progress)
+                  << " stage_remain_time="
+                  << apply_result.command.stage_remain_time << std::endl;
+        continue;
+      }
+
+      std::cout << "[TCP阶段] 收到 0x92 countered="
+                << (apply_result.command.countered ? 1 : 0)
+                << " current_stage=" << apply_result.current_stage
+                << " game_progress="
+                << static_cast<int>(
+                       g_aimbot_laser_state_controller.CurrentGameProgress())
                 << " stage_remain_time="
-                << apply_result.command.stage_remain_time << std::endl;
-      continue;
+                << g_aimbot_laser_state_controller.CurrentStageRemainTime();
+      if (apply_result.stage_advanced) {
+        std::cout << " (advanced from " << apply_result.previous_stage << ")";
+      }
+      std::cout << std::endl;
     }
-
-    std::cout << "[TCP阶段] 收到 0x92 countered="
-              << (apply_result.command.countered ? 1 : 0)
-              << " current_stage=" << apply_result.current_stage
-              << " game_progress="
-              << static_cast<int>(
-                     g_aimbot_laser_state_controller.CurrentGameProgress())
-              << " stage_remain_time="
-              << g_aimbot_laser_state_controller.CurrentStageRemainTime();
-    if (apply_result.stage_advanced) {
-      std::cout << " (advanced from " << apply_result.previous_stage << ")";
-    }
-    std::cout << std::endl;
   }
 }
 

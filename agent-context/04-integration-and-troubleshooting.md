@@ -6,7 +6,7 @@
 
 ## TCP 网络控制链路
 
-旧 `NetworkTask` 激光控制计数链路已删除。当前主程序恢复了一个新的 TCP 阶段输入线程：`0x91` 维护 `game_progress/stage_remain_time`，`0x92` 的低 `1 bit` 按 `0->1` 上升沿推进五阶段业务状态，不维护网络 AimbotTarget 计数。
+旧 `NetworkTask` 激光控制计数链路已删除。当前主程序默认作为 TCP client 连接 `192.168.50.75:9001`，由阶段 server 发送命令；TCP 阶段输入线程接收 `0x91` 并维护 `game_progress/stage_remain_time`，接收 `0x92` 的低 `1 bit` 后按 `0->1` 上升沿推进五阶段业务状态，不维护网络 AimbotTarget 计数。
 
 ## 高频排障清单
 

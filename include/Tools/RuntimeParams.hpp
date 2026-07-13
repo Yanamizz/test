@@ -46,8 +46,8 @@ struct RuntimeParams {
   std::string openvino_device_name; // OpenVINO 设备名，如 CPU/GPU/AUTO
   std::string angle_filter_type; // 角度滤波器类型，如 ONE_EURO/KF/UKF
   std::string target_camp_mode;  // 目标阵营筛选模式，如 RED/BLUE/ALL
-  std::string tcp_stage_bind_ip; // TCP 阶段信号监听 IP，默认监听 0.0.0.0
-  int tcp_stage_bind_port;       // TCP 阶段信号监听端口
+  std::string tcp_stage_bind_ip; // client 模式为 server IP；监听模式为 bind IP
+  int tcp_stage_bind_port;       // client/server 连接端口或 listener 监听端口
   int tcp_stage_idle_sleep_ms; // TCP 阶段线程空闲轮询休眠（毫秒）
 
   // ===== 相机采集与 ROI =====
@@ -151,7 +151,7 @@ inline const RuntimeParams &Params() {
       "antidrone_stage12.xml",
       "/home/nuc/antidrone/src/model/antidrone_stage3_int8_openvino_model/"
       "antidrone_stage3.xml",
-      "CPU", "ONE_EURO", "ALL", "0.0.0.0", 9001, 10,
+      "CPU", "ONE_EURO", "ALL", "192.168.50.75", 9001, 10,
 
       // ===== 相机采集与 ROI =====
       1000, // capture_timeout_ms: 相机抓帧超时 1000ms
@@ -215,7 +215,7 @@ inline const RuntimeParams &Params() {
       true,  // enable_scan_mode: 默认开启扫描模式
       false, // enable_save_no_target_images: 默认不保存无目标图像
       false, // enable_save_target_videos: 默认不保存目标视频
-      true,  // enable_save_full_run_video: 默认不保存全程视频
+      false, // enable_save_full_run_video: 默认不保存全程视频
       true,  // enable_display: 默认开启显示窗口
       true,  // enable_calibration_sliders: 默认开启标定滑块
       true,  // enable_send_log: 默认开启发送日志

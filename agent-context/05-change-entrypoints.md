@@ -28,6 +28,7 @@
 - `include/Tools/AimbotLaserStateController.hpp`
 - `src/ImagePredict.cc` 中 `TCPStageThread`
 - `src/TcpStageRecvTest.cc`
+- `src/TcpStageClientRecvTest.cc`
 - `src/TcpStageSendTest.cc`
 
 6. 角度/激光补偿与扫描控制  

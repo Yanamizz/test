@@ -1,10 +1,42 @@
 # Latest Handoff
 
 用途：记录最近一次交接结论与后续建议。  
-更新时间：2026-07-03
+更新时间：2026-07-13
 适用场景：新 Agent 快速接续、避免重复排查。
 
 ## 本轮完成事项（延迟优先）
+
+41. 修复 TCP client 拓扑与长时间运行自动停止风险
+- 文件：`include/Tools/TcpStageSignalReceiver.hpp`
+- 文件：`src/ImagePredict.cc`
+- 文件：`include/Tools/RuntimeStats.hpp`
+- 文件：`src/TcpStageClientRecvTest.cc`
+- 变更：本设备默认作为 TCP client 主动连接 `192.168.50.75:9001`，持续接收 server 的 `0x91/0x92`；远端断开后清理连接并自动重连，不再把 client 错当成只发送数据的 `TcpStageSignalSender`。
+- 变更：所有 TCP `send()` 使用 `MSG_NOSIGNAL`，远端断开时不再因 `SIGPIPE` 以退出码 `141` 结束进程。
+- 变更：新增 client 接收测试，覆盖半包解析、连续帧解析、接收日志和 server 断开后的重连存活。
+- 变更：`PixelSizeStats` 的总量统计仍覆盖整个运行周期，但分位数样本限制为最近滚动的 `8192` 个，避免每个目标帧追加 vector 导致长时间运行内存无限增长。
+- 验证：`cmake --build build -j --target TcpStageClientRecvTest TcpStageRecvTest TcpStageSendTest ImagePredict` 通过；本地 server 回放正确解析 `0x91 (game_progress=3, stage_remain_time=42)` 和 `0x92 (countered=1)`，断开后 client 仍存活并重连。
+- 已知限制：未连接实机相机和 `192.168.50.75`，需现场确认 server 实际监听端口、日志文件所在当前工作目录及阶段切换效果。
+
+40. 激光 trim 滑块与 TCP 接收日志
+- 文件：`include/Tools/CalibrationSliderPanel.hpp`
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 文件：`include/Tools/TcpStageReceiveLogger.hpp`
+- 文件：`include/Tools/TcpStageSignalReceiver.hpp`
+- 变更：标定面板移除 near/far height、near/far width 滑块，新增当前编辑 stage 独立的 `laser trim mm` 滑块，范围为 `-50mm` 到 `+50mm`；距离 width/height 标定接口和主链路仍保留在 `DistanceCalculator`。
+- 变更：新增 `Get/SetLaserTargetVerticalTrimMeters()` 运行时接口；面板按毫米显示，内部按米写入激光 pitch 补偿参数。
+- 变更：`laser_target_vertical_trim_m` 默认值按米单位保留为当前调试值 `0.006m`。
+- 变更：新增 TCP 接收日志，默认追加写入程序启动时当前工作目录下的 `tcp_stage_receive.log`，记录时间戳、原始十六进制帧和解析结果；未知命令码也会记录。
+- 风险判断：低风险调试工具变更。滑块只改变运行时激光 trim，日志不改变 TCP 解析和业务状态。
+- 当前状态：已于 2026-07-13 执行 `git diff --check`，并编译通过 `ImagePredict`、`TcpStageRecvTest`；仍有 Galaxy SDK `GXDef.h` 既有 typedef warning。
+
+39. 激光/相机近似平行光轴调试模型
+- 文件：`include/Tools/LaserAngleCalculate.hpp`
+- 变更：stage12/stage3 的 `laser_converge_x_m` 暂设为正无穷，开启激光 pitch 补偿，用于调试“无固定交汇角、仅保留安装基线补偿”的理想模型。
+- 变更：补偿参数校验允许有限的带符号 `laser_z_offset_m`，保留当前激光位于相机下方 `-0.065m` 的安装方向；无穷交汇距离下 `atan2(z_offset, converge_x)` 退化为 0。
+- 预期：目标位于画面中心时，补偿主要随 `1/distance` 变化，10m/17m/24m 约为 `0.372°/0.219°/0.155°`，实际符号以当前 pitch 约定和实机命中方向为准。
+- 风险判断：中风险调试行为变更。当前两阶段均启用补偿，需实机确认补偿符号、10m/17m/24m 距离趋势和目标中心命中误差；若方向相反，应优先反转 `laser_z_offset_m` 符号。
+- 当前状态：已于 2026-07-13 执行 `git diff --check` 和 `cmake --build build -j --target ImagePredict` 通过；仍有 Galaxy SDK `GXDef.h` 既有 typedef warning。
 
 38. 多点距离标定正式切入主链路，旧 near/far 保留作对照显示
 - 文件：`include/Tools/LaserAngleCalculate.hpp`

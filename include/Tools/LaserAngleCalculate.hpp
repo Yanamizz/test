@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <mutex>
 
 namespace Tools {
@@ -102,7 +103,8 @@ public:
     if (!params.enable_laser_pitch_compensation ||
         distance_m < params.laser_comp_min_distance_m ||
         distance_m > params.laser_comp_max_distance_m ||
-        params.laser_z_offset_m <= 0.0f || params.laser_converge_x_m <= 0.0f) {
+        !std::isfinite(params.laser_z_offset_m) ||
+        !(params.laser_converge_x_m > 0.0f)) {
       return 0.0f;
     }
 
@@ -128,7 +130,8 @@ public:
     }
 
     if (!params.enable_laser_pitch_compensation ||
-        params.laser_z_offset_m <= 0.0f || params.laser_converge_x_m <= 0.0f) {
+        !std::isfinite(params.laser_z_offset_m) ||
+        !(params.laser_converge_x_m > 0.0f)) {
       return 0.0f;
     }
     if (distance_m < params.laser_comp_min_distance_m ||
@@ -190,6 +193,30 @@ public:
     auto &stage_params = StageLegacyDistanceCalibrationParams(params, stage);
     stage_params.near_calibration_target_width = near_width;
     stage_params.far_calibration_target_width = far_width;
+  }
+
+  static float GetLaserTargetVerticalTrimMeters(CalibrationStage stage) {
+    std::lock_guard<std::mutex> lk(ParamsMutex());
+    return StageLaserCompensationParams(MutableParams(), stage)
+        .laser_target_vertical_trim_m;
+  }
+
+  static float GetLaserTargetVerticalTrimMeters() {
+    return GetLaserTargetVerticalTrimMeters(ActiveStage());
+  }
+
+  static void SetLaserTargetVerticalTrimMeters(CalibrationStage stage,
+                                               float trim_m) {
+    if (!std::isfinite(trim_m)) {
+      return;
+    }
+    std::lock_guard<std::mutex> lk(ParamsMutex());
+    StageLaserCompensationParams(MutableParams(), stage)
+        .laser_target_vertical_trim_m = trim_m;
+  }
+
+  static void SetLaserTargetVerticalTrimMeters(float trim_m) {
+    SetLaserTargetVerticalTrimMeters(ActiveStage(), trim_m);
   }
 
   static void SetActiveStage(CalibrationStage stage) {
@@ -644,6 +671,13 @@ private:
                : params.laser_pitch_compensation.stage12;
   }
 
+  static LaserPitchCompensationParams &
+  StageLaserCompensationParams(TunableParams &params, CalibrationStage stage) {
+    return stage == CalibrationStage::Stage3
+               ? params.laser_pitch_compensation.stage3
+               : params.laser_pitch_compensation.stage12;
+  }
+
   static bool IsValidPixel(float pixel) {
     return std::isfinite(pixel) && pixel > 0.0f;
   }
@@ -718,19 +752,22 @@ private:
           {
               {
                   -0.065f, // stage12 laser_z_offset_m: 激光在相机下方 0.065m
-                  14.313f, // stage12 laser_converge_x_m: 光轴交汇前向距离
-                  10.0f,   // stage12 laser_comp_min_distance_m
-                  24.0f,   // stage12 laser_comp_max_distance_m
-                  false,   // stage12 enable_laser_pitch_compensation
-                  0.0f, // stage12 laser_target_vertical_trim_m: 目标面下移 4mm
+                  std::numeric_limits<float>::infinity(), // stage12:
+                                                          // 近似平行光轴
+                  10.0f, // stage12 laser_comp_min_distance_m
+                  24.0f, // stage12 laser_comp_max_distance_m
+                  true, // stage12 enable_laser_pitch_compensation: 平行光轴调试
+                  0.006f, // stage12 laser_target_vertical_trim_m: 目标面下移
+                          // 4mm
               },
               {
                   -0.065f, // stage3 laser_z_offset_m: 激光在相机下方 0.065m
-                  14.313f, // stage3 laser_converge_x_m: 光轴交汇前向距离
-                  10.0f,   // stage3 laser_comp_min_distance_m
-                  24.0f,   // stage3 laser_comp_max_distance_m
-                  false,   // stage3 enable_laser_pitch_compensation
-                  0.0f,    // stage3 laser_target_vertical_trim_m
+                  std::numeric_limits<float>::infinity(), // stage3:
+                                                          // 近似平行光轴
+                  10.0f, // stage3 laser_comp_min_distance_m
+                  24.0f, // stage3 laser_comp_max_distance_m
+                  true, // stage3 enable_laser_pitch_compensation: 平行光轴调试
+                  0.006f, // stage3 laser_target_vertical_trim_m
               },
           },
           {

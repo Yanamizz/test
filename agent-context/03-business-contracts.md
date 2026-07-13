@@ -13,7 +13,7 @@
 
 阶段推进规则：
 
-1. 主程序通过 TCP 监听命令帧 `0x91` 与 `0x92`
+1. 主程序默认作为 TCP client 主动连接 `192.168.50.75:9001`，持续接收命令帧 `0x91` 与 `0x92`；仅在配置 IP 为空或为 `0.0.0.0` 时保留 listener 模式
 2. `0x91` 后接 `1Byte + 2Byte`
 3. 第 1 个 payload byte 的低 `4 bit` 写入 `game_progress`
 4. 后 `2Byte` 按网络序（大端）写入 `stage_remain_time`

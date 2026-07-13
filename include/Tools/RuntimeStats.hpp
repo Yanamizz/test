@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -62,6 +63,8 @@ struct LatencyStats {
 };
 
 struct PixelSizeStats {
+  static constexpr std::size_t kMaxStoredSamples = 8192;
+
   std::uint64_t samples = 0;
   double width_sum = 0.0;
   double width_min = 0.0;
@@ -91,8 +94,22 @@ struct PixelSizeStats {
 
     width_sum += width_px;
     height_sum += height_px;
-    width_samples.push_back(width_px);
-    height_samples.push_back(height_px);
+
+    // 总量统计继续覆盖整个运行周期；分位数只保留固定大小的滚动样本，
+    // 避免长时间运行时每帧追加导致内存无限增长。
+    if (width_samples.size() < kMaxStoredSamples) {
+      if (width_samples.empty()) {
+        width_samples.reserve(kMaxStoredSamples);
+        height_samples.reserve(kMaxStoredSamples);
+      }
+      width_samples.push_back(width_px);
+      height_samples.push_back(height_px);
+    } else {
+      const std::size_t slot =
+          static_cast<std::size_t>((samples - 1) % kMaxStoredSamples);
+      width_samples[slot] = width_px;
+      height_samples[slot] = height_px;
+    }
     ++samples;
   }
 
