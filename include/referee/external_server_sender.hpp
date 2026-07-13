@@ -27,10 +27,10 @@ namespace radar::referee {
 
 /// 外部自定义状态：比赛进程与剩余时间。
 constexpr rm::u8 kExternalServerGameStatusCmd = 0x91;
-/// 外部自定义状态：`0x020c` 的 bit13。
+/// 外部自定义状态：对方空中机器人当前是否处于被反制状态。
 constexpr rm::u8 kExternalServerRadarMarkBitCmd = 0x92;
 /// `0x020c radar_mark_data.mark_progress` 的 bit13 掩码。
-constexpr rm::u16 kExternalServerRadarMarkBit13Mask = static_cast<rm::u16>(1u << 13);
+constexpr rm::u16 kOpponentAerialRobotCounteredMask = static_cast<rm::u16>(1u << 13);
 /// 外部 TCP server 自定义状态发送频率。
 constexpr int kExternalServerSendIntervalMs = 1000;
 
@@ -63,8 +63,8 @@ class ExternalServerSender {
       return;
     }
     if (cmd_id == Cmd::kRadarMarkData) {
-      latest_radar_mark_bit13_ =
-          static_cast<rm::u8>((protocol.radar_mark_data.mark_progress & kExternalServerRadarMarkBit13Mask) != 0);
+      latest_opponent_aerial_robot_countered_ = static_cast<rm::u8>(
+          (protocol.radar_mark_data.mark_progress & kOpponentAerialRobotCounteredMask) != 0);
     }
   }
 
@@ -77,9 +77,9 @@ class ExternalServerSender {
       last_game_status_dispatch_time_ = now;
       SendGameStatus(latest_game_status_->game_progress, latest_game_status_->stage_remain_time);
     }
-    if (latest_radar_mark_bit13_.has_value() && IsDue(last_radar_mark_dispatch_time_, now)) {
+    if (latest_opponent_aerial_robot_countered_.has_value() && IsDue(last_radar_mark_dispatch_time_, now)) {
       last_radar_mark_dispatch_time_ = now;
-      SendRadarMarkBit13(*latest_radar_mark_bit13_);
+      SendOpponentAerialRobotCountered(*latest_opponent_aerial_robot_countered_);
     }
   }
 
@@ -104,10 +104,10 @@ class ExternalServerSender {
     return SendRaw(payload.data(), payload.size(), kExternalServerGameStatusCmd, 0x0001);
   }
 
-  bool SendRadarMarkBit13(rm::u8 bit13) {
+  bool SendOpponentAerialRobotCountered(rm::u8 countered) {
     const std::array<rm::u8, 2> payload = {
         kExternalServerRadarMarkBitCmd,
-        static_cast<rm::u8>(bit13 != 0 ? 1 : 0),
+        static_cast<rm::u8>(countered != 0 ? 1 : 0),
     };
     return SendRaw(payload.data(), payload.size(), kExternalServerRadarMarkBitCmd, 0x020c);
   }
@@ -158,7 +158,7 @@ class ExternalServerSender {
   TcpServer *server_ = nullptr;
   radar::log::FileLogStore log_store_;
   std::optional<GameStatusSnapshot> latest_game_status_;
-  std::optional<rm::u8> latest_radar_mark_bit13_;
+  std::optional<rm::u8> latest_opponent_aerial_robot_countered_;
   std::optional<TimePoint> last_game_status_dispatch_time_;
   std::optional<TimePoint> last_radar_mark_dispatch_time_;
 };

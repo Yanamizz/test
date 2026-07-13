@@ -123,10 +123,7 @@ class EnemyKeyReceiver {
    * @brief 推进一次“已接收但尚未满足发送门控”的密钥提交
    */
   void ProcessDeferredQueueing() {
-    if (!has_key_ || queued_to_sender_ || !RequiresLevel1Gate()) {
-      return;
-    }
-    if (!command_sender_.HasSentOpponentKeyFromPort(radar::config::kEnemyLevel1KeyTcpServerPort)) {
+    if (!has_key_ || queued_to_sender_) {
       return;
     }
     QueueAcceptedKey();
@@ -166,14 +163,11 @@ class EnemyKeyReceiver {
     LogAcceptedFrame(seq);
   }
 
-  bool RequiresLevel1Gate() const { return source_port_ == radar::config::kEnemyLevel2KeyTcpServerPort; }
-
   void QueueAcceptedKey() {
     if (queued_to_sender_) {
       return;
     }
-    if (RequiresLevel1Gate() &&
-        !command_sender_.HasSentOpponentKeyFromPort(radar::config::kEnemyLevel1KeyTcpServerPort)) {
+    if (!command_sender_.CanSendOpponentKeyFromPort(source_port_)) {
       return;
     }
     command_sender_.QueueOpponentKey(name_, source_port_, latest_key_);

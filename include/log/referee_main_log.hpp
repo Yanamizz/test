@@ -445,7 +445,13 @@ inline std::string FormatMainPayload(rm::u16 cmd_id, const rm::device::RefereePr
     }
     case Cmd::kRadarMarkData: {
       const auto &data = protocol.radar_mark_data;
-      oss << "{\"mark_progress\":" << JsonScalar(data.mark_progress) << "}";
+      constexpr rm::u16 kOpponentAerialRobotTargetedByAllyRadarLaserMask = static_cast<rm::u16>(1u << 12);
+      constexpr rm::u16 kOpponentAerialRobotCounteredMask = static_cast<rm::u16>(1u << 13);
+      oss << "{"
+          << "\"opponent_aerial_robot_targeted_by_ally_radar_laser\":"
+          << JsonScalar((data.mark_progress & kOpponentAerialRobotTargetedByAllyRadarLaserMask) != 0) << ','
+          << "\"opponent_aerial_robot_countered\":"
+          << JsonScalar((data.mark_progress & kOpponentAerialRobotCounteredMask) != 0) << "}";
       return oss.str();
     }
     case Cmd::kSentryInfo: {

@@ -75,6 +75,7 @@ class RadarDecisionTree {
    */
   void ProcessRadarInfo(const Protocol &protocol) {
     const auto state = DecodeRadarInfo(protocol.radar_info.radar_info);
+    command_sender_.UpdateAllyEncryptionLevel(state.ally_encryption_level);
     auto cmd = command_sender_.MakeCommand();
 
     const bool request_double_debuff = ShouldRequestDoubleDebuff(state.double_debuff_chances);

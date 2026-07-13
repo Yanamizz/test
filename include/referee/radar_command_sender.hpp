@@ -57,6 +57,8 @@ constexpr rm::u16 kDefaultRadarSenderId = 9;  // 9：红方雷达  109：蓝方�
 constexpr rm::u16 kRefereeServerReceiverId = 0x8080;
 /// `password_cmd=2` 冷却时间。
 constexpr int kRadarPasswordVerifyCooldownMs = 10000;
+/// 当前按 `0x020E` bit3-4 == 2 视为“对方干扰波状态为二级”。
+constexpr rm::u8 kEnemyLevel2RequiredInterferenceLevel = 2;
 
 /**
  * @brief 一次 `0x0121` 指令的上下文信息
@@ -195,6 +197,9 @@ class RadarCommandSender {
     }
 
     const auto pending = pending_opponent_keys_.front();
+    if (!CanSendOpponentKeyFromPort(pending.source_port)) {
+      return;
+    }
 
     auto cmd = MakeCommand();
     cmd.password_cmd = kRadarVerifyOpponentKeyCommand;
@@ -210,6 +215,7 @@ class RadarCommandSender {
     context.source = "tcp";
     context.source_port = pending.source_port;
     context.decision = "sent";
+    context.ally_encryption_level = current_ally_encryption_level_;
     const bool queued = Send(cmd, serial_protocol, context, [this, source_port = pending.source_port]() {
       MarkOpponentKeySent(source_port);
       password_verify_in_flight_ = false;
@@ -247,6 +253,26 @@ class RadarCommandSender {
       return enemy_level2_key_sent_;
     }
     return false;
+  }
+
+  /**
+   * @brief 更新最近一次 `0x020E` 解出的干扰波等级
+   * @param ally_encryption_level 当前协议中的 bit3-4 值
+   */
+  void UpdateAllyEncryptionLevel(rm::u8 ally_encryption_level) {
+    current_ally_encryption_level_ = ally_encryption_level;
+  }
+
+  /**
+   * @brief 判断指定来源端口的敌方密钥当前是否允许进入/推进发送
+   * @param source_port 来源端口
+   * @return 满足当前业务门控时返回 true
+   */
+  bool CanSendOpponentKeyFromPort(int source_port) const {
+    if (source_port != radar::config::kEnemyLevel2KeyTcpServerPort) {
+      return true;
+    }
+    return enemy_level1_key_sent_ && current_ally_encryption_level_ == kEnemyLevel2RequiredInterferenceLevel;
   }
 
   /**
@@ -433,6 +459,7 @@ class RadarCommandSender {
   bool password_verify_in_flight_ = false;            ///< 当前是否已有一条验证指令等待真正发出
   bool enemy_level1_key_sent_ = false;                ///< `8002` 密钥是否已真正发出
   bool enemy_level2_key_sent_ = false;                ///< `8003` 密钥是否已真正发出
+  rm::u8 current_ally_encryption_level_ = 0;          ///< 最近一次 `0x020E` 解出的 bit3-4 干扰波等级
   rm::u8 radar_cmd_counter_ = kRadarInitialCommandCounter;  ///< 当前 `radar_cmd`
 };
 

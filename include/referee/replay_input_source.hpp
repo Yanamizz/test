@@ -20,6 +20,7 @@
 
 #include "include/config/config.hpp"
 #include "librm/core/typedefs.hpp"
+#include "librm/modules/crc.hpp"
 
 namespace radar::referee {
 
@@ -176,20 +177,32 @@ class ReplayInputSource {
     std::size_t offset = 0;
     while (offset < bytes.size()) {
       if (bytes[offset] != kFrameSof) {
-        throw std::runtime_error(name_ + ": replay file contains non-frame data at byte " +
-                                 std::to_string(offset));
+        ++offset;
+        continue;
       }
       if (offset + kHeaderLen + kCmdIdLen + kCrc16Len > bytes.size()) {
-        throw std::runtime_error(name_ + ": truncated referee frame header at byte " +
-                                 std::to_string(offset));
+        break;
+      }
+
+      if (rm::modules::Crc8(bytes.data() + offset, kHeaderLen - 1, rm::modules::CRC8_INIT) !=
+          bytes[offset + kHeaderLen - 1]) {
+        ++offset;
+        continue;
       }
 
       const auto data_len = static_cast<std::size_t>(bytes[offset + 1]) |
                             (static_cast<std::size_t>(bytes[offset + 2]) << 8U);
       const auto frame_len = kHeaderLen + kCmdIdLen + data_len + kCrc16Len;
       if (offset + frame_len > bytes.size()) {
-        throw std::runtime_error(name_ + ": truncated referee frame payload at byte " +
-                                 std::to_string(offset));
+        ++offset;
+        continue;
+      }
+
+      const auto frame_crc16 =
+          static_cast<rm::u16>(bytes[offset + frame_len - 1] << 8U) | bytes[offset + frame_len - 2];
+      if (rm::modules::Crc16(bytes.data() + offset, frame_len - kCrc16Len, rm::modules::CRC16_INIT) != frame_crc16) {
+        ++offset;
+        continue;
       }
 
       frames.emplace_back(bytes.begin() + static_cast<std::ptrdiff_t>(offset),
