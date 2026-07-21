@@ -139,6 +139,18 @@ cmake -S . -B build
 cmake --build build --target radar -j2
 ```
 
+构建敌方密钥 TCP 模拟器：
+
+```bash
+cmake --build build --target enemy_key_tcp_simulator -j2
+```
+
+构建 UIDrone UI 发送测试程序：
+
+```bash
+cmake --build build --target ui_sender_test -j2
+```
+
 运行：
 
 ```bash
@@ -155,7 +167,42 @@ python3 test/serialtest.py
 
 - [test/serialtest.py](test/serialtest.py:1)
 
-当前仓库不再维护独立的 C++ 测试可执行程序；测试能力已经回收到主程序、回放链路和日志链路中。
+### 敌方密钥 TCP 模拟器
+
+`enemy_key_tcp_simulator` 以 TCP server 身份监听配置中的 `8002/8003`，用于向主程序模拟一级/二级敌方密钥输入。启动主程序并连接成功后，在模拟器终端输入：
+
+```text
+1 ABC123
+2 DEF456
+```
+
+工具会校验六位字母数字密钥，并发送带 CRC 的完整 `0x0A06` 帧。输入 `status` 查看连接状态，输入 `quit` 退出。
+
+主程序仍是 TCP client：先将 [include/config/config.hpp](include/config/config.hpp:56) 的 `kTcpServerAddress` 设为模拟器所在主机的地址；同机联调时设为 `127.0.0.1`。主程序收到密钥后，继续由现有 `RadarCommandSender` 和串口发送链路提交给裁判系统服务器。
+
+当前主链测试仍以主程序、回放链路和日志链路为主；`enemy_key_tcp_simulator` 是用于手动联调敌方密钥 TCP 输入的辅助工具。
+
+### UIDrone UI 发送测试
+
+`ui_sender_test` 通过真实裁判串口发送 `UIDroneHero_add/edit` 对应的 `0x0301/0x0103(UIFigure5)`。程序使用 [include/config/config.hpp](include/config/config.hpp:42) 中的串口设备和波特率配置；启动前应确认裁判串口可用。
+
+命令格式为：
+
+```bash
+./build/bin/ui_sender_test [red|blue] [add|edit]
+```
+
+参数均可省略，默认等价于 `red add`。`add` 用于首次创建五个 UIDrone 图元，`edit` 用于修改已经存在的同名图元；当前测试值写在程序内，图元名称为 `yaw`、`pit`、`adj`、`isp`、`cya`。
+
+红蓝方目标示例：
+
+```bash
+./build/bin/ui_sender_test red add
+./build/bin/ui_sender_test blue add
+./build/bin/ui_sender_test blue edit
+```
+
+红方使用发送方机器人 ID `9`，目标为友方空中机器人选手端 `0x0106`；蓝方使用发送方机器人 ID `109`，目标为 `0x016A`。程序发送成功后会输出帧长度和 `frame_hex`，串口打开或写入失败会返回非零状态。
 
 ## 日志与可观测性
 

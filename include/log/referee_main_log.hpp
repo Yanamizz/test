@@ -94,35 +94,43 @@ inline std::filesystem::path CreateRunLogRoot(const std::filesystem::path &base_
 }
 
 /**
+ * @brief 按整数自身位宽格式化为带 `0x` 前缀的十六进制字符串
+ * @tparam T 非布尔整数类型
+ * @param value 待格式化值
+ * @return 十六进制字符串
+ */
+template <typename T>
+inline std::string HexInteger(T value) {
+  static_assert(std::is_integral_v<T> && !std::is_same_v<std::remove_cv_t<T>, bool>,
+                "HexInteger requires a non-bool integral type");
+  static constexpr char kHexDigits[] = "0123456789abcdef";
+  using Value = std::remove_cv_t<T>;
+  using UnsignedValue = std::make_unsigned_t<Value>;
+  constexpr std::size_t kDigitCount = sizeof(Value) * 2;
+
+  const auto unsigned_value = static_cast<UnsignedValue>(value);
+  std::string out(kDigitCount + 2, '0');
+  out[1] = 'x';
+  for (std::size_t index = 0; index < kDigitCount; ++index) {
+    const auto shift = static_cast<unsigned>((kDigitCount - index - 1) * 4);
+    out[index + 2] = kHexDigits[(unsigned_value >> shift) & 0xF];
+  }
+  return out;
+}
+
+/**
  * @brief 以 `0xNN` 形式格式化 8 位值
  * @param value 待格式化值
  * @return 十六进制字符串
  */
-inline std::string HexU8(rm::u8 value) {
-  static constexpr char kHexDigits[] = "0123456789abcdef";
-  std::string out(4, '0');
-  out[1] = 'x';
-  out[2] = kHexDigits[(value >> 4) & 0xF];
-  out[3] = kHexDigits[value & 0xF];
-  return out;
-}
+inline std::string HexU8(rm::u8 value) { return HexInteger(value); }
 
 /**
  * @brief 以 `0xNNNN` 形式格式化 16 位值
  * @param value 待格式化值
  * @return 十六进制字符串
  */
-inline std::string HexU16(rm::u16 value) {
-  // 手写格式化，输出与 `"0x" + std::hex/setw(4)/setfill('0')` 逐字节一致，但避开 ostringstream 开销。
-  static constexpr char kHexDigits[] = "0123456789abcdef";
-  std::string out(6, '0');
-  out[1] = 'x';
-  out[2] = kHexDigits[(value >> 12) & 0xF];
-  out[3] = kHexDigits[(value >> 8) & 0xF];
-  out[4] = kHexDigits[(value >> 4) & 0xF];
-  out[5] = kHexDigits[value & 0xF];
-  return out;
-}
+inline std::string HexU16(rm::u16 value) { return HexInteger(value); }
 
 /**
  * @brief 将字节数组格式化为连续十六进制字符串
@@ -143,6 +151,7 @@ inline std::string HexBytes(const rm::u8 *data, std::size_t size) {
 
 /**
  * @brief 将标量格式化为 JSON 可写字符串
+ * @note 协议中的整数按固定字宽输出为带 `0x` 前缀的 JSON 字符串；浮点数和布尔值保持 JSON 标量。
  * @tparam T 标量类型
  * @param value 待格式化值
  * @return JSON 片段
@@ -152,9 +161,10 @@ inline std::string JsonScalar(T value) {
   std::ostringstream oss;
   if constexpr (std::is_floating_point_v<T>) {
     oss << std::fixed << std::setprecision(4) << value;
-  } else if constexpr (std::is_same_v<T, rm::u8> || std::is_same_v<T, rm::i8> || std::is_same_v<T, std::uint8_t> ||
-                       std::is_same_v<T, std::int8_t>) {
-    oss << static_cast<int>(value);
+  } else if constexpr (std::is_same_v<std::remove_cv_t<T>, bool>) {
+    oss << (value ? "true" : "false");
+  } else if constexpr (std::is_integral_v<T>) {
+    oss << '"' << HexInteger(value) << '"';
   } else {
     oss << value;
   }

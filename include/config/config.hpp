@@ -52,17 +52,17 @@ constexpr int kSerialRefereeReplayRateHz = 10;
 /// TCP 本机绑定地址；留空表示由系统按路由自动选择本机出口地址。
 constexpr const char *kTcpLocalBindAddress = "";
 /// TCP 对端服务端地址；`8001/8002/8003` 均主动连接到该地址。
-constexpr const char *kTcpServerAddress = "192.168.50.112";
+constexpr const char *kTcpServerAddress = "127.0.0.1";
 /// 是否启用额外的 TCP server 通道，供其他设备主动接入本程序。
 constexpr bool kExternalTcpServerEnabled = true;
 /// 额外 TCP server 的监听地址；`0.0.0.0` 表示监听所有网卡。
-constexpr const char *kExternalTcpServerBindAddress = "192.168.50.75";
+constexpr const char *kExternalTcpServerBindAddress = "0.0.0.0";
 /// 额外 TCP server 的监听端口。
 constexpr int kExternalTcpServerPort = 9001;
 /// 信息波输入模式，仅覆盖 `8001`。
-constexpr auto kInfoWaveInputMode = RefereeInputSourceMode::kReal;
+constexpr auto kInfoWaveInputMode = RefereeInputSourceMode::kFile;
 /// 信息波 `8001` 回放文件路径，模式为 `kFile` 时必须非空。
-constexpr const char *kInfoWaveReplayFile = "/home/hanni/Radar/test/info/outputInfo.bin";
+constexpr const char *kInfoWaveReplayFile = "/home/hanni/Radar/test/info/5.30WMJvsIROBOT/raw_tcp_8001.bin";
 /// 信息波 `8001` 回放频率，单位 Hz；文件回放按完整协议帧节拍推进。
 constexpr int kInfoWaveReplayRateHz = 50;
 /// 信息波位置数据对端服务端端口。
@@ -83,6 +83,8 @@ constexpr const char *kEnemyLevel2KeyReplayFile = "/home/hanni/Radar/test/info/5
 constexpr int kEnemyLevel2KeyReplayRateHz = 10;
 /// 敌方二级密钥对端服务端端口。
 constexpr int kEnemyLevel2KeyTcpServerPort = 8003;
+/// 敌方密钥 TCP 模拟器监听地址；`0.0.0.0` 表示监听所有网卡。
+constexpr const char *kEnemyKeySimulatorBindAddress = "0.0.0.0";
 /// `0x0305` 最小发送间隔。
 constexpr int kMapRobotMinSendIntervalMs = 200;
 /// 可修改己方密钥时按顺序使用的预置密钥。

@@ -24,6 +24,7 @@
 #include "include/referee/tcp_client.hpp"
 #include "include/referee/tcp_connection_log.hpp"
 #include "include/referee/tcp_server.hpp"
+#include "include/referee/ui_user1_sender.hpp"
 #include "librm/device/referee/referee.hpp"
 
 namespace {
@@ -92,6 +93,7 @@ int main() {
     radar::log::BinaryLogStore raw_log_store(run_log_root);
     radar::referee::RefereeTxScheduler tx_scheduler(serial, run_log_root);
     radar::referee::RadarCommandSender radar_command_sender(tx_scheduler, run_log_root);
+    radar::referee::UiUser1Sender<kRevision> ui_user1_sender(radar_command_sender, tx_scheduler, run_log_root);
     radar::referee::RadarDecisionTree<kRevision> radar_decision_tree(radar_command_sender);
     radar::referee::MapRobotRelay<kRevision> relay(tx_scheduler, run_log_root);
     radar::referee::ExternalServerSender external_server_sender(external_tcp_server ? &*external_tcp_server : nullptr,
@@ -166,12 +168,15 @@ int main() {
 
     // 串口主协议回调：维护常规链路结构体，并驱动自主决策树。
     serial_referee.AttachCallback([&](rm::u16 cmd_id, rm::u8 seq) {
+      radar_command_sender.UpdateAllySideFromRobotId(serial_referee.data().robot_status.robot_id);
+      ui_user1_sender.ProcessSerial(cmd_id, serial_referee.data());
       relay.ProcessSerial(cmd_id, seq, serial_referee);
       radar_decision_tree.ProcessSerial(cmd_id, seq, serial_referee);
       external_server_sender.ProcessSerial(cmd_id, seq, serial_referee.data());
     });
     // 信息波回调：维护 `0x0A01~0x0A06` 状态，并结合串口 `0x0301/0x0200` 驱动 `0x0305` 组包链路。
     info_wave_referee.AttachCallback([&](rm::u16 cmd_id, rm::u8 seq) {
+      ui_user1_sender.ProcessInfoWave(cmd_id, info_wave_referee.data());
       relay.ProcessInfoWaveTcp(cmd_id, seq, info_wave_referee);
     });
 
@@ -185,7 +190,8 @@ int main() {
                                                    enemy_level2_key_replay_source ? &*enemy_level2_key_replay_source
                                                                                   : nullptr,
                                                    enemy_level1_key_receiver, enemy_level2_key_receiver,
-                                                   radar_command_sender, relay, external_server_sender, tx_scheduler,
+                                                   radar_command_sender, ui_user1_sender, relay, external_server_sender,
+                                                   tx_scheduler,
                                                    raw_log_store, external_tcp_server ? &*external_tcp_server : nullptr,
                                                    g_running);
 

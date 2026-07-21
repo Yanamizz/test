@@ -53,12 +53,52 @@ constexpr rm::u8 kRadarUpdateAllyKeyCommand = 1;
 constexpr rm::u8 kRadarVerifyOpponentKeyCommand = 2;
 /// 默认雷达发送方 ID。
 constexpr rm::u16 kDefaultRadarSenderId = 9;  // 9：红方雷达  109：蓝方雷达
+/// 红方雷达机器人 ID。
+constexpr rm::u16 kRedRadarRobotId = 9;
+/// 蓝方雷达机器人 ID。
+constexpr rm::u16 kBlueRadarRobotId = 109;
 /// 裁判系统服务器接收 ID。
 constexpr rm::u16 kRefereeServerReceiverId = 0x8080;
 /// `password_cmd=2` 冷却时间。
 constexpr int kRadarPasswordVerifyCooldownMs = 10000;
 /// 当前按 `0x020E` bit3-4 == 2 视为“对方干扰波状态为二级”。
 constexpr rm::u8 kEnemyLevel2RequiredInterferenceLevel = 2;
+
+/**
+ * @brief 当前己方阵营
+ */
+enum class RadarSide {
+  kUnknown,
+  kRed,
+  kBlue,
+};
+
+/**
+ * @brief 根据 `0x0201.robot_id` 识别己方阵营
+ */
+constexpr RadarSide DetectRadarSide(rm::u16 robot_id) {
+  if (robot_id == kRedRadarRobotId) {
+    return RadarSide::kRed;
+  }
+  if (robot_id == kBlueRadarRobotId) {
+    return RadarSide::kBlue;
+  }
+  return RadarSide::kUnknown;
+}
+
+/**
+ * @brief 返回阵营名称，供日志和状态展示使用
+ */
+constexpr const char *RadarSideName(RadarSide side) {
+  switch (side) {
+    case RadarSide::kRed:
+      return "red";
+    case RadarSide::kBlue:
+      return "blue";
+    default:
+      return "unknown";
+  }
+}
 
 /**
  * @brief 一次 `0x0121` 指令的上下文信息
@@ -131,6 +171,21 @@ class RadarCommandSender {
     cmd.password_cmd = kRadarNoPasswordCommand;
     return cmd;
   }
+
+  /**
+   * @brief 使用 `0x0201.robot_id` 更新当前己方阵营
+   * @param robot_id 当前机器人 ID
+   */
+  void UpdateAllySideFromRobotId(rm::u16 robot_id) {
+    current_robot_id_ = robot_id;
+    current_side_ = DetectRadarSide(robot_id);
+  }
+
+  /// 返回当前己方阵营。
+  RadarSide ally_side() const { return current_side_; }
+
+  /// 返回最近一次观测到的机器人 ID。
+  rm::u16 current_robot_id() const { return current_robot_id_; }
 
   /**
    * @brief 组包并提交一条 `0x0121` 指令
@@ -260,7 +315,18 @@ class RadarCommandSender {
    * @param ally_encryption_level 当前协议中的 bit3-4 值
    */
   void UpdateAllyEncryptionLevel(rm::u8 ally_encryption_level) {
+    if (ally_encryption_level > current_ally_encryption_level_) {
+      ++ally_encryption_level_upgrade_generation_;
+    }
     current_ally_encryption_level_ = ally_encryption_level;
+  }
+
+  /**
+   * @brief 返回己方干扰波等级实际升级的累计代次
+   * @note 仅当 `0x020E` bit3-4 的等级变大时递增；相同等级的重复帧不会递增。
+   */
+  std::size_t ally_encryption_level_upgrade_generation() const {
+    return ally_encryption_level_upgrade_generation_;
   }
 
   /**
@@ -338,8 +404,9 @@ class RadarCommandSender {
           << "\"decision\":\"" << context.decision << "\","
           << "\"cmd_id\":\"" << radar::log::HexU16(0x0301) << "\","
           << "\"sub_cmd_id\":\"" << radar::log::HexU16(rm::device::getCmd(cmd)) << "\","
-          << "\"sender_id\":" << sender_id << ','
-          << "\"receiver_id\":" << receiver_id << ','
+          << "\"ally_side\":\"" << RadarSideName(current_side_) << "\","
+          << "\"sender_id\":\"" << radar::log::HexU16(sender_id) << "\","
+          << "\"receiver_id\":\"" << radar::log::HexU16(receiver_id) << "\","
           << "\"frame_hex\":\"" << radar::log::HexBytes(frame, frame_len) << "\","
           << "\"context\":{"
           << "\"has_radar_info\":" << (context.has_radar_info ? "true" : "false") << ','
@@ -460,6 +527,9 @@ class RadarCommandSender {
   bool enemy_level1_key_sent_ = false;                ///< `8002` 密钥是否已真正发出
   bool enemy_level2_key_sent_ = false;                ///< `8003` 密钥是否已真正发出
   rm::u8 current_ally_encryption_level_ = 0;          ///< 最近一次 `0x020E` 解出的 bit3-4 干扰波等级
+  std::size_t ally_encryption_level_upgrade_generation_ = 0;  ///< 己方干扰波等级升级累计代次
+  rm::u16 current_robot_id_ = 0;                       ///< 最近一次 `0x0201.robot_id`
+  RadarSide current_side_ = RadarSide::kUnknown;       ///< 当前己方红蓝方
   rm::u8 radar_cmd_counter_ = kRadarInitialCommandCounter;  ///< 当前 `radar_cmd`
 };
 

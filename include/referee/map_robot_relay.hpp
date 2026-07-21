@@ -154,7 +154,7 @@ inline std::string BuildMapRobotLogEntry(const rm::device::MapRobotPosition &map
   std::ostringstream oss;
   oss << "{"
       << "\"timestamp\":\"" << radar::log::TimestampNow() << "\","
-      << "\"seq\":" << static_cast<unsigned>(frame[3]) << ','
+      << "\"seq\":\"" << radar::log::HexU8(frame[3]) << "\","
       << "\"cmd_id\":\"" << radar::log::HexU16(rm::device::getCmd(map)) << "\","
       << "\"name\":\"map_robot_data\","
       << "\"source_cmd\":\"" << radar::log::HexU16(0x0a01) << "\","

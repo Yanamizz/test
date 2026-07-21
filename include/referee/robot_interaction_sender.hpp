@@ -259,8 +259,8 @@ class RobotInteractionSender {
           << "\"decision\":\"" << context.decision << "\","
           << "\"cmd_id\":\"" << radar::log::HexU16(kRobotInteractionCmdId) << "\","
           << "\"sub_cmd_id\":\"" << radar::log::HexU16(sub_cmd_id) << "\","
-          << "\"sender_id\":" << sender_id << ','
-          << "\"receiver_id\":" << receiver_id << ','
+          << "\"sender_id\":\"" << radar::log::HexU16(sender_id) << "\","
+          << "\"receiver_id\":\"" << radar::log::HexU16(receiver_id) << "\","
           << "\"payload_len\":" << payload_size << ','
           << "\"frame_hex\":\"" << radar::log::HexBytes(frame, frame_len) << "\"}";
     log_store_.Append(std::filesystem::path("main") / "0x0301_robot_interaction.log", entry.str(),
@@ -286,8 +286,8 @@ class RobotInteractionSender {
           << "\"decision\":\"" << context.decision << "\","
           << "\"cmd_id\":\"" << radar::log::HexU16(kRobotInteractionCmdId) << "\","
           << "\"sub_cmd_id\":\"" << radar::log::HexU16(sub_cmd_id) << "\","
-          << "\"sender_id\":" << sender_id << ','
-          << "\"receiver_id\":" << receiver_id << ','
+          << "\"sender_id\":\"" << radar::log::HexU16(sender_id) << "\","
+          << "\"receiver_id\":\"" << radar::log::HexU16(receiver_id) << "\","
           << "\"payload_len\":" << payload_size << ','
           << "\"payload_hex\":\"" << radar::log::HexBytes(payload_view, payload_view_size) << "\"}";
     log_store_.Append(std::filesystem::path("main") / "0x0301_robot_interaction_rejected.log", entry.str(),
