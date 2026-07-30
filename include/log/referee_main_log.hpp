@@ -751,6 +751,31 @@ inline std::string FormatMainPayload(rm::u16 cmd_id, const rm::device::RefereePr
 }
 
 /**
+ * @brief 判断主协议帧是否需要生成结构体日志
+ * @note 过滤发往普通机器人、飞镖或哨兵的下行状态；雷达标记和雷达信息保留。
+ */
+template <rm::device::RefereeRevision revision>
+constexpr bool ShouldLogMainProtocolFrame(rm::u16 cmd_id) {
+  using Cmd = rm::device::RefereeCmdId<revision>;
+  switch (cmd_id) {
+    case Cmd::kRobotStatus:             // 0x0201
+    case Cmd::kPowerHeatData:           // 0x0202
+    case Cmd::kRobotPos:                // 0x0203
+    case Cmd::kBuff:                    // 0x0204
+    case Cmd::kHurtData:                // 0x0206
+    case Cmd::kShootData:               // 0x0207
+    case Cmd::kProjectileAllowance:     // 0x0208
+    case Cmd::kRfidStatus:              // 0x0209
+    case Cmd::kDartClientCmd:            // 0x020A
+    case Cmd::kGroundRobotPosition:     // 0x020B
+    case Cmd::kSentryInfo:              // 0x020D
+      return false;
+    default:
+      return true;
+  }
+}
+
+/**
  * @brief 主协议结构体日志维护器
  * @tparam revision 当前裁判协议版本
  */
@@ -775,7 +800,7 @@ class RefereeMainLogger {
    * @param loss_rate 当前链路丢包率
    */
   void LogFrame(rm::u16 cmd_id, rm::u8 seq, const Protocol &protocol, float loss_rate) {
-    if (!radar::config::kEnableMainProtocolStructLog) {
+    if (!radar::config::kEnableMainProtocolStructLog || !ShouldLogMainProtocolFrame<revision>(cmd_id)) {
       return;
     }
 

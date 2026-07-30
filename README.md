@@ -189,10 +189,19 @@ python3 test/serialtest.py
 命令格式为：
 
 ```bash
-./build/bin/ui_sender_test [red|blue] [add|edit]
+./build/bin/ui_sender_test [red|blue] [add|edit] [sender_id]
 ```
 
 参数均可省略，默认等价于 `red add`。`add` 用于首次创建五个 UIDrone 图元，`edit` 用于修改已经存在的同名图元；当前测试值写在程序内，图元名称为 `yaw`、`pit`、`adj`、`isp`、`cya`。
+
+默认发送方为对应阵营雷达（红方 `9`、蓝方 `109`）。如需模拟红方空中机器人向红方空中机器人选手端发送，可指定发送方 ID `6`：
+
+```bash
+./build/bin/ui_sender_test red add 6
+./build/bin/ui_sender_test red edit 6
+```
+
+此模式接收方固定为红方空中机器人选手端 `0x0106`。
 
 红蓝方目标示例：
 
@@ -203,6 +212,19 @@ python3 test/serialtest.py
 ```
 
 红方使用发送方机器人 ID `9`，目标为友方空中机器人选手端 `0x0106`；蓝方使用发送方机器人 ID `109`，目标为 `0x016A`。程序发送成功后会输出帧长度和 `frame_hex`，串口打开或写入失败会返回非零状态。
+
+`edit` 模式发送初始值后会保持运行，可在终端实时修改并立即发送：
+
+```text
+yaw 20
+pitch -5
+ammo 40
+speed 28.5
+cmd_yaw 18
+all 20 -5 40 28.5 18
+show
+quit
+```
 
 ## 日志与可观测性
 

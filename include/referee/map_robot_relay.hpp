@@ -131,8 +131,27 @@ rm::device::MapRobotPosition BuildMapRobotPosition(const rm::device::RefereeProt
   map.ally_infantry_4_position_y = FloatMetersToCentimeters(ally.standard_4_y);
   map.ally_aerial_position_x = 0;
   map.ally_aerial_position_y = 0;
-  map.ally_sentry_position_x = FloatMetersToCentimeters(ally.reserved_1);
-  map.ally_sentry_position_y = FloatMetersToCentimeters(ally.reserved_2);
+  if (radar::config::kMapRobotUseFixedAllyRobotPositions) {
+    const auto &fixed = radar::config::kMapRobotFixedAllyRobotPositionsCm;
+    map.ally_hero_position_x = fixed[0][0];
+    map.ally_hero_position_y = fixed[0][1];
+    map.ally_engineer_position_x = fixed[1][0];
+    map.ally_engineer_position_y = fixed[1][1];
+    map.ally_infantry_3_position_x = fixed[2][0];
+    map.ally_infantry_3_position_y = fixed[2][1];
+    map.ally_infantry_4_position_x = fixed[3][0];
+    map.ally_infantry_4_position_y = fixed[3][1];
+    map.ally_aerial_position_x = fixed[4][0];
+    map.ally_aerial_position_y = fixed[4][1];
+    map.ally_sentry_position_x = fixed[5][0];
+    map.ally_sentry_position_y = fixed[5][1];
+  } else if (radar::config::kMapRobotUseFixedAllySentryPosition) {
+    map.ally_sentry_position_x = radar::config::kMapRobotFixedAllySentryPositionX;
+    map.ally_sentry_position_y = radar::config::kMapRobotFixedAllySentryPositionY;
+  } else {
+    map.ally_sentry_position_x = FloatMetersToCentimeters(ally.reserved_1);
+    map.ally_sentry_position_y = FloatMetersToCentimeters(ally.reserved_2);
+  }
 
   return map;
 }

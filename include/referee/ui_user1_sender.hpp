@@ -6,8 +6,8 @@
  * @brief UIuser1 的 Linux 主链发送适配
  *
  * 将嵌入式 UIuser1 中的“对方信息波”图元改为项目侧状态和统一
- * `0x0301` 调度器发送。目标为己方英雄、3/4 号步兵和空中机器人选手端，
- * 刻意排除工程和 5 号步兵选手端。
+ * `0x0301` 调度器发送。目标为己方英雄、工程、3/4 号步兵和空中机器人选手端，
+ * 刻意排除 5 号步兵选手端。
  */
 
 #include <array>
@@ -36,7 +36,12 @@ class UiUser1Sender {
 
   static constexpr rm::u8 kPreMatchProgress = 0x03;
   static constexpr rm::u8 kMatchStartedProgress = 0x04;
-  static constexpr int kEditIntervalMs = 1000;
+  static constexpr rm::u8 kEnemyRobotDeadStatus = 1;
+  static constexpr rm::u8 kEnemyRobotInvincibleStatus = 2;
+  static constexpr rm::u8 kEnemyRobotInvincibleWeakStatus = 3;
+  // 每次编辑向 5 个客户端发送 HP 与发弹量各一帧，共 10 帧；500ms 对应约 20Hz。
+  // 实际总发送频率仍由 RefereeTxScheduler 的 34ms 全局 0x0301 间隔限制在 30Hz 以下。
+  static constexpr int kEditIntervalMs = 500;
 
   UiUser1Sender(RadarCommandSender &radar_command_sender, RefereeTxScheduler &tx_scheduler,
                 std::filesystem::path log_root = RADAR_DEFAULT_LOG_DIR)
@@ -44,15 +49,18 @@ class UiUser1Sender {
         interaction_sender_(tx_scheduler, [this]() { return ResolveSenderId(); }, std::move(log_root)) {}
 
   /**
-   * @brief 处理常规链路帧，仅在 game_progress 由 3 上升到 4 时启动本轮 UI 注册
+   * @brief 处理常规链路帧，实机检测 3->4，回放首次收到 4 时启动本轮 UI 注册
    */
   void ProcessSerial(rm::u16 cmd_id, const Protocol &protocol) {
     if (cmd_id == Cmd::kGameStatus) {
       const auto current_progress = static_cast<rm::u8>(protocol.game_status.game_progress);
-      const bool match_start_edge = last_game_progress_.has_value() &&
-                                     *last_game_progress_ == kPreMatchProgress &&
-                                     current_progress == kMatchStartedProgress;
-      if (match_start_edge) {
+      const bool match_start_edge = last_game_progress_.has_value() && *last_game_progress_ == kPreMatchProgress &&
+                                    current_progress == kMatchStartedProgress;
+      // 回放文件通常从比赛进行中开始，可能没有记录到 0x03；首次 0x04 也应启动回放 UI。
+      const bool replay_started_in_progress =
+          radar::config::kSerialRefereeInputMode == radar::config::RefereeInputSourceMode::kFile &&
+          !last_game_progress_.has_value() && current_progress == kMatchStartedProgress;
+      if (match_start_edge || replay_started_in_progress) {
         BeginMatchRegistration();
       } else if (current_progress == kPreMatchProgress) {
         match_started_ = false;
@@ -71,6 +79,9 @@ class UiUser1Sender {
     }
     info_protocol_ = &protocol;
     info_wave_seen_ = true;
+    if (cmd_id == Cmd::kRadar4) {
+      radar4_seen_ = true;
+    }
   }
 
   /**
@@ -88,6 +99,7 @@ class UiUser1Sender {
     }
 
     QueueEditFrames(*info_protocol_);
+    hp_blink_phase_ = !hp_blink_phase_;
     last_edit_time_ = now;
   }
 
@@ -100,17 +112,18 @@ class UiUser1Sender {
     ui_registration_attempted_ = false;
     ui_registered_ = false;
     info_wave_seen_ = false;
+    radar4_seen_ = false;
     info_protocol_ = nullptr;
     last_edit_time_.reset();
   }
 
-  static constexpr std::array<rm::u16, 4> TargetClientIds(RadarSide side) {
-    // 仅向己方选手端注册：工程（0x0102/0x0166）和 5 号步兵（0x0105/0x0169）不在列表中。
+  static constexpr std::array<rm::u16, 5> TargetClientIds(RadarSide side) {
+    // 仅向己方选手端注册，排除 5 号步兵（0x0105/0x0169）。
     if (side == RadarSide::kRed) {
-      return {0x0101, 0x0103, 0x0104, 0x0106};
+      return {0x0101, 0x0102, 0x0103, 0x0104, 0x0106};
     }
     if (side == RadarSide::kBlue) {
-      return {0x0165, 0x0167, 0x0168, 0x016a};
+      return {0x0165, 0x0166, 0x0167, 0x0168, 0x016a};
     }
     return {};
   }
@@ -173,8 +186,9 @@ class UiUser1Sender {
   }
 
   rm::device::UICharacter BuildHeader(Operation operation) const {
+    // UIuser1 的三字符命名空间统一使用 R 前缀，避免与同一接收端的其他 UI 冲突。
     rm::device::UICharacter header{};
-    header.character.fillCharacter("Hed", operation, 0, rm::device::UIFigure::Color::Orange, 6,
+    header.character.fillCharacter("RHD", operation, 0, rm::device::UIFigure::Color::Orange, 6,
                                    IsOpponentRed() ? 55 : 1170, 890, 24, 29);
     if (IsOpponentRed()) {
       std::memcpy(header.data, "SEN7 DRO6 STD4 STD3 ENG2 HRO1", 29);
@@ -200,15 +214,49 @@ class UiUser1Sender {
     }
   }
 
+  bool IsOpponentRobotDead(const Protocol &protocol, std::size_t index) const {
+    if constexpr (revision == rm::device::RefereeRevision::kNewV200) {
+      if (!radar4_seen_) {
+        return false;
+      }
+      const std::array<rm::u8, 5> statuses{
+          protocol.radar4.enemy_hero_status, protocol.radar4.enemy_engineer_status,
+          protocol.radar4.enemy_infantry_3_status, protocol.radar4.enemy_infantry_4_status,
+          protocol.radar4.enemy_sentry_status};
+      return statuses[index] == kEnemyRobotDeadStatus;
+    } else {
+      // V120 的 radar4 没有逐机器人生死 status。
+      static_cast<void>(protocol);
+      static_cast<void>(index);
+      return false;
+    }
+  }
+
+  bool IsOpponentRobotInvincible(const Protocol &protocol, std::size_t index) const {
+    if constexpr (revision == rm::device::RefereeRevision::kNewV200) {
+      if (radar4_seen_) {
+        const std::array<rm::u8, 5> statuses{
+            protocol.radar4.enemy_hero_status, protocol.radar4.enemy_engineer_status,
+            protocol.radar4.enemy_infantry_3_status, protocol.radar4.enemy_infantry_4_status,
+            protocol.radar4.enemy_sentry_status};
+        if (statuses[index] == kEnemyRobotInvincibleStatus ||
+            statuses[index] == kEnemyRobotInvincibleWeakStatus) {
+          return true;
+        }
+      }
+    }
+    // 部分链路只提供防御增益，没有逐机器人 status；达到 100% 也按无敌显示。
+    return DefenceBuff(protocol, index) >= 100;
+  }
+
   rm::device::UIFigure7 BuildHp(Operation operation, const Protocol *protocol) const {
     // UIuser1 的嵌入式版本从 robot_custom_data_3 读取 5 个自定义血量值；
     // Linux 主链没有该自定义字段的语义定义，因此使用信息波 0x0A02/radar1
     // 中同样的对方英雄、工程、3/4 号步兵和哨兵血量。
     // 固定客户端屏幕方向并镜像排列：英雄靠近屏幕中心，向外依次为工程、
     // 3/4 号步兵、空中机器人和哨兵。
-    const std::array<rm::u16, 5> x = IsOpponentRed()
-                                         ? std::array<rm::u16, 5>{55, 295, 415, 535, 655}
-                                         : std::array<rm::u16, 5>{1170, 1290, 1410, 1530, 1770};
+    const std::array<rm::u16, 5> x = IsOpponentRed() ? std::array<rm::u16, 5>{55, 295, 415, 535, 655}
+                                                     : std::array<rm::u16, 5>{1170, 1290, 1410, 1530, 1770};
     const auto y = static_cast<rm::u16>(850);
     std::array<rm::u16, 5> values{};
     if (operation == Operation::Edit && protocol != nullptr) {
@@ -227,23 +275,37 @@ class UiUser1Sender {
     rm::device::UIFigure7 ui{};
     const auto color = [&](std::size_t index) {
       const auto defence_index = IsOpponentRed() ? 4 - index : index;
-      return operation == Operation::Edit && protocol != nullptr && DefenceBuff(*protocol, defence_index) >= 100
-                 ? rm::device::UIFigure::Color::Yellow
-                 : rm::device::UIFigure::Color::RedBlue;
+      // status=1 或 HP=0 都视为战亡，优先于低血量闪烁并固定显示白色。
+      if (operation == Operation::Edit && protocol != nullptr &&
+          (values[index] == 0 || IsOpponentRobotDead(*protocol, defence_index))) {
+        return rm::device::UIFigure::Color::White;
+      }
+      if (operation == Operation::Edit && protocol != nullptr &&
+          IsOpponentRobotInvincible(*protocol, defence_index)) {
+        return rm::device::UIFigure::Color::Magenta;
+      }
+      if (operation == Operation::Edit && protocol != nullptr) {
+        if (values[index] <= 50) {
+          return hp_blink_phase_ ? rm::device::UIFigure::Color::Yellow
+                                 : rm::device::UIFigure::Color::RedBlue;
+        }
+        if (values[index] <= 100) {
+          return rm::device::UIFigure::Color::Yellow;
+        }
+      }
+      return rm::device::UIFigure::Color::RedBlue;
     };
-    ui.figure1.fillIntegrate("HP1", operation, 0, color(0), 4, x[0], y, 20, values[0]);
-    ui.figure2.fillIntegrate("HP2", operation, 0, color(1), 4, x[1], y, 20, values[1]);
-    ui.figure3.fillIntegrate("HP3", operation, 0, color(2), 4, x[2], y, 20, values[2]);
-    ui.figure4.fillIntegrate("HP4", operation, 0, color(3), 4, x[3], y, 20, values[3]);
-    ui.figure5.fillIntegrate("HP5", operation, 0, color(4), 4, x[4], y, 20, values[4]);
-    ui.figure6.fillIntegrate("sco", operation, 0, rm::device::UIFigure::Color::RedBlue, 4,
-                             IsOpponentRed() ? 860 : 988, 900, 18,
-                             operation == Operation::Edit && protocol != nullptr ? protocol->radar3.enemy_total_gold_coin
-                                                                                   : 0);
-    ui.figure7.fillIntegrate("cco", operation, 0, rm::device::UIFigure::Color::White, 4,
-                             IsOpponentRed() ? 860 : 988, 865, 24,
-                             operation == Operation::Edit && protocol != nullptr ? protocol->radar3.enemy_remaining_gold_coin
-                                                                                   : 0);
+    ui.figure1.fillIntegrate("RH1", operation, 0, color(0), 4, x[0], y, 20, values[0]);
+    ui.figure2.fillIntegrate("RH2", operation, 0, color(1), 4, x[1], y, 20, values[1]);
+    ui.figure3.fillIntegrate("RH3", operation, 0, color(2), 4, x[2], y, 20, values[2]);
+    ui.figure4.fillIntegrate("RH4", operation, 0, color(3), 4, x[3], y, 20, values[3]);
+    ui.figure5.fillIntegrate("RH5", operation, 0, color(4), 4, x[4], y, 20, values[4]);
+    ui.figure6.fillIntegrate(
+        "RTC", operation, 0, rm::device::UIFigure::Color::RedBlue, 4, IsOpponentRed() ? 860 : 988, 900, 18,
+        operation == Operation::Edit && protocol != nullptr ? protocol->radar3.enemy_total_gold_coin : 0);
+    ui.figure7.fillIntegrate(
+        "RRC", operation, 0, rm::device::UIFigure::Color::White, 4, IsOpponentRed() ? 860 : 988, 865, 24,
+        operation == Operation::Edit && protocol != nullptr ? protocol->radar3.enemy_remaining_gold_coin : 0);
     return ui;
   }
 
@@ -256,16 +318,14 @@ class UiUser1Sender {
   }
 
   rm::device::UIFigure5 BuildAllowance(Operation operation, const Protocol *protocol) const {
-    const std::array<rm::u16, 5> x = IsOpponentRed()
-                                         ? std::array<rm::u16, 5>{55, 175, 295, 415, 655}
-                                         : std::array<rm::u16, 5>{1170, 1410, 1530, 1650, 1770};
+    const std::array<rm::u16, 5> x = IsOpponentRed() ? std::array<rm::u16, 5>{55, 175, 295, 415, 655}
+                                                     : std::array<rm::u16, 5>{1170, 1410, 1530, 1650, 1770};
     std::array<rm::u16, 5> values{};
     if (operation == Operation::Edit && protocol != nullptr) {
       if (IsOpponentRed()) {
         values = {protocol->radar2.opponent_sentry_allowance_ammo, AerialAllowance(*protocol),
                   protocol->radar2.opponent_infantry_4_allowance_ammo,
-                  protocol->radar2.opponent_infantry_3_allowance_ammo,
-                  protocol->radar2.opponent_hero_allowance_ammo};
+                  protocol->radar2.opponent_infantry_3_allowance_ammo, protocol->radar2.opponent_hero_allowance_ammo};
       } else {
         values = {protocol->radar2.opponent_hero_allowance_ammo, protocol->radar2.opponent_infantry_3_allowance_ammo,
                   protocol->radar2.opponent_infantry_4_allowance_ammo, AerialAllowance(*protocol),
@@ -274,11 +334,11 @@ class UiUser1Sender {
     }
 
     rm::device::UIFigure5 ui{};
-    ui.figure1.fillIntegrate("AL1", operation, 0, rm::device::UIFigure::Color::White, 4, x[0], 810, 16, values[0]);
-    ui.figure2.fillIntegrate("AL2", operation, 0, rm::device::UIFigure::Color::White, 4, x[1], 810, 16, values[1]);
-    ui.figure3.fillIntegrate("AL3", operation, 0, rm::device::UIFigure::Color::White, 4, x[2], 810, 16, values[2]);
-    ui.figure4.fillIntegrate("AL4", operation, 0, rm::device::UIFigure::Color::White, 4, x[3], 810, 16, values[3]);
-    ui.figure5.fillIntegrate("AL5", operation, 0, rm::device::UIFigure::Color::White, 4, x[4], 810, 16, values[4]);
+    ui.figure1.fillIntegrate("RA1", operation, 0, rm::device::UIFigure::Color::White, 4, x[0], 810, 16, values[0]);
+    ui.figure2.fillIntegrate("RA2", operation, 0, rm::device::UIFigure::Color::White, 4, x[1], 810, 16, values[1]);
+    ui.figure3.fillIntegrate("RA3", operation, 0, rm::device::UIFigure::Color::White, 4, x[2], 810, 16, values[2]);
+    ui.figure4.fillIntegrate("RA4", operation, 0, rm::device::UIFigure::Color::White, 4, x[3], 810, 16, values[3]);
+    ui.figure5.fillIntegrate("RA5", operation, 0, rm::device::UIFigure::Color::White, 4, x[4], 810, 16, values[4]);
     return ui;
   }
 
@@ -291,6 +351,8 @@ class UiUser1Sender {
   bool ui_registration_attempted_ = false;
   bool ui_registered_ = false;
   bool info_wave_seen_ = false;
+  bool radar4_seen_ = false;
+  bool hp_blink_phase_ = false;
   std::optional<rm::u8> last_game_progress_;
   std::optional<Clock::time_point> last_edit_time_;
 };

@@ -32,7 +32,7 @@ enum class RefereeInputSourceMode {
 /// 裁判系统协议版本唯一配置入口。
 constexpr auto kRefereeRevision = rm::device::RefereeRevision::kNewV200;
 /// 项目默认日志模式。
-constexpr auto kRadarLogMode = RadarLogMode::kDebug;
+constexpr auto kRadarLogMode = RadarLogMode::kMatch;
 /// 调试模式下允许缺失输入接口，缺失链路对应状态按 0 值处理。
 constexpr bool kDebugAllowMissingInterfaces = kRadarLogMode == RadarLogMode::kDebug;
 /// 是否保留逐帧主协议结构体快照日志；比赛模式下关闭以减轻主线程格式化压力。
@@ -46,13 +46,14 @@ constexpr const char *kFallbackRefereeDevice = "/dev/ttyusb0";
 /// 串口主协议输入模式。
 constexpr auto kSerialRefereeInputMode = RefereeInputSourceMode::kReal;
 /// 串口主协议回放文件路径，模式为 `kFile` 时必须非空。
-constexpr const char *kSerialRefereeReplayFile = "/home/hanni/Radar/test/info/5.30WMJvsIROBOT/raw_serial.bin";
+constexpr const char *kSerialRefereeReplayFile =
+    "/home/hanni/Radar/test/logs/20260722_171941_916/raw/serial_referee_rx.bin";
 /// 串口主协议回放频率，单位 Hz；文件回放按完整协议帧节拍推进。
 constexpr int kSerialRefereeReplayRateHz = 10;
 /// TCP 本机绑定地址；留空表示由系统按路由自动选择本机出口地址。
 constexpr const char *kTcpLocalBindAddress = "";
 /// TCP 对端服务端地址；`8001/8002/8003` 均主动连接到该地址。
-constexpr const char *kTcpServerAddress = "127.0.0.1";
+constexpr const char *kTcpServerAddress = "192.168.50.112";
 /// 是否启用额外的 TCP server 通道，供其他设备主动接入本程序。
 constexpr bool kExternalTcpServerEnabled = true;
 /// 额外 TCP server 的监听地址；`0.0.0.0` 表示监听所有网卡。
@@ -60,7 +61,7 @@ constexpr const char *kExternalTcpServerBindAddress = "0.0.0.0";
 /// 额外 TCP server 的监听端口。
 constexpr int kExternalTcpServerPort = 9001;
 /// 信息波输入模式，仅覆盖 `8001`。
-constexpr auto kInfoWaveInputMode = RefereeInputSourceMode::kFile;
+constexpr auto kInfoWaveInputMode = RefereeInputSourceMode::kReal;
 /// 信息波 `8001` 回放文件路径，模式为 `kFile` 时必须非空。
 constexpr const char *kInfoWaveReplayFile = "/home/hanni/Radar/test/info/5.30WMJvsIROBOT/raw_tcp_8001.bin";
 /// 信息波 `8001` 回放频率，单位 Hz；文件回放按完整协议帧节拍推进。
@@ -87,6 +88,23 @@ constexpr int kEnemyLevel2KeyTcpServerPort = 8003;
 constexpr const char *kEnemyKeySimulatorBindAddress = "0.0.0.0";
 /// `0x0305` 最小发送间隔。
 constexpr int kMapRobotMinSendIntervalMs = 200;
+/// 临时联调：固定 `0x0305` 全部己方机器人坐标，验证选手端地图显示链路。
+constexpr bool kMapRobotUseFixedAllyRobotPositions = false;
+/// 临时固定的己方机器人坐标，顺序为英雄、工程、3 号步兵、4 号步兵、空中、哨兵，单位 cm。
+constexpr std::array<std::array<rm::u16, 2>, 6> kMapRobotFixedAllyRobotPositionsCm{{
+    {{300, 300}},
+    {{500, 500}},
+    {{700, 700}},
+    {{900, 900}},
+    {{1100, 1100}},
+    {{1300, 1300}},
+}};
+/// 临时联调：仅固定 `0x0305` 己方哨兵坐标，兼容单字段实验。
+constexpr bool kMapRobotUseFixedAllySentryPosition = true;
+/// 临时固定的己方哨兵 X 坐标，单位 cm。
+constexpr rm::u16 kMapRobotFixedAllySentryPositionX = 1000;
+/// 临时固定的己方哨兵 Y 坐标，单位 cm。
+constexpr rm::u16 kMapRobotFixedAllySentryPositionY = 1000;
 /// 可修改己方密钥时按顺序使用的预置密钥。
 constexpr std::array<std::array<rm::u8, 6>, 3> kRadarPresetAllyKeys{{
     {{'A', '5', '0', '6', '0', '0'}},
