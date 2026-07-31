@@ -56,11 +56,11 @@ class UiUser1Sender {
       const auto current_progress = static_cast<rm::u8>(protocol.game_status.game_progress);
       const bool match_start_edge = last_game_progress_.has_value() && *last_game_progress_ == kPreMatchProgress &&
                                     current_progress == kMatchStartedProgress;
-      // 回放文件通常从比赛进行中开始，可能没有记录到 0x03；首次 0x04 也应启动回放 UI。
-      const bool replay_started_in_progress =
-          radar::config::kSerialRefereeInputMode == radar::config::RefereeInputSourceMode::kFile &&
-          !last_game_progress_.has_value() && current_progress == kMatchStartedProgress;
-      if (match_start_edge || replay_started_in_progress) {
+      // 程序可能在比赛已经开始后才启动；首次观察到 0x04 也应注册 UI，
+      // 否则真实串口没有记录到 0x03 时会一直错过本轮注册。
+      const bool first_observed_in_progress = !last_game_progress_.has_value() &&
+                                              current_progress == kMatchStartedProgress;
+      if (match_start_edge || first_observed_in_progress) {
         BeginMatchRegistration();
       } else if (current_progress == kPreMatchProgress) {
         match_started_ = false;
@@ -111,9 +111,13 @@ class UiUser1Sender {
     match_started_ = true;
     ui_registration_attempted_ = false;
     ui_registered_ = false;
-    info_wave_seen_ = false;
-    radar4_seen_ = false;
-    info_protocol_ = nullptr;
+    // 文件回放通常先于真实串口的比赛状态到达；保留最近一份信息波快照，
+    // 使 UI 注册完成后仍能立即发送 edit_* 数值帧，而不是只发送全 0 的 Add 帧。
+    if (radar::config::kInfoWaveInputMode != radar::config::RefereeInputSourceMode::kFile) {
+      info_wave_seen_ = false;
+      radar4_seen_ = false;
+      info_protocol_ = nullptr;
+    }
     last_edit_time_.reset();
   }
 

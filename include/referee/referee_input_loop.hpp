@@ -85,7 +85,8 @@ struct RefereeInputLoopRuntime {
 };
 
 template <typename SerialReferee, typename InfoWaveReferee, typename EnemyKeyReceiverT, typename RadarCommandSenderT,
-          typename UiUserSenderT, typename MapRobotRelayT, typename ExternalServerSenderT>
+          typename UiUserSenderT, typename MapRobotRelayT, typename ExternalServerSenderT,
+          typename DoubleDebuffFallbackT>
 struct RefereeInputLoopServices {
   SerialPort &serial;
   TcpClient &info_wave_tcp;
@@ -103,6 +104,7 @@ struct RefereeInputLoopServices {
   UiUserSenderT &ui_user_sender;
   MapRobotRelayT &map_robot_relay;
   ExternalServerSenderT &external_server_sender;
+  DoubleDebuffFallbackT &double_debuff_fallback;
   RefereeTxScheduler &tx_scheduler;
   radar::log::BinaryLogStore &raw_log_store;
   TcpServer *external_tcp_server = nullptr;
@@ -126,7 +128,6 @@ struct RefereeInputLoopState {
   bool level2_connect_retry_state_logged = false;
   bool external_server_retry_state_logged = false;
   bool map_robot_early_send_attempted_this_loop = false;
-  std::optional<std::size_t> level1_key_completion_upgrade_generation;
   std::optional<Clock::time_point> drain_deadline;
 };
 
@@ -143,12 +144,13 @@ struct RefereeInputPollPlan {
 };
 
 template <typename SerialReferee, typename InfoWaveReferee, typename EnemyKeyReceiverT, typename RadarCommandSenderT,
-          typename UiUserSenderT, typename MapRobotRelayT, typename ExternalServerSenderT>
+          typename UiUserSenderT, typename MapRobotRelayT, typename ExternalServerSenderT,
+          typename DoubleDebuffFallbackT>
 class RefereeInputLoopRunner {
  public:
   using Services =
       RefereeInputLoopServices<SerialReferee, InfoWaveReferee, EnemyKeyReceiverT, RadarCommandSenderT, UiUserSenderT,
-                               MapRobotRelayT, ExternalServerSenderT>;
+                               MapRobotRelayT, ExternalServerSenderT, DoubleDebuffFallbackT>;
   using Clock = RefereeInputLoopRuntime::Clock;
 
   RefereeInputLoopRunner(RefereeInputLoopRuntime &runtime, Services &services, RefereeInputLoopState &state)
@@ -170,14 +172,10 @@ class RefereeInputLoopRunner {
                             !runtime_.info_wave_input_is_file, true, state_.last_info_wave_connect_attempt_time,
                             state_.info_wave_connect_retry_state_logged);
       TryReconnectTcpClient(services_.enemy_level1_key_tcp, "enemy_level1_key_tcp",
-                            radar::config::kEnemyLevel1KeyTcpServerPort,
-                            !runtime_.enemy_level1_input_is_file && !services_.enemy_level1_key_receiver.completed(),
-                            true,
+                            radar::config::kEnemyLevel1KeyTcpServerPort, !runtime_.enemy_level1_input_is_file, true,
                             state_.last_level1_connect_attempt_time, state_.level1_connect_retry_state_logged);
       TryReconnectTcpClient(services_.enemy_level2_key_tcp, "enemy_level2_key_tcp",
-                            radar::config::kEnemyLevel2KeyTcpServerPort,
-                            !runtime_.enemy_level2_input_is_file && !services_.enemy_level2_key_receiver.completed(),
-                            true,
+                            radar::config::kEnemyLevel2KeyTcpServerPort, !runtime_.enemy_level2_input_is_file, true,
                             state_.last_level2_connect_attempt_time, state_.level2_connect_retry_state_logged);
       TryReopenExternalServer();
 
@@ -216,10 +214,10 @@ class RefereeInputLoopRunner {
       TryFastPathMapRobotSend();
       HandleEnemyKeyEvents(poll_plan, services_.enemy_level1_key_tcp, services_.enemy_level1_key_receiver,
                            poll_plan.level1_index, radar::config::kEnemyLevel1KeyTcpServerPort,
-                           "enemy_level1_key_tcp", "raw/tcp_8002_enemy_level1_key_rx.bin", false);
+                           "enemy_level1_key_tcp", "raw/tcp_8002_enemy_level1_key_rx.bin");
       HandleEnemyKeyEvents(poll_plan, services_.enemy_level2_key_tcp, services_.enemy_level2_key_receiver,
                            poll_plan.level2_index, radar::config::kEnemyLevel2KeyTcpServerPort,
-                           "enemy_level2_key_tcp", "raw/tcp_8003_enemy_level2_key_rx.bin", true);
+                           "enemy_level2_key_tcp", "raw/tcp_8003_enemy_level2_key_rx.bin");
       HandleExternalServerEvents(poll_plan);
 
       ServicePeriodicTasks(loop_start);
@@ -384,12 +382,8 @@ class RefereeInputLoopRunner {
     }
 
     AddTcpClientPollFd(services_.info_wave_tcp, !runtime_.info_wave_input_is_file, plan.info_wave_index, plan);
-    AddTcpClientPollFd(services_.enemy_level1_key_tcp,
-                       !runtime_.enemy_level1_input_is_file && !services_.enemy_level1_key_receiver.completed(),
-                       plan.level1_index, plan);
-    AddTcpClientPollFd(services_.enemy_level2_key_tcp,
-                       !runtime_.enemy_level2_input_is_file && !services_.enemy_level2_key_receiver.completed(),
-                       plan.level2_index, plan);
+    AddTcpClientPollFd(services_.enemy_level1_key_tcp, !runtime_.enemy_level1_input_is_file, plan.level1_index, plan);
+    AddTcpClientPollFd(services_.enemy_level2_key_tcp, !runtime_.enemy_level2_input_is_file, plan.level2_index, plan);
 
     if (services_.external_tcp_server != nullptr && services_.external_tcp_server->is_open()) {
       plan.external_listener_index = plan.nfds;
@@ -489,9 +483,14 @@ class RefereeInputLoopRunner {
     }
   }
 
+  /**
+   * @brief 处理一路敌方密钥 TCP 的连接与接收事件
+   * @note 本链路全程保持接收：收到合法密钥后既不停止解析也不关闭连接，
+   *       后续新密钥会继续入栈，由 `RadarCommandSender` 按当前干扰波等级取用。
+   */
   void HandleEnemyKeyEvents(const RefereeInputPollPlan &poll_plan, TcpClient &client, EnemyKeyReceiverT &receiver,
                             const std::optional<nfds_t> &index, int connect_port, const char *name,
-                            const char *raw_log_path, bool close_on_completion) {
+                            const char *raw_log_path) {
     if (!index.has_value()) {
       return;
     }
@@ -517,22 +516,14 @@ class RefereeInputLoopRunner {
 
         ++successful_reads;
         services_.raw_log_store.Append(raw_log_path, runtime_.read_buffer.data(), bytes_read);
-        if (receiver.ProcessBytes(runtime_.read_buffer.data(), bytes_read, services_.serial_referee.data())) {
-          if (close_on_completion) {
-            client.Stop();
-          } else {
-            state_.level1_key_completion_upgrade_generation =
-                services_.radar_command_sender.ally_encryption_level_upgrade_generation();
-          }
-          break;
-        }
+        receiver.ProcessBytes(runtime_.read_buffer.data(), bytes_read, services_.serial_referee.data());
       }
       if (successful_reads > 1) {
         runtime_.metrics.RecordMultiReadDrain(connect_port == radar::config::kEnemyLevel1KeyTcpServerPort ? "8002"
                                                                                                            : "8003");
       }
     }
-    if (!receiver.completed() && (revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+    if ((revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
       const auto port = client.port();
       const std::string peer = client.peer_ip().empty() ? radar::config::kTcpServerAddress : client.peer_ip();
       runtime_.tcp_log.LogClientState(name, radar::config::kTcpLocalBindAddress, port, peer, "disconnected",
@@ -622,26 +613,24 @@ class RefereeInputLoopRunner {
     if (!runtime_.info_wave_input_is_file) {
       log_connect_timeout(services_.info_wave_tcp, "info_wave_tcp");
     }
-    if (!runtime_.enemy_level1_input_is_file && !services_.enemy_level1_key_receiver.completed()) {
+    if (!runtime_.enemy_level1_input_is_file) {
       log_connect_timeout(services_.enemy_level1_key_tcp, "enemy_level1_key_tcp");
     }
-    if (!runtime_.enemy_level2_input_is_file && !services_.enemy_level2_key_receiver.completed()) {
+    if (!runtime_.enemy_level2_input_is_file) {
       log_connect_timeout(services_.enemy_level2_key_tcp, "enemy_level2_key_tcp");
     }
 
     if (services_.info_wave_tcp.CloseIdleClientIfTimedOut(kInfoWaveTcpIdleTimeoutMs)) {
       runtime_.metrics.RecordTcpIdleDisconnect(services_.info_wave_tcp.port());
     }
-    if (!runtime_.enemy_level1_input_is_file && !services_.enemy_level1_key_receiver.completed() &&
+    if (!runtime_.enemy_level1_input_is_file &&
         services_.enemy_level1_key_tcp.CloseIdleClientIfTimedOut(kEnemyKeyTcpIdleTimeoutMs)) {
       runtime_.metrics.RecordTcpIdleDisconnect(services_.enemy_level1_key_tcp.port());
     }
-    if (!runtime_.enemy_level2_input_is_file && !services_.enemy_level2_key_receiver.completed() &&
+    if (!runtime_.enemy_level2_input_is_file &&
         services_.enemy_level2_key_tcp.CloseIdleClientIfTimedOut(kEnemyKeyTcpIdleTimeoutMs)) {
       runtime_.metrics.RecordTcpIdleDisconnect(services_.enemy_level2_key_tcp.port());
     }
-
-    CloseEnemyLevel1KeyTcpAfterAllyInterferenceWaveUpgrade();
 
     const std::string external_peer =
         services_.external_tcp_server != nullptr ? services_.external_tcp_server->peer_ip() : std::string();
@@ -657,9 +646,9 @@ class RefereeInputLoopRunner {
       services_.map_robot_relay.ProcessPeriodic();
     }
     services_.ui_user_sender.ProcessPeriodic();
-    services_.enemy_level1_key_receiver.ProcessDeferredQueueing();
-    services_.enemy_level2_key_receiver.ProcessDeferredQueueing();
     services_.radar_command_sender.ProcessPending(services_.serial_referee.data());
+    // 放在密钥验证之后：`0x0301` FIFO 内让更稀缺的 `password_cmd=2` 先占位。
+    services_.double_debuff_fallback.ProcessPeriodic(services_.serial_referee.data());
     services_.external_server_sender.ProcessPeriodic();
     services_.tx_scheduler.Process();
 
@@ -667,31 +656,6 @@ class RefereeInputLoopRunner {
     const auto loop_duration = std::chrono::duration_cast<std::chrono::microseconds>(loop_end - loop_start);
     runtime_.metrics.RecordLoopIteration(loop_duration, loop_duration);
     runtime_.metrics.MaybeFlush();
-  }
-
-  /**
-   * @brief 在一级敌方密钥接收完成后，等待己方干扰波等级实际升级再关闭 `8002`
-   * @note 等级升级由 `0x020E` bit3-4 从较低值变为较高值触发；收到密钥本身不会关闭连接。
-   */
-  void CloseEnemyLevel1KeyTcpAfterAllyInterferenceWaveUpgrade() {
-    if (!state_.level1_key_completion_upgrade_generation.has_value() ||
-        !services_.enemy_level1_key_tcp.is_open()) {
-      return;
-    }
-
-    const auto current_upgrade_generation =
-        services_.radar_command_sender.ally_encryption_level_upgrade_generation();
-    if (current_upgrade_generation <= *state_.level1_key_completion_upgrade_generation) {
-      return;
-    }
-
-    const auto port = services_.enemy_level1_key_tcp.port();
-    const std::string peer = services_.enemy_level1_key_tcp.peer_ip().empty()
-                                 ? radar::config::kTcpServerAddress
-                                 : services_.enemy_level1_key_tcp.peer_ip();
-    services_.enemy_level1_key_tcp.Stop();
-    runtime_.tcp_log.LogClientState("enemy_level1_key_tcp", radar::config::kTcpLocalBindAddress, port, peer,
-                                    "disconnected", "ally_interference_wave_upgraded");
   }
 
   int SerialBaud() const {
@@ -798,9 +762,11 @@ class RefereeInputLoopRunner {
  * @tparam RadarCommandSenderT 雷达指令发送器类型
  * @tparam MapRobotRelayT `0x0305` relay 类型
  * @tparam ExternalServerSenderT 外部 TCP server 原始发送器类型
+ * @tparam DoubleDebuffFallbackT 双倍易伤保底机制类型
  */
 template <typename SerialReferee, typename InfoWaveReferee, typename EnemyKeyReceiverT, typename RadarCommandSenderT,
-          typename UiUserSenderT, typename MapRobotRelayT, typename ExternalServerSenderT>
+          typename UiUserSenderT, typename MapRobotRelayT, typename ExternalServerSenderT,
+          typename DoubleDebuffFallbackT>
 void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp, TcpClient &enemy_level1_key_tcp,
                                     TcpClient &enemy_level2_key_tcp, SerialReferee &serial_referee,
                                     InfoWaveReferee &info_wave_referee, ReplayInputSource *serial_replay,
@@ -810,7 +776,8 @@ void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp
                                     EnemyKeyReceiverT &enemy_level2_key_receiver,
                                     RadarCommandSenderT &radar_command_sender, UiUserSenderT &ui_user_sender,
                                     MapRobotRelayT &map_robot_relay,
-                                    ExternalServerSenderT &external_server_sender, RefereeTxScheduler &tx_scheduler,
+                                    ExternalServerSenderT &external_server_sender,
+                                    DoubleDebuffFallbackT &double_debuff_fallback, RefereeTxScheduler &tx_scheduler,
                                     radar::log::BinaryLogStore &raw_log_store, TcpServer *external_tcp_server,
                                     const std::atomic<bool> &running) {
   const bool serial_input_is_file =
@@ -826,29 +793,31 @@ void RunSerialInfoWaveAndKeyTcpLoop(SerialPort &serial, TcpClient &info_wave_tcp
                                           enemy_level1_input_is_file, enemy_level2_input_is_file);
   auto services =
       detail::RefereeInputLoopServices<SerialReferee, InfoWaveReferee, EnemyKeyReceiverT, RadarCommandSenderT,
-                                       UiUserSenderT, MapRobotRelayT, ExternalServerSenderT>{serial,
-                                                                              info_wave_tcp,
-                                                                              enemy_level1_key_tcp,
-                                                                              enemy_level2_key_tcp,
-                                                                              serial_referee,
-                                                                              info_wave_referee,
-                                                                              serial_replay,
-                                                                              info_wave_replay,
-                                                                              enemy_level1_key_replay,
-                                                                              enemy_level2_key_replay,
-                                                                              enemy_level1_key_receiver,
-                                                                              enemy_level2_key_receiver,
-                                                                              radar_command_sender,
-                                                                              ui_user_sender,
-                                                                              map_robot_relay,
-                                                                              external_server_sender,
-                                                                              tx_scheduler,
-                                                                              raw_log_store,
-                                                                              external_tcp_server,
-                                                                              running};
+                                       UiUserSenderT, MapRobotRelayT, ExternalServerSenderT,
+                                       DoubleDebuffFallbackT>{serial,
+                                                              info_wave_tcp,
+                                                              enemy_level1_key_tcp,
+                                                              enemy_level2_key_tcp,
+                                                              serial_referee,
+                                                              info_wave_referee,
+                                                              serial_replay,
+                                                              info_wave_replay,
+                                                              enemy_level1_key_replay,
+                                                              enemy_level2_key_replay,
+                                                              enemy_level1_key_receiver,
+                                                              enemy_level2_key_receiver,
+                                                              radar_command_sender,
+                                                              ui_user_sender,
+                                                              map_robot_relay,
+                                                              external_server_sender,
+                                                              double_debuff_fallback,
+                                                              tx_scheduler,
+                                                              raw_log_store,
+                                                              external_tcp_server,
+                                                              running};
   detail::RefereeInputLoopState state(serial.is_open());
   detail::RefereeInputLoopRunner<SerialReferee, InfoWaveReferee, EnemyKeyReceiverT, RadarCommandSenderT, UiUserSenderT,
-                                 MapRobotRelayT, ExternalServerSenderT>
+                                 MapRobotRelayT, ExternalServerSenderT, DoubleDebuffFallbackT>
       runner(runtime, services, state);
   runner.Run();
 }

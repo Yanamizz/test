@@ -206,7 +206,9 @@ class TcpClient {
       if (errno == EINTR) {
         continue;
       }
-      throw std::runtime_error("TCP read failed: " + std::string(std::strerror(errno)));
+      // ECONNRESET 等非致命连接错误：关闭连接，等待主循环重连，不抛出异常
+      Close();
+      return 0;
     }
   }
 

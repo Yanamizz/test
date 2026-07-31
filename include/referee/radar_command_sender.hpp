@@ -61,8 +61,28 @@ constexpr rm::u16 kBlueRadarRobotId = 109;
 constexpr rm::u16 kRefereeServerReceiverId = 0x8080;
 /// `password_cmd=2` 冷却时间。
 constexpr int kRadarPasswordVerifyCooldownMs = 10000;
-/// 当前按 `0x020E` bit3-4 == 2 视为“对方干扰波状态为二级”。
-constexpr rm::u8 kEnemyLevel2RequiredInterferenceLevel = 2;
+/// `0x020E` bit3-4 的最低有效等级，开局即为 1。
+constexpr rm::u8 kRadarMinInterferenceLevel = 1;
+/// `0x020E` bit3-4 的最高等级，到达后无需再提交敌方密钥。
+constexpr rm::u8 kRadarMaxInterferenceLevel = 3;
+/// 单个端口最多保留的历史密钥数量，超出后丢弃栈底最旧的一条。
+constexpr std::size_t kMaxOpponentKeyStackDepth = 16;
+
+/**
+ * @brief 按当前干扰波等级选出应当提交密钥的来源端口
+ * @param interference_level `0x020E` bit3-4 解出的等级
+ * @return 对应 TCP 端口；等级未知或已满级时返回 0
+ * @note 一级用 `8002` 收到的密钥，二级用 `8003` 收到的密钥。
+ */
+constexpr int OpponentKeySourcePortForLevel(rm::u8 interference_level) {
+  if (interference_level == 1) {
+    return radar::config::kEnemyLevel1KeyTcpServerPort;
+  }
+  if (interference_level == 2) {
+    return radar::config::kEnemyLevel2KeyTcpServerPort;
+  }
+  return 0;
+}
 
 /**
  * @brief 当前己方阵营
@@ -119,7 +139,8 @@ struct RadarCommandContext {
 };
 
 /**
- * @brief 进入 `password_cmd=2` FIFO 的待验证敌方密钥
+ * @brief 进入 `password_cmd=2` 待验证栈的敌方密钥
+ * @note 同一端口解出不同密钥时按后进先出取用，最新密钥优先提交。
  */
 struct PendingOpponentKey {
   std::string name;               ///< 日志名称
@@ -220,42 +241,62 @@ class RadarCommandSender {
   }
 
   /**
-   * @brief 将一组敌方密钥放入 `password_cmd=2` 等待队列
+   * @brief 将一组敌方密钥压入对应端口的 `password_cmd=2` 待验证栈
    * @param name 日志名称
    * @param source_port 来源端口
    * @param key 密钥内容
+   * @note  与栈顶相同的密钥不重复入栈；超出容量上限时丢弃最旧的一条。
    */
   void QueueOpponentKey(std::string name, int source_port, const std::array<rm::u8, 6> &key) {
+    auto *stack = MutableStackForPort(source_port);
+    if (stack == nullptr) {
+      return;
+    }
+    if (!stack->empty() && stack->back().key == key) {
+      return;
+    }
+
     PendingOpponentKey pending;
     pending.name = std::move(name);
     pending.source_port = source_port;
     pending.key = key;
-    pending_opponent_keys_.push_back(pending);
-    LogQueuedKey(pending);
+    stack->push_back(pending);
+    while (stack->size() > kMaxOpponentKeyStackDepth) {
+      stack->pop_front();
+    }
+    LogQueuedKey(pending, stack->size());
   }
 
   /**
-   * @brief 推进敌方密钥待发送队列
+   * @brief 按当前干扰波等级推进敌方密钥验证
    * @tparam Protocol 当前串口维护状态类型
    * @param serial_protocol 当前常规链路状态
+   * @note  等级为 1 时只取 `8002` 栈，等级为 2 时只取 `8003` 栈；
+   *        同一栈内后进先出，等级未知或已满级时不发送。
    */
   template <typename Protocol>
   void ProcessPending(const Protocol &serial_protocol) {
-    if (password_verify_in_flight_ || pending_opponent_keys_.empty()) {
+    if (password_verify_in_flight_) {
+      return;
+    }
+
+    const int target_port = OpponentKeyPortForCurrentLevel();
+    if (target_port == 0) {
+      LogNoPortForLevel();
+      return;
+    }
+    auto *stack = MutableStackForPort(target_port);
+    if (stack == nullptr || stack->empty()) {
       return;
     }
 
     const auto now = Clock::now();
     if (password_verify_next_allowed_time_.has_value() && now < *password_verify_next_allowed_time_) {
-      LogWaitingCooldown(pending_opponent_keys_.front(), now);
+      LogWaitingCooldown(stack->back(), stack->size(), now);
       return;
     }
 
-    const auto pending = pending_opponent_keys_.front();
-    if (!CanSendOpponentKeyFromPort(pending.source_port)) {
-      return;
-    }
-
+    const auto pending = stack->back();
     auto cmd = MakeCommand();
     cmd.password_cmd = kRadarVerifyOpponentKeyCommand;
     cmd.password_1 = pending.key[0];
@@ -280,20 +321,31 @@ class RadarCommandSender {
       return;
     }
     password_verify_in_flight_ = true;
-    pending_opponent_keys_.pop_front();
+    stack->pop_back();
   }
 
   /**
    * @brief 判断当前是否仍有待处理敌方密钥
-   * @return 队列非空或仍有在途验证时返回 true
+   * @return 任一栈非空或仍有在途验证时返回 true
    */
-  bool HasPending() const { return password_verify_in_flight_ || !pending_opponent_keys_.empty(); }
+  bool HasPending() const { return password_verify_in_flight_ || HasQueuedPending(); }
 
   /**
    * @brief 判断当前是否有待发送敌方密钥
-   * @return 队列非空时返回 true
+   * @return 任一端口栈非空时返回 true
    */
-  bool HasQueuedPending() const { return !pending_opponent_keys_.empty(); }
+  bool HasQueuedPending() const {
+    return !enemy_level1_key_stack_.empty() || !enemy_level2_key_stack_.empty();
+  }
+
+  /**
+   * @brief 返回指定来源端口当前栈内待验证密钥数量
+   * @param source_port 来源端口
+   */
+  std::size_t QueuedKeyCount(int source_port) const {
+    const auto *stack = StackForPort(source_port);
+    return stack == nullptr ? 0 : stack->size();
+  }
 
   /**
    * @brief 判断指定来源端口的敌方密钥是否已经真正发出
@@ -330,16 +382,27 @@ class RadarCommandSender {
   }
 
   /**
-   * @brief 判断指定来源端口的敌方密钥当前是否允许进入/推进发送
+   * @brief 判断指定来源端口的敌方密钥当前是否允许推进发送
    * @param source_port 来源端口
-   * @return 满足当前业务门控时返回 true
+   * @return 当前干扰波等级正好对应该端口时返回 true
+   * @note 等级来自 `0x020E` bit3-4：等级 1 走 `8002`，等级 2 走 `8003`。
+   *       等级 0 表示尚未收到 `0x020E`，等级 3 表示已满级，两者都不发送。
    */
   bool CanSendOpponentKeyFromPort(int source_port) const {
-    if (source_port != radar::config::kEnemyLevel2KeyTcpServerPort) {
-      return true;
-    }
-    return enemy_level1_key_sent_ && current_ally_encryption_level_ == kEnemyLevel2RequiredInterferenceLevel;
+    const int target_port = OpponentKeyPortForCurrentLevel();
+    return target_port != 0 && target_port == source_port;
   }
+
+  /**
+   * @brief 返回当前干扰波等级对应的密钥来源端口
+   * @return 等级 1 返回 `8002`，等级 2 返回 `8003`，其余返回 0
+   */
+  int OpponentKeyPortForCurrentLevel() const {
+    return OpponentKeySourcePortForLevel(current_ally_encryption_level_);
+  }
+
+  /// 返回最近一次 `0x020E` 解出的干扰波等级。
+  rm::u8 current_ally_encryption_level() const { return current_ally_encryption_level_; }
 
   /**
    * @brief 记录一条被拒绝的敌方密钥
@@ -434,10 +497,11 @@ class RadarCommandSender {
   }
 
   /**
-   * @brief 记录一条进入验证队列的敌方密钥
+   * @brief 记录一条压入验证栈的敌方密钥
    * @param pending 待验证敌方密钥
+   * @param stack_depth 入栈后该端口栈内深度
    */
-  void LogQueuedKey(const PendingOpponentKey &pending) {
+  void LogQueuedKey(const PendingOpponentKey &pending, std::size_t stack_depth) {
     std::ostringstream entry;
     entry << "{"
           << "\"timestamp\":\"" << radar::log::TimestampNow() << "\","
@@ -445,7 +509,7 @@ class RadarCommandSender {
           << "\"source\":\"tcp\","
           << "\"source_port\":" << pending.source_port << ','
           << "\"decision\":\"queued\","
-          << "\"queue_size\":" << pending_opponent_keys_.size() << ','
+          << "\"stack_depth\":" << stack_depth << ','
           << "\"key_hex\":\"" << radar::log::HexBytes(pending.key.data(), pending.key.size()) << "\"}";
 
     const auto basename = std::string("0x0121_") + pending.name + "_queued";
@@ -455,10 +519,11 @@ class RadarCommandSender {
 
   /**
    * @brief 记录当前仍处于 `password_cmd=2` 冷却中的等待状态
-   * @param pending 队首待发送密钥
+   * @param pending 栈顶待发送密钥
+   * @param stack_depth 当前端口栈内深度
    * @param now 当前时间
    */
-  void LogWaitingCooldown(const PendingOpponentKey &pending, TimePoint now) {
+  void LogWaitingCooldown(const PendingOpponentKey &pending, std::size_t stack_depth, TimePoint now) {
     if (last_waiting_cooldown_log_time_.has_value() &&
         now - *last_waiting_cooldown_log_time_ < WaitingCooldownLogMinInterval()) {
       return;
@@ -481,7 +546,8 @@ class RadarCommandSender {
           << "\"source\":\"tcp\","
           << "\"source_port\":" << pending.source_port << ','
           << "\"decision\":\"waiting_cooldown\","
-          << "\"queue_size\":" << pending_opponent_keys_.size() << ','
+          << "\"stack_depth\":" << stack_depth << ','
+          << "\"interference_level\":" << radar::log::JsonScalar(current_ally_encryption_level_) << ','
           << "\"remaining_ms\":" << remaining_ms << ','
           << "\"key_hex\":\"" << radar::log::HexBytes(pending.key.data(), pending.key.size()) << "\"}";
 
@@ -518,11 +584,72 @@ class RadarCommandSender {
     }
   }
 
+  /**
+   * @brief 按来源端口取出可写的待验证密钥栈
+   * @param source_port 来源端口
+   * @return 对应栈指针；端口不属于 `8002/8003` 时返回 nullptr
+   */
+  std::deque<PendingOpponentKey> *MutableStackForPort(int source_port) {
+    if (source_port == radar::config::kEnemyLevel1KeyTcpServerPort) {
+      return &enemy_level1_key_stack_;
+    }
+    if (source_port == radar::config::kEnemyLevel2KeyTcpServerPort) {
+      return &enemy_level2_key_stack_;
+    }
+    return nullptr;
+  }
+
+  /**
+   * @brief 按来源端口取出只读的待验证密钥栈
+   * @param source_port 来源端口
+   * @return 对应栈指针；端口不属于 `8002/8003` 时返回 nullptr
+   */
+  const std::deque<PendingOpponentKey> *StackForPort(int source_port) const {
+    if (source_port == radar::config::kEnemyLevel1KeyTcpServerPort) {
+      return &enemy_level1_key_stack_;
+    }
+    if (source_port == radar::config::kEnemyLevel2KeyTcpServerPort) {
+      return &enemy_level2_key_stack_;
+    }
+    return nullptr;
+  }
+
+  /**
+   * @brief 记录“当前等级没有对应密钥来源端口”的挂起状态
+   * @note 等级 0 表示尚未收到 `0x020E`，等级 3 表示已满级，两者都不需要再提交密钥。
+   *       仅在仍有密钥待发送时输出，并按最小间隔节流。
+   */
+  void LogNoPortForLevel() {
+    if (!HasQueuedPending()) {
+      return;
+    }
+    const auto now = Clock::now();
+    if (last_no_port_log_time_.has_value() && now - *last_no_port_log_time_ < WaitingCooldownLogMinInterval()) {
+      return;
+    }
+
+    std::ostringstream entry;
+    entry << "{"
+          << "\"timestamp\":\"" << radar::log::TimestampNow() << "\","
+          << "\"name\":\"opponent_key\","
+          << "\"source\":\"tcp\","
+          << "\"decision\":\"holding_no_port_for_level\","
+          << "\"interference_level\":" << radar::log::JsonScalar(current_ally_encryption_level_) << ','
+          << "\"level1_stack_depth\":" << enemy_level1_key_stack_.size() << ','
+          << "\"level2_stack_depth\":" << enemy_level2_key_stack_.size() << "}";
+
+    log_store_.Append(std::filesystem::path("main") / "0x0121_opponent_key_holding.log", entry.str(),
+                      radar::log::LogPriority::kCriticalDecision);
+    last_no_port_log_time_ = now;
+  }
+
   RefereeTxScheduler &tx_scheduler_;                   ///< 统一发送调度器
   radar::log::FileLogStore log_store_;                ///< `0x0121` 发送日志输出器
-  std::deque<PendingOpponentKey> pending_opponent_keys_;  ///< `password_cmd=2` FIFO 队列
+  std::deque<PendingOpponentKey> enemy_level1_key_stack_;  ///< `8002` 密钥栈，后进先出
+  std::deque<PendingOpponentKey> enemy_level2_key_stack_;  ///< `8003` 密钥栈，后进先出
   std::optional<TimePoint> password_verify_next_allowed_time_;  ///< 下一次允许验证密钥的时间
   std::optional<TimePoint> last_waiting_cooldown_log_time_;     ///< 上次输出等待中日志的时间
+  std::optional<TimePoint> last_no_port_log_time_;               ///< 上次输出等级无对应端口日志的时间
   bool password_verify_in_flight_ = false;            ///< 当前是否已有一条验证指令等待真正发出
   bool enemy_level1_key_sent_ = false;                ///< `8002` 密钥是否已真正发出
   bool enemy_level2_key_sent_ = false;                ///< `8003` 密钥是否已真正发出

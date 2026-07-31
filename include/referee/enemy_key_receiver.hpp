@@ -98,36 +98,26 @@ class EnemyKeyReceiver {
    * @tparam SerialProtocol 常规链路协议类型，当前仅用于接口兼容
    * @param data 本次收到的字节流
    * @param size 字节数
-   * @return 当端口完成一次合法接收后返回 true
+   * @return 本次是否解出了与上一次不同的新密钥
+   * @note  本端口全程保持接收，不会因为收到过合法密钥而停止解析或关闭连接。
    */
   template <typename SerialProtocol>
   bool ProcessBytes(const rm::u8 *data, std::size_t size, const SerialProtocol &) {
-    if (completed_) {
-      return true;
-    }
-
+    const auto before = distinct_key_count_;
     for (std::size_t i = 0; i < size; ++i) {
       referee_ << data[i];
     }
-    return completed_;
+    return distinct_key_count_ != before;
   }
 
   bool has_key() const { return has_key_; }
-  bool completed() const { return completed_; }
   bool rejected() const { return rejected_; }
   const std::array<rm::u8, kKeyBytes> &latest_key() const { return latest_key_; }
   std::size_t update_count() const { return update_count_; }
   std::size_t valid_frame_count() const { return valid_frame_count_; }
 
-  /**
-   * @brief 推进一次“已接收但尚未满足发送门控”的密钥提交
-   */
-  void ProcessDeferredQueueing() {
-    if (!has_key_ || queued_to_sender_) {
-      return;
-    }
-    QueueAcceptedKey();
-  }
+  /// 返回本端口累计解出的“与前一次不同”的密钥数量。
+  std::size_t distinct_key_count() const { return distinct_key_count_; }
 
  private:
   /**
@@ -144,34 +134,32 @@ class EnemyKeyReceiver {
       return;
     }
 
+    std::array<rm::u8, kKeyBytes> incoming{};
     for (std::size_t i = 0; i < kKeyBytes; ++i) {
-      latest_key_[i] = referee_.data().radar5.key[i];
+      incoming[i] = referee_.data().radar5.key[i];
     }
     ++update_count_;
 
-    if (!IsRadarKey(latest_key_)) {
+    if (!IsRadarKey(incoming)) {
       rejected_ = true;
-      command_sender_.LogRejectedKey(name_, source_port_, latest_key_.data(), latest_key_.size(),
+      command_sender_.LogRejectedKey(name_, source_port_, incoming.data(), incoming.size(),
                                      "0x0a06_key_must_be_6_ascii_letters_or_digits");
+      latest_key_ = incoming;
       LogRejectedFrame(seq);
       return;
     }
 
+    // 与上一次相同的密钥不重复入栈，避免发送方持续重发把栈刷满。
+    const bool is_new_key = !has_key_ || incoming != latest_key_;
+    latest_key_ = incoming;
     has_key_ = true;
-    completed_ = true;
-    QueueAcceptedKey();
-    LogAcceptedFrame(seq);
-  }
+    if (!is_new_key) {
+      return;
+    }
 
-  void QueueAcceptedKey() {
-    if (queued_to_sender_) {
-      return;
-    }
-    if (!command_sender_.CanSendOpponentKeyFromPort(source_port_)) {
-      return;
-    }
+    ++distinct_key_count_;
     command_sender_.QueueOpponentKey(name_, source_port_, latest_key_);
-    queued_to_sender_ = true;
+    LogAcceptedFrame(seq);
   }
 
   /**
@@ -188,6 +176,7 @@ class EnemyKeyReceiver {
           << "\"cmd_id\":\"" << radar::log::HexU16(Cmd::kRadar5) << "\","
           << "\"seq\":" << static_cast<unsigned>(seq) << ','
           << "\"decision\":\"accepted\","
+          << "\"distinct_key_count\":" << distinct_key_count_ << ','
           << "\"key_hex\":\"" << radar::log::HexBytes(latest_key_.data(), latest_key_.size()) << "\"}";
 
     const auto basename = std::string("0x0a06_") + name_;
@@ -245,10 +234,9 @@ class EnemyKeyReceiver {
   Referee referee_;                        ///< 独立的 `0x0A06` 主协议解包器
   std::array<rm::u8, kKeyBytes> latest_key_{};  ///< 最近一次解出的密钥内容
   bool has_key_ = false;                   ///< 是否收到过合法密钥
-  bool completed_ = false;                 ///< 当前端口是否已完成一次有效接收
   bool rejected_ = false;                  ///< 是否收到过非法密钥
-  bool queued_to_sender_ = false;          ///< 当前密钥是否已进入 `0x0121` 待发送队列
   std::size_t update_count_ = 0;           ///< 已成功解出的 `0x0A06` 次数
+  std::size_t distinct_key_count_ = 0;     ///< 累计解出的“与前一次不同”的密钥数量
   std::size_t valid_frame_count_ = 0;      ///< 所有 CRC 正确主协议帧计数
 };
 

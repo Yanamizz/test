@@ -13,6 +13,7 @@
 
 #include "include/config/config.hpp"
 #include "include/log/referee_main_log.hpp"
+#include "include/referee/double_debuff_fallback.hpp"
 #include "include/referee/external_server_sender.hpp"
 #include "include/referee/map_robot_relay.hpp"
 #include "include/referee/replay_input_source.hpp"
@@ -95,6 +96,7 @@ int main() {
     radar::referee::RadarCommandSender radar_command_sender(tx_scheduler, run_log_root);
     radar::referee::UiUser1Sender<kRevision> ui_user1_sender(radar_command_sender, tx_scheduler, run_log_root);
     radar::referee::RadarDecisionTree<kRevision> radar_decision_tree(radar_command_sender);
+    radar::referee::DoubleDebuffFallback<kRevision> double_debuff_fallback(radar_command_sender, run_log_root);
     radar::referee::MapRobotRelay<kRevision> relay(tx_scheduler, run_log_root);
     radar::referee::ExternalServerSender external_server_sender(external_tcp_server ? &*external_tcp_server : nullptr,
                                                                 run_log_root);
@@ -137,6 +139,7 @@ int main() {
           << "\","
           << "\"serial_replay_file\":\"" << radar::config::kSerialRefereeReplayFile << "\","
           << "\"serial_replay_rate_hz\":" << radar::config::kSerialRefereeReplayRateHz << ','
+          << "\"replay_loop\":" << (radar::config::kReplayLoop ? "true" : "false") << ','
           << "\"info_wave_input_mode\":\""
           << (radar::config::kInfoWaveInputMode == radar::config::RefereeInputSourceMode::kReal ? "real" : "file")
           << "\","
@@ -172,6 +175,7 @@ int main() {
       ui_user1_sender.ProcessSerial(cmd_id, serial_referee.data());
       relay.ProcessSerial(cmd_id, seq, serial_referee);
       radar_decision_tree.ProcessSerial(cmd_id, seq, serial_referee);
+      double_debuff_fallback.ProcessSerial(cmd_id, serial_referee.data());
       external_server_sender.ProcessSerial(cmd_id, seq, serial_referee.data());
     });
     // 信息波回调：维护 `0x0A01~0x0A06` 状态，并结合串口 `0x0301/0x0200` 驱动 `0x0305` 组包链路。
@@ -191,7 +195,7 @@ int main() {
                                                                                   : nullptr,
                                                    enemy_level1_key_receiver, enemy_level2_key_receiver,
                                                    radar_command_sender, ui_user1_sender, relay, external_server_sender,
-                                                   tx_scheduler,
+                                                   double_debuff_fallback, tx_scheduler,
                                                    raw_log_store, external_tcp_server ? &*external_tcp_server : nullptr,
                                                    g_running);
 

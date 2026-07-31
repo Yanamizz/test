@@ -39,7 +39,7 @@ inline std::chrono::steady_clock::duration ReplayRateToPeriod(int rate_hz) {
 
 /**
  * @brief 二进制文件回放输入源
- * @note  按固定频率释放完整协议帧，适合作为主程序的真实输入替代。
+ * @note  按固定频率释放完整协议帧；启用 `config::kReplayLoop` 时到达末尾后循环播放。
  */
 class ReplayInputSource {
  public:
@@ -159,7 +159,11 @@ class ReplayInputSource {
 
     next_tick_time_ = due_time;
     if (next_frame_index_ >= frames_.size()) {
-      completed_ = true;
+      if (config::kReplayLoop) {
+        next_frame_index_ = 0;
+      } else {
+        completed_ = true;
+      }
     }
     return progressed;
   }
