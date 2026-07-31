@@ -26,6 +26,6 @@ __pycache__/
 *.dll
 *.exe
 
-test/*
+
 !test/enemy_key_tcp_simulator.cc
 !test/ui_sender_test.cc
