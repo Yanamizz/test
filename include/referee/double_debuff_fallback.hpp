@@ -29,8 +29,6 @@
 
 namespace radar::referee {
 
-/// `0x0001` bit4-7 中代表“比赛中”的阶段值。
-constexpr rm::u8 kGameProgressInMatch = 4;
 /// 保底机制最多把 `radar_cmd` 推进到的目标值（对应至多 2 次触发机会）。
 constexpr rm::u8 kDoubleDebuffFallbackMaxTarget = 2;
 

@@ -33,6 +33,37 @@ constexpr rm::u8 kExternalServerRadarMarkBitCmd = 0x92;
 constexpr rm::u16 kOpponentAerialRobotCounteredMask = static_cast<rm::u16>(1u << 13);
 /// 外部 TCP server 自定义状态发送频率。
 constexpr int kExternalServerSendIntervalMs = 1000;
+/// `0x91` 中剩余时间的 ASCII 十进制位数。
+/// @note RMUC 单阶段最长 420s，四位定长足够；定长便于对端按固定偏移取字段。
+constexpr std::size_t kExternalServerRemainTimeDigits = 4;
+/// `0x91` 剩余时间可表示的上限，超出后钳位。
+constexpr rm::u16 kExternalServerRemainTimeMax = 9999;
+
+/**
+ * @brief 把秒数写成定长 ASCII 十进制，高位补 '0'
+ * @param seconds 剩余秒数
+ * @return 长度为 `kExternalServerRemainTimeDigits` 的字符数组
+ * @note 超过上限时钳位到全 '9'，避免溢出破坏定长约定。
+ */
+constexpr std::array<rm::u8, kExternalServerRemainTimeDigits> EncodeRemainTimeAscii(rm::u16 seconds) {
+  const rm::u16 clamped = seconds > kExternalServerRemainTimeMax ? kExternalServerRemainTimeMax : seconds;
+  std::array<rm::u8, kExternalServerRemainTimeDigits> digits{};
+  rm::u16 rest = clamped;
+  for (std::size_t i = kExternalServerRemainTimeDigits; i > 0; --i) {
+    digits[i - 1] = static_cast<rm::u8>('0' + (rest % 10));
+    rest /= 10;
+  }
+  return digits;
+}
+
+// C++17: std::array::operator== 不是 constexpr，用下标逐位验证。
+static_assert(EncodeRemainTimeAscii(300)[0] == '0' && EncodeRemainTimeAscii(300)[1] == '3' &&
+                  EncodeRemainTimeAscii(300)[2] == '0' && EncodeRemainTimeAscii(300)[3] == '0',
+              "300s must encode as '0300'");
+static_assert(EncodeRemainTimeAscii(0)[0] == '0' && EncodeRemainTimeAscii(0)[3] == '0',
+              "0s must encode as '0000'");
+static_assert(EncodeRemainTimeAscii(65535)[0] == '9' && EncodeRemainTimeAscii(65535)[3] == '9',
+              "out-of-range must clamp to '9999'");
 
 /**
  * @brief 将串口主协议中的指定状态透传给额外 TCP server 客户端
@@ -94,13 +125,20 @@ class ExternalServerSender {
            now - *last_dispatch_time >= std::chrono::milliseconds(kExternalServerSendIntervalMs);
   }
 
+  /**
+   * @brief 发送一条 `0x91` 比赛状态
+   * @param game_progress `0x0001` 的 bit4-7 阶段值
+   * @param stage_remain_time `0x0001` 的阶段剩余秒数
+   * @note 剩余时间以 4 位定长 ASCII 十进制发送，高位补 '0'，对端直接按字符读。
+   */
   bool SendGameStatus(rm::u8 game_progress, rm::u16 stage_remain_time) {
-    const std::array<rm::u8, 4> payload = {
-        kExternalServerGameStatusCmd,
-        game_progress,
-        static_cast<rm::u8>(stage_remain_time & 0xff),
-        static_cast<rm::u8>((stage_remain_time >> 8) & 0xff),
-    };
+    const auto remain_ascii = EncodeRemainTimeAscii(stage_remain_time);
+    std::array<rm::u8, 2 + kExternalServerRemainTimeDigits> payload{};
+    payload[0] = kExternalServerGameStatusCmd;
+    payload[1] = game_progress;
+    for (std::size_t i = 0; i < kExternalServerRemainTimeDigits; ++i) {
+      payload[2 + i] = remain_ascii[i];
+    }
     return SendRaw(payload.data(), payload.size(), kExternalServerGameStatusCmd, 0x0001);
   }
 

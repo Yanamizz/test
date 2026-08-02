@@ -35,7 +35,7 @@ constexpr bool kReplayLoop = true;
 /// 裁判系统协议版本唯一配置入口。
 constexpr auto kRefereeRevision = rm::device::RefereeRevision::kNewV200;
 /// 项目默认日志模式。
-constexpr auto kRadarLogMode = RadarLogMode::kDebug;
+constexpr auto kRadarLogMode = RadarLogMode::kMatch;
 /// 调试模式下允许缺失输入接口，缺失链路对应状态按 0 值处理。
 constexpr bool kDebugAllowMissingInterfaces = kRadarLogMode == RadarLogMode::kDebug;
 /// 是否保留逐帧主协议结构体快照日志；比赛模式下关闭以减轻主线程格式化压力。
@@ -50,7 +50,7 @@ constexpr const char *kFallbackRefereeDevice = "/dev/ttyusb0";
 constexpr auto kSerialRefereeInputMode = RefereeInputSourceMode::kReal;
 /// 串口主协议回放文件路径，模式为 `kFile` 时必须非空。
 constexpr const char *kSerialRefereeReplayFile =
-    "/home/hanni/Radar/info/outputinfo.bin";
+    "/home/hanni/Radar/test/logs/20260731_191242_641/raw/serial_referee_rx.bin";
 /// 串口主协议回放频率，单位 Hz；文件回放按完整协议帧节拍推进。
 constexpr int kSerialRefereeReplayRateHz = 10;
 /// TCP 本机绑定地址；留空表示由系统按路由自动选择本机出口地址。
@@ -66,7 +66,8 @@ constexpr int kExternalTcpServerPort = 9001;
 /// 信息波输入模式，仅覆盖 `8001`。
 constexpr auto kInfoWaveInputMode = RefereeInputSourceMode::kReal;
 /// 信息波 `8001` 回放文件路径，模式为 `kFile` 时必须非空。
-constexpr const char *kInfoWaveReplayFile = "/home/hanni/Radar/test/info/outputInfo.bin";
+constexpr const char *kInfoWaveReplayFile =
+    "/home/hanni/Radar/test/logs/20260731_191242_641/raw/tcp_8001_info_wave_rx.bin";
 /// 信息波 `8001` 回放频率，单位 Hz；文件回放按完整协议帧节拍推进。
 constexpr int kInfoWaveReplayRateHz = 50;
 /// 信息波位置数据对端服务端端口。
@@ -74,7 +75,8 @@ constexpr int kInfoWaveTcpServerPort = 8001;
 /// 敌方一级密钥输入模式，仅覆盖 `8002`。
 constexpr auto kEnemyLevel1KeyInputMode = RefereeInputSourceMode::kReal;
 /// 敌方一级密钥 `8002` 回放文件路径，模式为 `kFile` 时必须非空。
-constexpr const char *kEnemyLevel1KeyReplayFile = "/home/hanni/Radar/test/info/5.30WMJvsIROBOT/raw_tcp_8002.bin";
+constexpr const char *kEnemyLevel1KeyReplayFile =
+    "/home/hanni/Radar/test/logs/20260731_191242_641/raw/tcp_8002_enemy_level1_key_rx.bin";
 /// 敌方一级密钥 `8002` 回放频率，单位 Hz；文件回放按完整协议帧节拍推进。
 constexpr int kEnemyLevel1KeyReplayRateHz = 10;
 /// 敌方一级密钥对端服务端端口。
@@ -122,6 +124,13 @@ constexpr int kDoubleDebuffFallbackMinIncrementIntervalMs = 1000;
 constexpr bool kDoubleDebuffFallbackStopOnConfirm = true;
 /// `0x0001` 状态超过该时限视为过期，保底机制不再依据其时间判断。
 constexpr int kGameStatusStaleTimeoutMs = 3000;
+/// 是否只在 `0x0001` 阶段为“比赛中”时才提交敌方密钥（`password_cmd=2`）。
+/// @note 赛前提交不会被裁判系统采纳，却会消耗掉本地密钥候选，因此默认开启。
+///       文件回放或缺失 `0x0001` 的联调场景可临时关掉。
+constexpr bool kOpponentKeyRequireMatchRunning = true;
+/// 提交敌方密钥后，未观测到干扰波等级上升时是否按冷却周期重投。
+/// @note 关掉后退回“发一次就丢弃”的旧行为。
+constexpr bool kOpponentKeyRetryUntilLevelUp = true;
 /// 可修改己方密钥时按顺序使用的预置密钥。
 constexpr std::array<std::array<rm::u8, 6>, 3> kRadarPresetAllyKeys{{
     {{'A', '5', '0', '6', '0', '0'}},

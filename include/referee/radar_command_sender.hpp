@@ -65,6 +65,8 @@ constexpr int kRadarPasswordVerifyCooldownMs = 10000;
 constexpr rm::u8 kRadarMinInterferenceLevel = 1;
 /// `0x020E` bit3-4 的最高等级，到达后无需再提交敌方密钥。
 constexpr rm::u8 kRadarMaxInterferenceLevel = 3;
+/// `0x0001` bit4-7 中代表“比赛中”的阶段值。
+constexpr rm::u8 kGameProgressInMatch = 4;
 /// 单个端口最多保留的历史密钥数量，超出后丢弃栈底最旧的一条。
 constexpr std::size_t kMaxOpponentKeyStackDepth = 16;
 
@@ -245,15 +247,18 @@ class RadarCommandSender {
    * @param name 日志名称
    * @param source_port 来源端口
    * @param key 密钥内容
-   * @note  与栈顶相同的密钥不重复入栈；超出容量上限时丢弃最旧的一条。
+   * @note  栈内已存在的密钥不重复入栈；超出容量上限时丢弃最旧的一条。
+   *        由于重投机制会轮换栈内顺序，这里必须全栈查重而不是只比栈顶。
    */
   void QueueOpponentKey(std::string name, int source_port, const std::array<rm::u8, 6> &key) {
     auto *stack = MutableStackForPort(source_port);
     if (stack == nullptr) {
       return;
     }
-    if (!stack->empty() && stack->back().key == key) {
-      return;
+    for (const auto &existing : *stack) {
+      if (existing.key == key) {
+        return;
+      }
     }
 
     PendingOpponentKey pending;
@@ -273,10 +278,17 @@ class RadarCommandSender {
    * @param serial_protocol 当前常规链路状态
    * @note  等级为 1 时只取 `8002` 栈，等级为 2 时只取 `8003` 栈；
    *        同一栈内后进先出，等级未知或已满级时不发送。
+   *        密钥发出后不立即出栈：只有 `0x020E` 干扰波等级真正上升才算验证通过
+   *        （由 `UpdateAllyEncryptionLevel` 清栈）。等级没升就按冷却周期重投，
+   *        栈内有多个候选时轮换发送。
    */
   template <typename Protocol>
   void ProcessPending(const Protocol &serial_protocol) {
     if (password_verify_in_flight_) {
+      return;
+    }
+    if (!IsMatchRunning(serial_protocol)) {
+      LogHoldingBeforeMatch(serial_protocol);
       return;
     }
 
@@ -296,6 +308,14 @@ class RadarCommandSender {
       return;
     }
 
+    // 冷却已过但等级仍未上升，说明上一发没被采纳：换下一个候选再试。
+    if (awaiting_level_up_ && awaiting_level_up_port_ == target_port) {
+      if (!radar::config::kOpponentKeyRetryUntilLevelUp) {
+        return;
+      }
+      RotateStack(stack);
+    }
+
     const auto pending = stack->back();
     auto cmd = MakeCommand();
     cmd.password_cmd = kRadarVerifyOpponentKeyCommand;
@@ -310,7 +330,7 @@ class RadarCommandSender {
     context.name = pending.name;
     context.source = "tcp";
     context.source_port = pending.source_port;
-    context.decision = "sent";
+    context.decision = awaiting_level_up_ ? "retry" : "sent";
     context.ally_encryption_level = current_ally_encryption_level_;
     const bool queued = Send(cmd, serial_protocol, context, [this, source_port = pending.source_port]() {
       MarkOpponentKeySent(source_port);
@@ -321,7 +341,10 @@ class RadarCommandSender {
       return;
     }
     password_verify_in_flight_ = true;
-    stack->pop_back();
+    // 不出栈：等 `0x020E` 等级上升后由 UpdateAllyEncryptionLevel 统一清理。
+    awaiting_level_up_ = true;
+    awaiting_level_up_port_ = target_port;
+    ++opponent_key_attempt_count_;
   }
 
   /**
@@ -365,12 +388,33 @@ class RadarCommandSender {
   /**
    * @brief 更新最近一次 `0x020E` 解出的干扰波等级
    * @param ally_encryption_level 当前协议中的 bit3-4 值
+   * @note 等级上升即视为上一次提交的密钥已被裁判系统采纳。此时按新等级清理
+   *       不再有用的密钥栈：升到 2 级说明 `8002` 那一级已过，整栈作废；
+   *       升到 3 级说明已满级，两个栈都不再需要。
    */
   void UpdateAllyEncryptionLevel(rm::u8 ally_encryption_level) {
-    if (ally_encryption_level > current_ally_encryption_level_) {
-      ++ally_encryption_level_upgrade_generation_;
+    if (ally_encryption_level <= current_ally_encryption_level_) {
+      current_ally_encryption_level_ = ally_encryption_level;
+      return;
     }
+
+    const auto previous_level = current_ally_encryption_level_;
+    ++ally_encryption_level_upgrade_generation_;
     current_ally_encryption_level_ = ally_encryption_level;
+
+    // 等级已经推进，上一发不需要再重投。
+    awaiting_level_up_ = false;
+    awaiting_level_up_port_ = 0;
+
+    const std::size_t level1_before = enemy_level1_key_stack_.size();
+    const std::size_t level2_before = enemy_level2_key_stack_.size();
+    if (ally_encryption_level >= 2) {
+      enemy_level1_key_stack_.clear();
+    }
+    if (ally_encryption_level >= kRadarMaxInterferenceLevel) {
+      enemy_level2_key_stack_.clear();
+    }
+    LogLevelUpgrade(previous_level, ally_encryption_level, level1_before, level2_before);
   }
 
   /**
@@ -643,6 +687,97 @@ class RadarCommandSender {
     last_no_port_log_time_ = now;
   }
 
+  /**
+   * @brief 判断当前是否处于“比赛中”阶段
+   * @tparam Protocol 当前串口维护状态类型
+   * @param serial_protocol 当前常规链路状态
+   * @return 允许提交敌方密钥时返回 true
+   * @note 赛前提交的 `password_cmd=2` 不会被裁判系统采纳，却会占掉一次 10s 冷却，
+   *       因此默认必须等 `0x0001` 阶段为 4。开关见 `kOpponentKeyRequireMatchRunning`。
+   */
+  template <typename Protocol>
+  static bool IsMatchRunning(const Protocol &serial_protocol) {
+    if (!radar::config::kOpponentKeyRequireMatchRunning) {
+      return true;
+    }
+    return serial_protocol.game_status.game_progress == kGameProgressInMatch;
+  }
+
+  /**
+   * @brief 把栈顶候选轮换到栈底，让下一个候选上来
+   * @param stack 当前端口的待验证密钥栈
+   * @note 单个候选时等价于原地重投。
+   */
+  static void RotateStack(std::deque<PendingOpponentKey> *stack) {
+    if (stack->size() < 2) {
+      return;
+    }
+    auto rotated = stack->back();
+    stack->pop_back();
+    stack->push_front(std::move(rotated));
+  }
+
+  /**
+   * @brief 记录“比赛未开始，密钥暂不提交”的挂起状态
+   * @tparam Protocol 当前串口维护状态类型
+   * @param serial_protocol 当前常规链路状态
+   * @note 仅在仍有密钥待发送时输出，并按最小间隔节流。
+   */
+  template <typename Protocol>
+  void LogHoldingBeforeMatch(const Protocol &serial_protocol) {
+    if (!HasQueuedPending()) {
+      return;
+    }
+    const auto now = Clock::now();
+    if (last_pre_match_hold_log_time_.has_value() &&
+        now - *last_pre_match_hold_log_time_ < WaitingCooldownLogMinInterval()) {
+      return;
+    }
+
+    std::ostringstream entry;
+    entry << "{"
+          << "\"timestamp\":\"" << radar::log::TimestampNow() << "\","
+          << "\"name\":\"opponent_key\","
+          << "\"source\":\"tcp\","
+          << "\"decision\":\"holding_match_not_running\","
+          << "\"game_progress\":" << radar::log::JsonScalar(serial_protocol.game_status.game_progress) << ','
+          << "\"interference_level\":" << radar::log::JsonScalar(current_ally_encryption_level_) << ','
+          << "\"level1_stack_depth\":" << enemy_level1_key_stack_.size() << ','
+          << "\"level2_stack_depth\":" << enemy_level2_key_stack_.size() << "}";
+
+    log_store_.Append(std::filesystem::path("main") / "0x0121_opponent_key_holding.log", entry.str(),
+                      radar::log::LogPriority::kCriticalDecision);
+    last_pre_match_hold_log_time_ = now;
+  }
+
+  /**
+   * @brief 记录一次干扰波等级上升及对应的密钥栈清理结果
+   * @param previous_level 升级前等级
+   * @param current_level 升级后等级
+   * @param level1_before 清理前 `8002` 栈深度
+   * @param level2_before 清理前 `8003` 栈深度
+   */
+  void LogLevelUpgrade(rm::u8 previous_level, rm::u8 current_level, std::size_t level1_before,
+                       std::size_t level2_before) {
+    std::ostringstream entry;
+    entry << "{"
+          << "\"timestamp\":\"" << radar::log::TimestampNow() << "\","
+          << "\"name\":\"opponent_key\","
+          << "\"source\":\"serial\","
+          << "\"decision\":\"level_up\","
+          << "\"previous_level\":" << radar::log::JsonScalar(previous_level) << ','
+          << "\"current_level\":" << radar::log::JsonScalar(current_level) << ','
+          << "\"upgrade_generation\":" << ally_encryption_level_upgrade_generation_ << ','
+          << "\"attempt_count\":" << opponent_key_attempt_count_ << ','
+          << "\"level1_stack_before\":" << level1_before << ','
+          << "\"level1_stack_after\":" << enemy_level1_key_stack_.size() << ','
+          << "\"level2_stack_before\":" << level2_before << ','
+          << "\"level2_stack_after\":" << enemy_level2_key_stack_.size() << "}";
+
+    log_store_.Append(std::filesystem::path("main") / "0x0121_opponent_key_level_up.log", entry.str(),
+                      radar::log::LogPriority::kCriticalDecision);
+  }
+
   RefereeTxScheduler &tx_scheduler_;                   ///< 统一发送调度器
   radar::log::FileLogStore log_store_;                ///< `0x0121` 发送日志输出器
   std::deque<PendingOpponentKey> enemy_level1_key_stack_;  ///< `8002` 密钥栈，后进先出
@@ -650,6 +785,10 @@ class RadarCommandSender {
   std::optional<TimePoint> password_verify_next_allowed_time_;  ///< 下一次允许验证密钥的时间
   std::optional<TimePoint> last_waiting_cooldown_log_time_;     ///< 上次输出等待中日志的时间
   std::optional<TimePoint> last_no_port_log_time_;               ///< 上次输出等级无对应端口日志的时间
+  std::optional<TimePoint> last_pre_match_hold_log_time_;        ///< 上次输出赛前挂起日志的时间
+  std::size_t opponent_key_attempt_count_ = 0;        ///< 累计提交敌方密钥的次数（含重投）
+  int awaiting_level_up_port_ = 0;                    ///< 正在等待等级上升确认的来源端口
+  bool awaiting_level_up_ = false;                    ///< 是否已提交但尚未观测到等级上升
   bool password_verify_in_flight_ = false;            ///< 当前是否已有一条验证指令等待真正发出
   bool enemy_level1_key_sent_ = false;                ///< `8002` 密钥是否已真正发出
   bool enemy_level2_key_sent_ = false;                ///< `8003` 密钥是否已真正发出
