@@ -52,20 +52,19 @@
 3. 尝试打开裁判系统串口。
 4. 如果 `8001` 配置为真实输入，则尝试拉起信息波 TCP 客户端。
 5. 如果 `8002/8003` 配置为真实输入，则尝试拉起两个敌方密钥 TCP 客户端。
-6. 若启用了外部设备 server 通道，则启动一条独立监听。
-7. 创建两个主协议解包器：
+6. 创建两个主协议解包器：
    - `serial_referee`
    - `info_wave_referee`
-8. 创建发送和业务模块：
+7. 创建发送和业务模块：
    - `RefereeTxScheduler`
    - `RadarCommandSender`
    - `RadarDecisionTree`
    - `MapRobotRelay`
    - `EnemyKeyReceiver(enemy_level1_key)`
    - `EnemyKeyReceiver(enemy_level2_key)`
-9. 如果配置为文件回放，则为对应链路创建 [include/referee/replay_input_source.hpp](/home/hanni/Radar/include/referee/replay_input_source.hpp:43) 中的 `ReplayInputSource`。
-10. 记录 `main/input_mode.log`。
-11. 挂接串口/信息波回调并进入统一主循环。
+8. 如果配置为文件回放，则为对应链路创建 [include/referee/replay_input_source.hpp](/home/hanni/Radar/include/referee/replay_input_source.hpp:43) 中的 `ReplayInputSource`。
+9. 记录 `main/input_mode.log`。
+10. 挂接串口/信息波回调并进入统一主循环。
 
 主程序本身只负责接线，不在 [src/main.cc](/home/hanni/Radar/src/main.cc:45) 中堆业务逻辑。
 
@@ -717,7 +716,6 @@ const auto service_periodic_tasks = [&](const LoopClock::time_point &loop_start)
 ### 11.1 TCP 角色
 
 当前主接收链路中的 `8001/8002/8003` 仍是 TCP client-only。  
-另外项目新增了一条可选的外部设备 server 通道，见 [include/referee/tcp_server.hpp](/home/hanni/Radar/include/referee/tcp_server.hpp:1)。
 
 ### 11.2 `loss_rate`
 

@@ -57,12 +57,6 @@ constexpr int kSerialRefereeReplayRateHz = 10;
 constexpr const char *kTcpLocalBindAddress = "";
 /// TCP 对端服务端地址；`8001/8002/8003` 均主动连接到该地址。
 constexpr const char *kTcpServerAddress = "192.168.12.99";
-/// 是否启用额外的 TCP server 通道，供其他设备主动接入本程序。
-constexpr bool kExternalTcpServerEnabled = true;
-/// 额外 TCP server 的监听地址；`0.0.0.0` 表示监听所有网卡。
-constexpr const char *kExternalTcpServerBindAddress = "0.0.0.0";
-/// 额外 TCP server 的监听端口。
-constexpr int kExternalTcpServerPort = 9001;
 /// 信息波输入模式，仅覆盖 `8001`。
 constexpr auto kInfoWaveInputMode = RefereeInputSourceMode::kReal;
 /// 信息波 `8001` 回放文件路径，模式为 `kFile` 时必须非空。

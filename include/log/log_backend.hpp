@@ -580,7 +580,7 @@ class RuntimeMetrics {
   }
 
   static std::map<std::string, std::size_t> DefaultMultiReadDrainsBySource() {
-    return {{"8001", 0}, {"8002", 0}, {"8003", 0}, {"external_tcp_server", 0}, {"serial", 0}};
+    return {{"8001", 0}, {"8002", 0}, {"8003", 0}, {"serial", 0}};
   }
 
   std::filesystem::path root_;

@@ -236,8 +236,6 @@ inline std::string MainCmdName(rm::u16 cmd_id) {
       return "dart_client_cmd";
     case Cmd::kGroundRobotPosition:
       return "ground_robot_position";
-    case Cmd::kRadarMarkData:
-      return "radar_mark_data";
     case Cmd::kSentryInfo:
       return "sentry_info";
     case Cmd::kRadarInfo:
@@ -451,17 +449,6 @@ inline std::string FormatMainPayload(rm::u16 cmd_id, const rm::device::RefereePr
           << "\"standard_4_y\":" << JsonScalar(data.standard_4_y) << ','
           << "\"reserved\":" << JsonScalar(data.reserved) << ','
           << "\"reserved_2\":" << JsonScalar(data.reserved_2) << "}";
-      return oss.str();
-    }
-    case Cmd::kRadarMarkData: {
-      const auto &data = protocol.radar_mark_data;
-      constexpr rm::u16 kOpponentAerialRobotTargetedByAllyRadarLaserMask = static_cast<rm::u16>(1u << 12);
-      constexpr rm::u16 kOpponentAerialRobotCounteredMask = static_cast<rm::u16>(1u << 13);
-      oss << "{"
-          << "\"opponent_aerial_robot_targeted_by_ally_radar_laser\":"
-          << JsonScalar((data.mark_progress & kOpponentAerialRobotTargetedByAllyRadarLaserMask) != 0) << ','
-          << "\"opponent_aerial_robot_countered\":"
-          << JsonScalar((data.mark_progress & kOpponentAerialRobotCounteredMask) != 0) << "}";
       return oss.str();
     }
     case Cmd::kSentryInfo: {
@@ -752,7 +739,7 @@ inline std::string FormatMainPayload(rm::u16 cmd_id, const rm::device::RefereePr
 
 /**
  * @brief 判断主协议帧是否需要生成结构体日志
- * @note 过滤发往普通机器人、飞镖或哨兵的下行状态；雷达标记和雷达信息保留。
+ * @note 过滤发往普通机器人、飞镖、哨兵及其他非雷达主链路的状态帧。
  */
 template <rm::device::RefereeRevision revision>
 constexpr bool ShouldLogMainProtocolFrame(rm::u16 cmd_id) {
@@ -768,6 +755,7 @@ constexpr bool ShouldLogMainProtocolFrame(rm::u16 cmd_id) {
     case Cmd::kRfidStatus:              // 0x0209
     case Cmd::kDartClientCmd:            // 0x020A
     case Cmd::kGroundRobotPosition:     // 0x020B
+    case Cmd::kRadarMarkData:            // 0x020C
     case Cmd::kSentryInfo:              // 0x020D
       return false;
     default:

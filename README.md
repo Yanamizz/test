@@ -26,12 +26,11 @@
 1. 串口常规链路通过 `SerialPort` 接收真实裁判系统字节流，或通过 `ReplayInputSource` 从文件回放。
 2. 信息波链路通过 `TcpClient` 主动连接 `8001`，接收真实 TCP 字节流，或通过 `ReplayInputSource` 从文件回放。
 3. 敌方一级/二级密钥链路通过 `TcpClient` 主动连接 `8002/8003` 接收真实 TCP 字节流，或通过 `ReplayInputSource` 从文件回放完整 `0x0A06` 协议帧。
-4. 可选的外部设备通道通过 [include/referee/tcp_server.hpp](include/referee/tcp_server.hpp:1) 监听配置端口，接受一条额外的 TCP 会话；当前先只负责建立连接、保持连接和记录原始输入。
-5. 所有输入字节流逐字节喂给各自的 `rm::device::Referee<revision>` 实例维护状态。
-6. `MapRobotRelay` 根据 `0x0A01 + 0x0301/0x0200(AllyRobotPosition)` 维护 `0x0305` 状态，并按 5Hz 发送最新地图数据。
-7. `RadarDecisionTree` 根据 `0x020E` 生成自主决策，由 `RadarCommandSender` 组包为 `0x0301(0x0121)`。
-8. `RefereeTxScheduler` 统一调度 `0x0301` 与 `0x0305` 的串口发送节奏。
-9. [include/referee/referee_input_loop.hpp](include/referee/referee_input_loop.hpp:58) 统一负责真实输入、文件回放、串口重连、TCP 重连、周期任务和日志指标刷新。
+4. 所有输入字节流逐字节喂给各自的 `rm::device::Referee<revision>` 实例维护状态。
+5. `MapRobotRelay` 根据 `0x0A01 + 0x0301/0x0200(AllyRobotPosition)` 维护 `0x0305` 状态，并按 5Hz 发送最新地图数据。
+6. `RadarDecisionTree` 根据 `0x020E` 生成自主决策，由 `RadarCommandSender` 组包为 `0x0301(0x0121)`。
+7. `RefereeTxScheduler` 统一调度 `0x0301` 与 `0x0305` 的串口发送节奏。
+8. [include/referee/referee_input_loop.hpp](include/referee/referee_input_loop.hpp:58) 统一负责真实输入、文件回放、串口重连、TCP 重连、周期任务和日志指标刷新。
 
 ## 关键模块
 
@@ -43,8 +42,6 @@
   - 裁判系统串口读写
 - [include/referee/tcp_client.hpp](include/referee/tcp_client.hpp:46)
   - `8001/8002/8003` 非阻塞 TCP 客户端
-- [include/referee/tcp_server.hpp](include/referee/tcp_server.hpp:1)
-  - 可选外部设备 TCP server，负责监听、accept 与保活
 - [include/referee/map_robot_relay.hpp](include/referee/map_robot_relay.hpp:254)
   - `0x0A01 + 0x0301/0x0200(AllyRobotPosition) -> 0x0305` 状态维护、过期处理、发送日志
 - [include/referee/radar_decision_tree.hpp](include/referee/radar_decision_tree.hpp:45)
@@ -91,16 +88,14 @@
   - `8001/8002/8003` 的对端服务端地址
 - `kTcpLocalBindAddress`
   - 本机绑定地址，留空表示让系统自动选路由出口
-- `kExternalTcpServerEnabled` / `kExternalTcpServerBindAddress` / `kExternalTcpServerPort`
-  - 额外 server 通道是否启用、监听地址和端口
 - `kInfoWaveTcpServerPort` / `kEnemyLevel1KeyTcpServerPort` / `kEnemyLevel2KeyTcpServerPort`
   - 三条 TCP 客户端链路端口
 - `kSerialReconnectIntervalMs` / `kTcpReconnectIntervalMs`
   - 自动重连周期
-- `kInfoWaveTcpIdleTimeoutMs` / `kEnemyKeyTcpIdleTimeoutMs` / `kExternalTcpServerIdleTimeoutMs`
+- `kInfoWaveTcpIdleTimeoutMs` / `kEnemyKeyTcpIdleTimeoutMs`
   - TCP 空闲断开策略
 
-当前主接收链路中的 `8001/8002/8003` 仍是 TCP client-only；同时项目新增了一条可选的外部设备 server 通道，不影响原有三条输入链路角色。
+当前主接收链路中的 `8001/8002/8003` 均为 TCP client-only。
 
 ## 输入模式
 
@@ -245,8 +240,6 @@ quit
 - `main/tcp_client_state.log`
 - `main/0x0305_map_robot_data.log`
 - `main/0x0305_map_robot_data_skipped.log`
-- `raw/tcp_external_device_rx.bin`
-
 当前代码不再创建 `latest/` 快照目录，所有证据链都保留在当次运行目录中。
 
 `kMatch` 模式下不会保留 `runtime_metrics.log`、结构化发送日志和决策日志，只保留 `raw/*.bin` 与通信状态日志。

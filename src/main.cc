@@ -14,7 +14,6 @@
 #include "include/config/config.hpp"
 #include "include/log/referee_main_log.hpp"
 #include "include/referee/double_debuff_fallback.hpp"
-#include "include/referee/external_server_sender.hpp"
 #include "include/referee/map_robot_relay.hpp"
 #include "include/referee/replay_input_source.hpp"
 #include "include/referee/radar_decision_tree.hpp"
@@ -24,7 +23,6 @@
 #include "include/referee/serial_port.hpp"
 #include "include/referee/tcp_client.hpp"
 #include "include/referee/tcp_connection_log.hpp"
-#include "include/referee/tcp_server.hpp"
 #include "include/referee/ui_user1_sender.hpp"
 #include "librm/device/referee/referee.hpp"
 
@@ -81,13 +79,6 @@ int main() {
                                                  radar::config::kEnemyLevel2KeyTcpServerPort, true, tcp_log,
                                                  &std::cerr);
     }
-    std::optional<radar::referee::TcpServer> external_tcp_server;
-    if (radar::config::kExternalTcpServerEnabled) {
-      external_tcp_server.emplace();
-      radar::referee::TryOpenConfiguredTcpServer(&*external_tcp_server, "external_tcp_server",
-                                                 radar::config::kExternalTcpServerPort, tcp_log, &std::cerr);
-    }
-
     // 创建常规链路、信息波链路与发送链路各自的状态维护对象。
     Referee serial_referee;
     Referee info_wave_referee;
@@ -98,8 +89,6 @@ int main() {
     radar::referee::RadarDecisionTree<kRevision> radar_decision_tree(radar_command_sender);
     radar::referee::DoubleDebuffFallback<kRevision> double_debuff_fallback(radar_command_sender, run_log_root);
     radar::referee::MapRobotRelay<kRevision> relay(tx_scheduler, run_log_root);
-    radar::referee::ExternalServerSender external_server_sender(external_tcp_server ? &*external_tcp_server : nullptr,
-                                                                run_log_root);
     radar::referee::EnemyKeyReceiver<kRevision> enemy_level1_key_receiver(
         "enemy_level1_key", radar::config::kEnemyLevel1KeyTcpServerPort, radar_command_sender, run_log_root);
     radar::referee::EnemyKeyReceiver<kRevision> enemy_level2_key_receiver(
@@ -155,15 +144,8 @@ int main() {
           << "\","
           << "\"enemy_level2_key_replay_file\":\"" << radar::config::kEnemyLevel2KeyReplayFile << "\","
           << "\"enemy_level2_key_replay_rate_hz\":" << radar::config::kEnemyLevel2KeyReplayRateHz << ','
-          << "\"tcp_role\":\""
-          << (radar::config::kExternalTcpServerEnabled ? "mixed" : "client")
-          << "\","
           << "\"tcp_server_address\":\"" << radar::config::kTcpServerAddress << "\","
           << "\"tcp_local_bind_address\":\"" << radar::config::kTcpLocalBindAddress << "\","
-          << "\"external_tcp_server_enabled\":" << (radar::config::kExternalTcpServerEnabled ? "true" : "false")
-          << ','
-          << "\"external_tcp_server_bind_address\":\"" << radar::config::kExternalTcpServerBindAddress << "\","
-          << "\"external_tcp_server_port\":" << radar::config::kExternalTcpServerPort << ','
           << "\"info_wave_replay_file\":\"" << radar::config::kInfoWaveReplayFile << "\","
           << "\"info_wave_replay_rate_hz\":" << radar::config::kInfoWaveReplayRateHz << "}";
       input_mode_log.Append("main/input_mode.log", oss.str(), radar::log::LogPriority::kCriticalDecision);
@@ -176,7 +158,6 @@ int main() {
       relay.ProcessSerial(cmd_id, seq, serial_referee);
       radar_decision_tree.ProcessSerial(cmd_id, seq, serial_referee);
       double_debuff_fallback.ProcessSerial(cmd_id, serial_referee.data());
-      external_server_sender.ProcessSerial(cmd_id, seq, serial_referee.data());
     });
     // 信息波回调：维护 `0x0A01~0x0A06` 状态，并结合串口 `0x0301/0x0200` 驱动 `0x0305` 组包链路。
     info_wave_referee.AttachCallback([&](rm::u16 cmd_id, rm::u8 seq) {
@@ -194,10 +175,8 @@ int main() {
                                                    enemy_level2_key_replay_source ? &*enemy_level2_key_replay_source
                                                                                   : nullptr,
                                                    enemy_level1_key_receiver, enemy_level2_key_receiver,
-                                                   radar_command_sender, ui_user1_sender, relay, external_server_sender,
-                                                   double_debuff_fallback, tx_scheduler,
-                                                   raw_log_store, external_tcp_server ? &*external_tcp_server : nullptr,
-                                                   g_running);
+                                                   radar_command_sender, ui_user1_sender, relay, double_debuff_fallback,
+                                                   tx_scheduler, raw_log_store, g_running);
 
     return 0;
   } catch (const std::exception &error) {
